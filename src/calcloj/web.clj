@@ -33,9 +33,13 @@
       (double? v)       (str v)
       :else             (str v))))
 
+(defn- cell-id
+  "Selector-safe element id for a cell (no ':')."
+  [a] (str "c_" (str/replace a ":" "_")))
+
 (defn- cell-input [sh a]
   [:input
-   {:id (str "in-" a)
+   {:id (cell-id a)
     :value (display sh a)
     :data-on:change
     (format "$cell='%s'; $v=el.value; @post('/cell')" a)
@@ -75,12 +79,16 @@
 
 ;; --- SSE ----------------------------------------------------------------
 
-(defn- patch-grid-event [sh]
-  ;; single-shot SSE: replace grid body. elements must be ONE line.
+(defn- patch-cells-event
+  "Patch ONLY the given cells, matched by id (mode outer). No whole-grid
+   re-render — this is what scales to a 10000x10000 sheet (Step 3)."
+  [sh addrs]
   (str "event: datastar-patch-elements\n"
-       "data: mode inner\n"
-       "data: selector #grid\n"
-       "data: elements " (str (grid-rows sh)) "\n\n"))
+       "data: mode outer\n"
+       (->> addrs
+            (map (fn [a] (str "data: elements " (str (h/html (cell-input sh a))) "\n")))
+            (apply str))
+       "\n"))
 
 (defn- sse-response [body]
   {:status 200
@@ -94,13 +102,20 @@
   (when-let [b (:body req)]
     (json/read-value (slurp b) json/keyword-keys-object-mapper)))
 
+(def ^:private edit-lock (Object.))
+
 (defn- handle-cell [req]
   (let [sh (the-sheet)
         {:keys [cell v]} (read-json req)]
-    (when (addr/valid? cell)
-      (sheet/set-cell! sh cell (str v))
-      (sheet/settle! sh))
-    (sse-response (patch-grid-event sh))))
+    (if (addr/valid? cell)
+      ;; One sheet = one execution context with mutable graph state. Serialize
+      ;; edits so concurrent requests don't race set-cell!/settle/recompute.
+      (locking edit-lock
+        (sheet/set-cell! sh cell (str v))
+        (sheet/settle! sh)
+        (let [affected (cons cell (sort (sheet/dependents* sh cell)))]
+          (sse-response (patch-cells-event sh affected))))
+      (sse-response "\n"))))
 
 (defn- app [req]
   (case [(:request-method req) (:uri req)]

@@ -1,20 +1,14 @@
 (ns calcloj.sheet
-  "Step 1 — cell registry over a Spindel execution context.
+  "Cell registry over a Spindel execution context — uniform Spin model.
 
-   Two layers:
-   - reactive : registry atom {addr -> SignalRef|Spin}, in ctx metadata so
-                compiled formulas resolve cells via calcloj.runtime/lookup.
-   - document : meta atom {addr -> {:raw :kind :deps}} — source of truth for
-                raw input / formatting / styles / serialization (later steps).
+   Per sheet (all in ctx metadata so compiled bodies resolve cells):
+   - :registry {addr -> public Spin}      every non-blank cell (lookup / await)
+   - :vals     {addr -> SignalRef}         editable input of literal cells
+   - :meta     {addr -> {:raw :kind :deps}} document layer (raw text, etc.)
 
-   Cell kinds:
-   - :literal  -> SignalRef holding a number or string (user-editable)
-   - :formula  -> Spin compiled from an `=`-prefixed expression
-   - blank     -> absent from both maps (sparse)
-
-   NOTE (Step 4): formula refs currently `track` their targets, and track only
-   handles SignalRef. So formulas may reference literal cells today; formula->
-   formula needs `await`-based refs — deferred."
+   Literal cell  = SignalRef (value) + a wrapper Spin (deref (track sig)).
+   Formula cell  = Spin compiled from an `=`-expression; refs other cells via
+                   `await`, so formula->formula works."
   (:require [clojure.string :as str]
             [calcloj.formula :as formula]
             [org.replikativ.spindel.signal :as sig]
@@ -25,67 +19,101 @@
 
 (defn create-sheet []
   (let [registry (atom {})
+        vals     (atom {})
         meta     (atom {})
-        rt       (ctx/create-execution-context {:metadata {:registry registry}})]
-    {:rt rt :registry registry :meta meta}))
-
-(defn- signal? [x] (instance? org.replikativ.spindel.signal.SignalRef x))
-(defn- spin?   [x] (instance? org.replikativ.spindel.spin.core.Spin x))
+        rt       (ctx/create-execution-context
+                  {:metadata {:registry registry :vals vals}})]
+    {:rt rt :registry registry :vals vals :meta meta}))
 
 (defn- classify [raw]
   (let [t (some-> raw str/trim)]
-    (cond (or (nil? t) (= "" t))      :blank
-          (str/starts-with? t "=")    :formula
-          :else                       :literal)))
+    (cond (or (nil? t) (= "" t))   :blank
+          (str/starts-with? t "=") :formula
+          :else                    :literal)))
 
-(defn- parse-literal
-  "Number if it parses, else the trimmed string."
-  [raw]
+(defn- parse-literal [raw]
   (let [t (str/trim raw)]
     (cond
       (re-matches #"[-+]?\d+" t)               (Long/parseLong t)
       (re-matches #"[-+]?\d*\.\d+([eE]\d+)?" t) (Double/parseDouble t)
       :else                                    t)))
 
-(defn set-cell!
-  "Set cell `addr` from raw user input. Reclassifies (literal/formula/blank),
-   cleaning up any prior spin. Returns the sheet."
-  [{:keys [rt registry meta] :as sheet} addr raw]
-  (binding [ec/*execution-context* rt]
-    ;; tear down prior spin (formula) if replacing
-    (when-let [old (get @registry addr)]
-      (when (spin? old) (spin-core/cleanup-spin! old)))
+(defn- rdeps
+  "Addresses whose formula references `addr`."
+  [meta addr]
+  (keep (fn [[a m]] (when (contains? (:deps m) addr) a)) @meta))
+
+(defn- write-cell!
+  "Local update of one cell. Returns true if addr's PUBLIC spin object was
+   created/replaced/removed (structural change -> dependents must rebuild)."
+  [{:keys [registry vals meta]} addr raw]
+  (let [prev-kind (get-in @meta [addr :kind])
+        old-spin  (get @registry addr)]
     (case (classify raw)
       :blank
-      (do (swap! registry dissoc addr)
-          (swap! meta dissoc addr))
+      (do (when old-spin (spin-core/cleanup-spin! old-spin))
+          (swap! registry dissoc addr)
+          (swap! vals dissoc addr)
+          (swap! meta dissoc addr)
+          true)
 
       :literal
-      (let [v   (parse-literal raw)
-            cur (get @registry addr)]
-        (if (signal? cur)
-          (reset! cur v)                       ; reuse stable signal -> propagates
-          (let [s (sig/->SignalRef addr v)]
-            (sig/ensure-signal-initialized! s)
-            (swap! registry assoc addr s)))
-        (swap! meta assoc addr {:raw raw :kind :literal}))
+      (let [v (parse-literal raw)]
+        (if-let [vs (get @vals addr)]
+          (reset! vs v)                              ; value-only: propagates
+          (let [vs (sig/->SignalRef (str "val:" addr) v)]
+            (sig/ensure-signal-initialized! vs)
+            (swap! vals assoc addr vs)))
+        (swap! meta assoc addr {:raw raw :kind :literal})
+        (if (= prev-kind :literal)
+          false                                       ; spin unchanged
+          (do (when old-spin (spin-core/cleanup-spin! old-spin))
+              (swap! registry assoc addr (formula/compile-literal-wrapper addr))
+              true)))
 
       :formula
       (let [{:keys [form deps]} (formula/parse (subs (str/trim raw) 1))
             sp (formula/compile form)]
+        (when old-spin (spin-core/cleanup-spin! old-spin))
         (swap! registry assoc addr sp)
-        (swap! meta assoc addr {:raw raw :kind :formula :deps deps}))))
+        (swap! meta assoc addr {:raw raw :kind :formula :deps deps})
+        true))))
+
+(defn set-cell!
+  "Set cell `addr` from raw input. When a cell's public spin is replaced
+   (structural change), transitively rebuilds dependents so they re-capture
+   the new node. Value-only edits skip the rebuild (signal propagates). The
+   visited set guards against cycles. Returns the sheet."
+  [{:keys [rt meta] :as sheet} addr raw]
+  (binding [ec/*execution-context* rt]
+    (let [visited (volatile! #{})]
+      (letfn [(go [a r]
+                (when-not (contains? @visited a)
+                  (vswap! visited conj a)
+                  (when (write-cell! sheet a r)
+                    (doseq [d (rdeps meta a)]
+                      (go d (get-in @meta [d :raw]))))))]
+        (go addr raw))))
   sheet)
 
-(defn settle!
-  "Wait for the executor to finish propagating (drain barrier — waits, does
-   not pump). Call before reading a viewport for a consistent snapshot."
-  [{:keys [rt]}]
+(defn dependents*
+  "Transitive set of addresses whose formulas reference `addr` (reverse-dep
+   closure), excluding `addr` itself. These are the cells whose value may
+   change when `addr` changes — the set to re-render."
+  [{:keys [meta]} addr]
+  (let [m @meta]
+    (loop [seen #{} frontier [addr]]
+      (if-let [a (first frontier)]
+        (let [ds  (keep (fn [[x mm]] (when (contains? (:deps mm) a) x)) m)
+              new (remove #(or (= % addr) (contains? seen %)) ds)]
+          (recur (into seen new) (into (subvec (vec frontier) 1) new)))
+        seen))))
+
+(defn settle! [{:keys [rt]}]
   (simple/await-drain-complete! rt :timeout-ms 5000))
 
 (defn value
-  "Current computed value of `addr`, or nil if blank. Errors are returned as
-   {:error msg} so the renderer can show #ERR."
+  "Current computed value of `addr`, or nil if blank. Errors -> {:error msg}."
   [{:keys [rt registry]} addr]
   (when-let [ref (get @registry addr)]
     (binding [ec/*execution-context* rt]

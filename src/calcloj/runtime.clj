@@ -1,20 +1,25 @@
 (ns calcloj.runtime
-  "Runtime support referenced by compiled formula bodies.
+  "Runtime support referenced by compiled cell bodies, resolving against the
+   CURRENT execution context's metadata (works on executor threads).
 
-   `lookup` resolves a cell address to its SignalRef/Spin via the CURRENT
-   execution context's metadata (not a dynamic binding) — so it works on the
-   executor threads where spins recompute, and is naturally per-sheet/tenant."
+   Uniform cell model:
+   - every cell has a PUBLIC Spin in :registry  -> `lookup`     (used by `await`)
+   - literal cells also have an editable SignalRef in :vals -> `lookup-val`
+     (used by the literal wrapper spin's `track`)."
   (:require [org.replikativ.spindel.engine.core :as ec]
             [org.replikativ.spindel.engine.context :as ctx]))
 
-(defn registry
-  "The {addr -> ref} atom for the current execution context."
-  []
-  (-> (ec/current-execution-context) ctx/get-metadata :registry))
+(defn- meta-get [k]
+  (-> (ec/current-execution-context) ctx/get-metadata (get k)))
 
 (defn lookup
-  "Address -> SignalRef|Spin for the current sheet. Throws if absent."
+  "Address -> public Spin for the current sheet."
   [addr]
-  (let [reg (registry)]
-    (or (get @reg addr)
-        (throw (ex-info "unknown cell" {:addr addr})))))
+  (or (get @(meta-get :registry) addr)
+      (throw (ex-info "unknown cell" {:addr addr}))))
+
+(defn lookup-val
+  "Address -> editable SignalRef (literal cells only)."
+  [addr]
+  (or (get @(meta-get :vals) addr)
+      (throw (ex-info "no value signal" {:addr addr}))))
