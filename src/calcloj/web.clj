@@ -12,6 +12,7 @@
 
    Run:  clj -M:web   then open http://localhost:8080"
   (:require [clojure.string :as str]
+            [clojure.java.io :as io]
             [org.httpkit.server :as http]
             [hiccup2.core :as h]
             [jsonista.core :as json]
@@ -124,7 +125,7 @@
              "evt.target.classList.contains('cell') && (evt.target.value=evt.target.dataset.val)"
              :data-on:change
              (str "evt.target.classList.contains('cell') && "
-                  "($cell=evt.target.id.slice(2), $v=evt.target.value, @post('/cell'))")}
+                  "($cell=evt.target.id.slice(2), $v=evt.target.value, $bar=$v, @post('/cell'))")}
        (h/raw (cells-html sh cis ris))]])))
 
 (defn- page [sh]
@@ -153,6 +154,7 @@
                  :data-text "$sel || '—'"}]
        [:input {:id "fbar" :data-bind:bar "" :placeholder "value or =formula"
                 :data-on:keydown "evt.key==='Enter' && ($cell=$sel, $v=$bar, @post('/cell'))"
+                :data-on:blur "$cell=$sel, $v=$bar, @post('/cell')"
                 :style (str "flex:1;font:13px monospace;padding:5px 8px;border:1px solid #bbb;"
                             "border-radius:4px;")}]]
       ;; scroll viewport
@@ -245,7 +247,7 @@
     [:get "/"]            (do (reset! view* {:r0 0 :c0 0})  ; browser scroll starts at 0
                               {:status 200 :headers {"Content-Type" "text/html"}
                                :body (page (the-sheet))})
-    [:get "/datastar.js"] (if-let [r (clojure.java.io/resource "public/datastar.js")]
+    [:get "/datastar.js"] (if-let [r (io/resource "public/datastar.js")]
                             {:status 200 :headers {"Content-Type" "text/javascript"}
                              :body (slurp r)}
                             {:status 404 :body "no datastar"})
