@@ -1,4 +1,4 @@
-# calcloj — technical spec
+# Clorax — technical spec
 
 A spreadsheet whose **reactive core is Spindel** (signals/spins) and whose **UI
 is Datastar** (server-rendered HTML patched over SSE). Formulas are sandboxed
@@ -16,7 +16,7 @@ on load. Multiple clients edit one sheet live.
 - Vendored client: `resources/public/datastar.js` (Datastar **1.0.0**),
   `resources/public/app.js` (our client engine).
 
-## Namespaces (`src/uno/michelada/calcloj/`, ns root `uno.michelada.calcloj`)
+## Namespaces (`src/uno/michelada/clorax/`, ns root `uno.michelada.clorax`)
 
 | ns | role |
 |----|------|
@@ -84,7 +84,7 @@ Pipeline (`formula`):
    nested `fn` is **not** CPS-transformed (so ranges must expand statically at
    read time, which they do), and (b) **awaiting the same cell twice glitches**
    on recompute.
-4. `compile`: `eval (spin lifted)` in the `uno.michelada.calcloj.formula` namespace so
+4. `compile`: `eval (spin lifted)` in the `uno.michelada.clorax.formula` namespace so
    `spin`/`track`/`await` resolve and the CPS transform sees the effects.
 
 Sandbox = EDN reader + symbol whitelist + a fixed `eval` namespace. (SCI was
@@ -186,17 +186,17 @@ verified manually + via curl (see CLAUDE.md); no web unit tests yet.
 
 ## Build & release
 
-calcloj is a **runnable web app**, not a library — it is **not** published to
+Clorax is a **runnable web app**, not a library — it is **not** published to
 Clojars. The distributable is a standalone uberjar attached to a GitHub Release.
 
 - `build.clj` (alias `:build`, tools.build) AOT-compiles the gen-class main
-  (`uno.michelada.calcloj.web`) and packages `target/calcloj-<version>.jar`.
-  Run: `clojure -T:build uber` → `java -jar target/calcloj-<version>.jar`
+  (`uno.michelada.clorax.web`) and packages `target/clorax-<version>.jar`.
+  Run: `clojure -T:build uber` → `java -jar target/clorax-<version>.jar`
   (serves on `:8080`). Version comes from `$VERSION`, else `0.1.<git-revs>-dev`.
 - `.github/workflows/release.yml` triggers on a `v*` tag: test → build uberjar
   (VERSION = tag without the `v`) → publish a GitHub Release with the jar.
   Uses the auto `GITHUB_TOKEN`; no Clojars token needed.
-- Coordinate `uno.michelada/calcloj`; repo lives under the `michelada-uno` org.
+- Coordinate `uno.michelada/clorax`; repo lives under the `michelada-uno` org.
 
 To cut a release: `git tag v1.2.3 && git push origin v1.2.3`.
 

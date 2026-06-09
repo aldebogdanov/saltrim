@@ -1,4 +1,4 @@
-(ns uno.michelada.calcloj.spike
+(ns uno.michelada.clorax.spike
   "Step 0 spike — reactive cell lifecycle on real Spindel.
 
    Findings that shape the architecture:

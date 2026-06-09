@@ -1,16 +1,16 @@
 (ns build
-  "Build a runnable uberjar for calcloj.
+  "Build a runnable uberjar for Clorax.
 
    Usage:
-     clojure -T:build uber            ; -> target/calcloj-<version>.jar
+     clojure -T:build uber            ; -> target/clorax-<version>.jar
      clojure -T:build uber :version '\"1.2.3\"'
    The CI release workflow passes the git tag as VERSION (see
    .github/workflows/release.yml). Run it with:
-     java -jar target/calcloj-<version>.jar"
+     java -jar target/clorax-<version>.jar"
   (:require [clojure.tools.build.api :as b]))
 
-(def lib 'uno.michelada/calcloj)
-(def main 'uno.michelada.calcloj.web)
+(def lib 'uno.michelada/clorax)
+(def main 'uno.michelada.clorax.web)
 
 (defn- version []
   ;; CI sets VERSION from the pushed tag (vX.Y.Z -> X.Y.Z); locally we derive a
@@ -24,7 +24,7 @@
            :version   v
            :basis     (b/create-basis {:project "deps.edn"})
            :class-dir "target/classes"
-           :uber-file (format "target/calcloj-%s.jar" v))))
+           :uber-file (format "target/clorax-%s.jar" v))))
 
 (defn clean [_] (b/delete {:path "target"}))
 

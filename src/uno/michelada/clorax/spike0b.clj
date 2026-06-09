@@ -1,10 +1,10 @@
-(ns uno.michelada.calcloj.spike0b
+(ns uno.michelada.clorax.spike0b
   "Step 0b — runtime formula STRING -> Spin (real spin macro via eval),
    wired to signals by address, recomputing on change, sandboxed by whitelist.
 
    Run:  clj -M:spike0b"
-  (:require [uno.michelada.calcloj.addr :as addr]
-            [uno.michelada.calcloj.formula :as formula]
+  (:require [uno.michelada.clorax.addr :as addr]
+            [uno.michelada.clorax.formula :as formula]
             [org.replikativ.spindel.signal :as sig]
             [org.replikativ.spindel.engine.core :as ec]
             [org.replikativ.spindel.engine.context :as ctx]))

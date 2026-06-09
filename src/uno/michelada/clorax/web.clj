@@ -1,4 +1,4 @@
-(ns uno.michelada.calcloj.web
+(ns uno.michelada.clorax.web
   "Windowed spreadsheet grid over the sheet engine, driven by Datastar.
 
    Viewport: a scroll container holds a full-size spacer (real scrollbar for a
@@ -16,9 +16,9 @@
             [org.httpkit.server :as http]
             [hiccup2.core :as h]
             [jsonista.core :as json]
-            [uno.michelada.calcloj.addr :as addr]
-            [uno.michelada.calcloj.sheet :as sheet]
-            [uno.michelada.calcloj.store :as store]
+            [uno.michelada.clorax.addr :as addr]
+            [uno.michelada.clorax.sheet :as sheet]
+            [uno.michelada.clorax.store :as store]
             [starfederation.datastar.clojure.api :as d*]
             [starfederation.datastar.clojure.adapter.http-kit :as hk])
   (:gen-class))
@@ -274,7 +274,7 @@
     [:html
      [:head
       [:meta {:charset "utf-8"}]
-      [:title "calcloj"]
+      [:title "Clorax"]
       [:style (h/raw (format (str "input.cell{position:absolute;width:%dpx;height:%dpx;"
                                   "box-sizing:border-box;border:1px solid #ddd;"
                                   "padding:2px 4px;font:13px monospace;}")
@@ -503,6 +503,6 @@
   (when @server* (@server*))
   (start-sweeper!)                          ; reap idle/orphan sessions
   (reset! server* (http/run-server #'app {:port (or port 8080)}))
-  (println "calcloj on http://localhost:" (or port 8080)))
+  (println "Clorax on http://localhost:" (or port 8080)))
 
 (defn -main [& _] (start!) @(promise))

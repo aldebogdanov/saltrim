@@ -1,4 +1,4 @@
-# calcloj — working instructions
+# Clorax — working instructions
 
 A simple-but-powerful spreadsheet: **Clojure** engine on **Spindel** (reactive),
 **Datastar** UI (hypermedia, SSE), file persistence, live collaboration.
@@ -45,12 +45,12 @@ clojure -X:test        # engine + addr + store suites
 clojure -M:spike       # Step-0 lifecycle spike (and :spike0b, plus spike4.clj)
 node --check resources/public/app.js
 
-clojure -T:build uber             # runnable uberjar -> target/calcloj-<v>.jar
-java -jar target/calcloj-<v>.jar  # run the built artifact (serves :8080)
+clojure -T:build uber             # runnable uberjar -> target/clorax-<v>.jar
+java -jar target/clorax-<v>.jar  # run the built artifact (serves :8080)
 ```
 
-Namespaces are rooted at `uno.michelada.calcloj.*` under
-`src/uno/michelada/calcloj/`. Coordinate `uno.michelada/calcloj`; repo lives in
+Namespaces are rooted at `uno.michelada.clorax.*` under
+`src/uno/michelada/clorax/`. Coordinate `uno.michelada/clorax`; repo lives in
 the `michelada-uno` GitHub org. **Releases are GitHub-only (no Clojars)**: push a
 `v*` tag and `.github/workflows/release.yml` tests, builds the uberjar, and
 attaches it to a GitHub Release. See SPEC.md "Build & release".
