@@ -543,22 +543,54 @@
   [req msg]
   (sse req (fn [gen] (signals! gen {:err msg}))))
 
-(declare handle-cell*)
+;; --- request gates -------------------------------------------------------
+;; Resolve identity + authorization ONCE, then hand the handler what it needs
+;; (or short-circuit with a denial). These replace the gate boilerplate that
+;; otherwise repeats in every handler.
 
-(defn- handle-cell [req]
-  (let [uid (auth/req->uid req)
-        {:keys [cell v sid] :as sig} (read-signals req)
+(defn- with-access
+  "POST handlers: resolve the signed-in user and sheet access from the request
+   signals. On success open the one-shot SSE response and call
+   (f uid sheet-id rec sig gen); otherwise raise the access/auth error toast."
+  [req f]
+  (let [uid      (auth/req->uid req)
+        sig      (read-signals req)
         sheet-id (:sheet sig)
-        rec  (accessible-rec uid sheet-id)]
+        rec      (accessible-rec uid sheet-id)]
     (if-not rec
       (deny req (if uid "no access to this sheet" "not signed in"))
-      (handle-cell* req uid sheet-id (:sh rec) cell v sid))))
+      (sse req (fn [gen] (f uid sheet-id rec sig gen))))))
 
-(defn- handle-cell* [req uid sheet-id sh cell v sid]
-  (let [_    (ensure-session! sid sheet-id uid) ; lazy re-register + keep alive
-        view (session-view sid)]
-    (sse req
-      (fn [gen]
+(defn- with-owner
+  "Like `with-access`, but requires the user to OWN the (already-loaded) sheet —
+   for owner-only actions such as sharing."
+  [req f]
+  (let [uid      (auth/req->uid req)
+        sig      (read-signals req)
+        sheet-id (:sheet sig)
+        rec      (when (store/valid-id? (str sheet-id)) (@sheets* sheet-id))]
+    (if-not (and uid rec (= uid (:owner rec)))
+      (deny req "only the owner can do this")
+      (sse req (fn [gen] (f uid sheet-id rec sig gen))))))
+
+(defn- with-stream-access
+  "The persistent /stream GET: identity + sheet come from query params (not
+   signals). On success call (f uid sid sheet-id) — which returns its OWN
+   long-lived SSE response; otherwise a plain 403."
+  [req f]
+  (let [uid      (auth/req->uid req)
+        sid      (qparam req "sid")
+        sheet-id (qparam req "s")]
+    (if-not (accessible-rec uid sheet-id)
+      {:status 403 :body "no access"}
+      (f uid sid sheet-id))))
+
+(defn- handle-cell [req]
+  (with-access req
+    (fn [uid sheet-id rec {:keys [cell v sid]} gen]
+      (ensure-session! sid sheet-id uid)        ; lazy re-register + keep alive
+      (let [sh   (:sh rec)
+            view (session-view sid)]
         (when (addr/valid? cell)
           (locking edit-lock
             (try
@@ -566,7 +598,7 @@
                 (throw (ex-info "locked by another collaborator" {:locked cell})))
               (sheet/set-cell! sh cell (str v))
               (sheet/settle! sh)
-              (save-rec! sheet-id)                    ; autosave (source + meta)
+              (save-rec! sheet-id)              ; autosave (source + meta)
               (let [affected (cons cell (sort (sheet/dependents* sh cell)))
                     visible  (filter #(in-window? view %) affected)   ; on-screen for THIS session
                     errs (keep (fn [a]
@@ -582,23 +614,13 @@
               (catch Throwable e
                 (signals! gen {:err (str cell ": " (pretty-err (.getMessage e)))})))))))))
 
-(declare handle-view*)
-
 (defn- handle-view [req]
-  (let [uid (auth/req->uid req)
-        {:keys [r0 c0 sid] :as sig} (read-signals req)
-        sheet-id (:sheet sig)
-        rec  (accessible-rec uid sheet-id)]
-    (if-not rec
-      (deny req (if uid "no access to this sheet" "not signed in"))
-      (handle-view* req uid sheet-id (:sh rec) r0 c0 sid))))
-
-(defn- handle-view* [req uid sheet-id sh r0 c0 sid]
-  (let [view {:r0 (max 0 (long (or r0 0))) :c0 (max 0 (long (or c0 0)))}]
-    (ensure-session! sid sheet-id uid)        ; lazy re-register + keep alive
-    (set-session-view! sid view)
-    (sse req
-      (fn [gen]
+  (with-access req
+    (fn [uid sheet-id rec {:keys [r0 c0 sid]} gen]
+      (ensure-session! sid sheet-id uid)        ; lazy re-register + keep alive
+      (let [sh   (:sh rec)
+            view {:r0 (max 0 (long (or r0 0))) :c0 (max 0 (long (or c0 0)))}]
+        (set-session-view! sid view)
         ;; logical scroll: always cheap inner patches. The window is positioned
         ;; relative to (c0,r0); /app.js translates + sizes the scrollbars from
         ;; #meta totals (no giant spacer to resize).
@@ -615,29 +637,21 @@
   (when-let [b (:body req)]
     (json/read-value (slurp b) json/keyword-keys-object-mapper)))
 
-(declare handle-presence*)
-
 (defn- handle-presence
   "Datastar @post: signals carry {sel edit sheet sid}. Updates this session's
    cursor (:cursor) and editing cell (:editing), patches THIS session's own
    #self overlay back, and re-broadcasts #peers to everyone else on the sheet."
   [req]
-  (let [uid (auth/req->uid req)
-        {:keys [sel edit sid] :as sig} (read-signals req)
-        sheet-id (:sheet sig)]
-    (if-not (accessible-rec uid sheet-id)
-      (deny req (if uid "no access to this sheet" "not signed in"))
-      (handle-presence* req uid sheet-id sel edit sid))))
-
-(defn- handle-presence* [req uid sheet-id sel edit sid]
-  (ensure-session! sid sheet-id uid)
-  (swap! sessions* update sid assoc
-         :cursor  (when (addr/valid? sel) sel)
-         :editing (when (and edit (addr/valid? sel)) sel))
-  ;; peers' #peers via their persistent streams; this session's #self via the
-  ;; one-shot @post response below (which is what we return).
-  (broadcast-presence! sheet-id)
-  (sse req (fn [gen] (patch-inner! gen "#self" (self-html sid sheet-id)))))
+  (with-access req
+    (fn [uid sheet-id _rec {:keys [sel edit sid]} gen]
+      (ensure-session! sid sheet-id uid)
+      (swap! sessions* update sid assoc
+             :cursor  (when (addr/valid? sel) sel)
+             :editing (when (and edit (addr/valid? sel)) sel))
+      ;; peers' #peers via their persistent streams; this session's #self via
+      ;; the one-shot @post response (the gen this gate opened).
+      (broadcast-presence! sheet-id)
+      (patch-inner! gen "#self" (self-html sid sheet-id)))))
 
 ;; Session lifecycle. The persistent /stream registers the session and stores
 ;; its push generator (server -> client collaboration channel). Cleanup never
@@ -650,11 +664,8 @@
   "Persistent per-session SSE. Registers the session and stores its generator so
    edits elsewhere can be pushed here. Stays open — never close-sse! on open."
   [req]
-  (let [uid      (auth/req->uid req)
-        sid      (qparam req "sid")
-        sheet-id (qparam req "s")]
-    (if-not (accessible-rec uid sheet-id)
-      {:status 403 :body "no access"}
+  (with-stream-access req
+    (fn [uid sid sheet-id]
       (hk/->sse-response req
         {hk/on-open
          (fn [gen]
@@ -706,16 +717,12 @@
 (defn- handle-share
   "Owner-only toggle of a sheet's :public flag; patches #sharebar back."
   [req]
-  (let [uid (auth/req->uid req)
-        {:keys [sid] :as sig} (read-signals req)
-        sheet-id (:sheet sig)
-        rec (when (store/valid-id? (str sheet-id)) (@sheets* sheet-id))]
-    (if-not (and uid rec (= uid (:owner rec)))
-      (deny req "only the owner can change sharing")
-      (do (ensure-session! sid sheet-id uid)
-          (swap! sheets* update-in [sheet-id :public] not)
-          (save-rec! sheet-id)
-          (sse req (fn [gen] (d*/patch-elements! gen (share-html uid sheet-id))))))))
+  (with-owner req
+    (fn [uid sheet-id _rec {:keys [sid]} gen]
+      (ensure-session! sid sheet-id uid)
+      (swap! sheets* update-in [sheet-id :public] not)
+      (save-rec! sheet-id)
+      (d*/patch-elements! gen (share-html uid sheet-id)))))
 
 ;; --- auth routes (login page, OAuth redirects, logout) -------------------
 
