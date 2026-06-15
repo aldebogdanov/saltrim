@@ -835,14 +835,13 @@
    prod)."
   [uid sheet-id token]
   (let [owner     (owner-of sheet-id)
-        [_ sname] (store/split-id sheet-id)
         owner?    (= uid owner)
         link      (db/link-grant sheet-id)             ; {:token :level} | nil
         lvl       (:level link)
         grants    (->> (db/sheet-grants sheet-id)
                        (filter #(= :user (:kind %)))
                        (sort-by :grantee))
-        url       (str (auth/base-url) "/?u=" owner "&s=" sname "&t=" (:token link))
+        url       (str (auth/base-url) "/?t=" (:token link))   ; self-contained capability
         badge     (cond (= lvl :read-write) "🔗 link" (= lvl :read) "🔗 link" :else "🔒 private")
         add-ph    (if (auth/dev-auth?) "name to share with…" "email to share with…")
         row-style "display:flex;align-items:center;gap:.4rem;margin-bottom:.45rem;"]
@@ -1029,11 +1028,18 @@
   (let [uid (auth/req->uid req)]
     (if-not uid
       (redirect "/login")
-      (let [sname (let [s (qparam req "s")] (if (store/valid-name? s) s "default"))
-            owner (let [o (qparam req "u")] (when (and o (re-matches auth/uid-re o)) o))
-            token (not-empty (qparam req "t"))
-            id    (store/storage-id (or owner uid) sname)
-            rec   (when id (accessible-rec uid id token))]
+      (let [token       (not-empty (qparam req "t"))
+            ;; a capability link is self-contained: /?t=<token> resolves its own
+            ;; sheet (no owner/name in the URL). A present-but-unresolved token
+            ;; (bad/expired/rotated) is a dead end — deny, don't silently fall
+            ;; through to the user's own default. Otherwise route by ?u=/?s=.
+            [id sname]  (if token
+                          (when-let [tid (db/sheet-by-link-token token)]
+                            [tid (second (store/split-id tid))])
+                          (let [sname (let [s (qparam req "s")] (if (store/valid-name? s) s "default"))
+                                owner (let [o (qparam req "u")] (when (and o (re-matches auth/uid-re o)) o))]
+                            [(store/storage-id (or owner uid) sname) sname]))
+            rec         (when id (accessible-rec uid id token))]
         (if rec
           {:status 200 :headers {"Content-Type" "text/html"}
            :body (page (:sh rec) id sname uid token)}

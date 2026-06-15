@@ -288,6 +288,17 @@
                                           :share/created-at (now)}])
                      {:token tok :level level}))))
 
+(defn sheet-by-link-token
+  "The sheet-id whose capability link carries secret `token`, or nil. Lets a
+   token-only link (`/?t=…`) resolve its sheet without leaking owner/name in
+   the URL."
+  [token]
+  (when token
+    (d/q '[:find ?id . :in $ ?tok
+           :where [?s :share/grantee ?tok] [?s :share/grantee-kind :link]
+                  [?s :share/sheet ?sh] [?sh :sheet/id ?id]]
+         @(conn) token)))
+
 (defn rotate-link!
   "Mint a NEW token for the existing link grant (invalidating old links), keeping
    its level. Returns the new {:token :level}, or nil if there is no link."

@@ -78,6 +78,18 @@
     (is (nil? (db/link-grant "dev-ann__sheet")))
     (is (empty? (db/sheet-grants "dev-ann__sheet")))))
 
+(deftest sheet-by-link-token-reverse-lookup
+  (db/upsert-user! {:uid "dev-ann" :name "Ann"})
+  (db/ensure-sheet! "dev-ann__sheet" "dev-ann" "sheet")
+  (is (nil? (db/sheet-by-link-token "nope")))
+  (let [{:keys [token]} (db/set-link-level! "dev-ann__sheet" :read)]
+    (is (= "dev-ann__sheet" (db/sheet-by-link-token token))
+        "a token resolves its sheet with no owner/name in the URL")
+    (testing "rotating moves the lookup to the new token"
+      (let [{new :token} (db/rotate-link! "dev-ann__sheet")]
+        (is (nil? (db/sheet-by-link-token token)))
+        (is (= "dev-ann__sheet" (db/sheet-by-link-token new)))))))
+
 (deftest legacy-everyone-migrates-to-link
   (db/upsert-user! {:uid "dev-ann" :name "Ann"})
   (db/ensure-sheet! "dev-ann__old" "dev-ann" "old")
