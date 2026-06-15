@@ -8,7 +8,8 @@
    from the registry, no spin).
 
    Formula bar: wide input mirroring the selected cell's SOURCE (value or
-   formula). Focusing a cell sets $sel/$bar; editing the bar posts to that cell.
+   formula). It shares the `$v` signal with the floating #editor, so the two
+   stay live-synced; editing the bar posts to the selected cell.
 
    Run:  clj -M:web   then open http://localhost:8080"
   (:require [clojure.string :as str]
@@ -287,7 +288,7 @@
             ;; #self and #peers overlays. Keyboard nav + editor live in /app.js.
             :data-on:click
             (str "evt.target.classList.contains('cell') && "
-                 "($sel=evt.target.id.slice(2), $bar=(evt.target.dataset.raw||''), "
+                 "($sel=evt.target.id.slice(2), $v=(evt.target.dataset.raw||''), "
                  "$edit=false, @post('/presence'))")
             :data-on:dblclick
             "evt.target.classList.contains('cell') && startEdit(evt.target.id.slice(2))"
@@ -328,7 +329,7 @@
        ;; keydown/blur/dblclick. data-bind:v feeds the value into $v; commit posts
        ;; /cell via #celltrigger, Esc cancels.
        [:div {:id "editlayer" :style "position:absolute;left:0;top:0;will-change:transform;"}
-        [:input {:id "editor" :data-bind:v ""}]]]
+        [:input {:id "editor" :data-bind:v "" :style "display:none;"}]]]
       ;; custom scrollbars
       [:div {:id "vbar" :style (format (str "position:absolute;right:0;top:%dpx;bottom:%dpx;width:%dpx;"
                                             "background:#f0f0f0;z-index:5;") HDR BAR BAR)}
@@ -407,7 +408,7 @@
                 "border-radius:3px 3px 3px 0;white-space:nowrap;}"))]
       [:script {:type "module" :src "/datastar.js"}]
       [:script {:src "/app.js"}]]
-     [:body {:data-signals (format "{cell:'', v:'', err:'', sel:'', bar:'', edit:false, r0:0, c0:0, sheet:'%s', sid:''}" storage-id)
+     [:body {:data-signals (format "{cell:'', v:'', err:'', sel:'', edit:false, r0:0, c0:0, sheet:'%s', sid:''}" storage-id)
              :style "font-family:sans-serif;margin:0;padding:.6rem;"}
       ;; hidden input carrying the session id into $sid, and a hidden trigger
       ;; /app.js clicks to open the persistent collaboration stream via Datastar
@@ -435,10 +436,12 @@
                             "border:1px solid #bbb;border-radius:4px;")}]
        ;; editing via the formula bar still drives presence on the SELECTED cell
        ;; (so it shows the marching-ants self marker and locks it for peers).
-       [:input {:id "fbar" :data-bind:bar "" :placeholder "value or =formula"
+       ;; formula bar shares $v with the floating #editor, so the two stay live-
+       ;; synced: typing in either updates $v and the other reflects it.
+       [:input {:id "fbar" :data-bind:v "" :placeholder "value or =formula"
                 :data-on:focus "$edit=true, @post('/presence')"
-                :data-on:keydown "evt.key==='Enter' && ($cell=$sel, $v=$bar, @post('/cell'))"
-                :data-on:blur "$cell=$sel, $v=$bar, @post('/cell'), $edit=false, @post('/presence')"
+                :data-on:keydown "evt.key==='Enter' && ($cell=$sel, @post('/cell'))"
+                :data-on:blur "$cell=$sel, @post('/cell'), $edit=false, @post('/presence')"
                 :style (str "flex:1;font:13px monospace;padding:5px 8px;border:1px solid #bbb;"
                             "border-radius:4px;")}]
        ;; sharing toggle / badge (patched back by POST /share)
