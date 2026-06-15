@@ -65,38 +65,39 @@
 
 ;; --- state --------------------------------------------------------------
 
-;; storage-id -> {:sh sheet :owner uid|nil :public bool} (lazy: load / create)
+;; storage-id -> {:sh sheet :owner uid|nil} (lazy: load / create)
 (defonce ^:private sheets* (atom {}))
 
 (defn- sheet-rec
   "The loaded record for a storage id; loads from disk lazily, else creates a
-   fresh private sheet owned by `owner`. Registers the sheet in the DB and, on
-   its first registration, migrates the file's legacy :public flag into an
-   :everyone grant (one-shot). The cached :public is thereafter read from the DB
-   (the ACL is the source of truth)."
+   fresh private sheet owned by `owner`. Registers the sheet in the DB. On its
+   first registration the file's legacy :public flag becomes a capability link;
+   any pre-link :everyone grant is upgraded to a link too (one-shot)."
   [id owner]
   (or (@sheets* id)
       (let [loaded   (store/load-record id)
-            rec      (or loaded {:sh (sheet/create-sheet) :owner owner :public false})
+            rec      (or loaded {:sh (sheet/create-sheet) :owner owner})
             [o n]    (store/split-id id)
             owner    (or (:owner rec) o)
             new?     (db/ensure-sheet! id owner n)]
-        (when (and new? (:public rec)) (db/set-public! id :read-write))
-        (let [rec (assoc rec :owner owner :public (db/public? id))]
+        (when (and new? (:public rec)) (db/set-link-level! id :read-write))
+        (db/migrate-everyone->link! id)         ; upgrade legacy public grants
+        (let [rec (-> rec (dissoc :public) (assoc :owner owner))]
           (swap! sheets* assoc id rec)
           rec))))
 
 (defn- save-rec!
   "Persist a loaded sheet together with its ownership meta."
   [id]
-  (when-let [{:keys [sh owner public]} (@sheets* id)]
-    (store/save! id sh {:owner owner :public public})))
+  (when-let [{:keys [sh owner]} (@sheets* id)]
+    (store/save! id sh {:owner owner})))
 
 (defn- accessible-rec
-  "The record for storage id IF `uid` may access it: owners reach (and auto-
-   create) their own sheets; anyone signed-in reaches a foreign sheet that
-   exists and is :public. Nil = denied/invalid."
-  [uid id]
+  "The record for storage id IF `uid` (carrying optional link `token`) may
+   access it: owners reach (and auto-create) their own sheets; anyone signed-in
+   reaches a foreign sheet they were granted, or whose link token they hold.
+   Nil = denied/invalid."
+  [uid id token]
   (when (and uid (store/valid-id? id))
     (let [[owner _] (store/split-id id)]
       (cond
@@ -104,7 +105,7 @@
         (= owner uid) (sheet-rec id uid)
         :else (when (or (@sheets* id) (store/exists? id))
                 (let [rec (sheet-rec id owner)]
-                  (when (db/access-level uid id) rec)))))))
+                  (when (db/access-level uid id token) rec)))))))
 
 ;; Sessions: one per client. Hold the sheet id + per-session viewport (view/dims)
 ;; so concurrent clients on the same sheet keep independent scroll. Each carries
@@ -152,12 +153,12 @@
       (sheet/close! sh)
       (swap! sheets* dissoc sheet-id))))
 
-(defn- register-session! [sid sheet-id uid]
+(defn- register-session! [sid sheet-id uid token]
   (let [[owner _] (store/split-id sheet-id)]
     (sheet-rec sheet-id (or owner uid)))  ; acquire (load) the sheet
   (swap! sessions* assoc sid {:sheet sheet-id :view {:r0 0 :c0 0}
                               :dims nil :last-seen (now)
-                              :uid uid
+                              :uid uid :token token
                               :uname (or (:name (auth/user-info uid)) uid)
                               :color (color-for sid) :cursor nil :editing nil}))
 
@@ -167,12 +168,15 @@
   "Lazily (re)register a session for an active request, then stamp it alive. A
    client whose session was swept (crash/sleep TTL) transparently comes back.
    A sid registered under a DIFFERENT user is re-registered for the current
-   one (a sid is client-generated — never trust it to carry identity)."
-  [sid sheet-id uid]
+   one (a sid is client-generated — never trust it to carry identity). The link
+   `token` (if any) is remembered so a later link rotate/downgrade can re-check
+   this session's access."
+  [sid sheet-id uid & [token]]
   (when (and sid (re-matches sid-re (str sid)))
     (let [s (@sessions* sid)]
-      (when (or (nil? s) (not= uid (:uid s)))
-        (register-session! sid sheet-id uid)))
+      (if (or (nil? s) (not= uid (:uid s)))
+        (register-session! sid sheet-id uid token)
+        (when token (swap! sessions* assoc-in [sid :token] token))))
     (touch! sid)))
 
 (declare close-gen! broadcast-presence!)
@@ -376,7 +380,7 @@
           [:option {:value (str "u=" o "&s=" nm) :selected (= sheet-id storage-id)}
            (str icon " " (if (str/blank? name) nm name))])])]))
 
-(defn- page [sh storage-id sname uid]
+(defn- page [sh storage-id sname uid link-token]
   (str
    "<!doctype html>"
    (h/html
@@ -442,16 +446,16 @@
       [:script {:type "module" :src "/datastar.js"}]
       [:script {:src "/app.js"}]]
      [:body {:data-signals (format (str "{cell:'', v:'', err:'', sel:'', edit:false, r0:0, c0:0, "
-                                        "sheet:'%s', sid:'', sharepanel:false, shareact:'', "
+                                        "sheet:'%s', sid:'', link:'%s', sharepanel:false, shareact:'', "
                                         "plevel:'', gtarget:'', glevel:'read-write', grantee:''}")
-                                   storage-id)
+                                   storage-id (or link-token ""))
              :style "font-family:sans-serif;margin:0;padding:.6rem;"}
       ;; hidden input carrying the session id into $sid, and a hidden trigger
       ;; /app.js clicks to open the persistent collaboration stream via Datastar
       ;; (so pushed patches are applied). $sid/$sheet go in the URL.
       [:input {:id "sidbox" :data-bind:sid "" :style "display:none;"}]
       [:button {:id "streamtrigger"
-                :data-on:click "@get('/stream?sid='+$sid+'&s='+$sheet)"
+                :data-on:click "@get('/stream?sid='+$sid+'&s='+$sheet+'&t='+$link)"
                 :style "display:none;"} ""]
       [:div {:id "toast" :data-show "$err != ''" :data-text "$err"
              :data-on:click "$err=''"
@@ -466,7 +470,7 @@
                 :title "type a name + Enter to create/open one of your sheets"
                 :style "width:6rem;"}]
        ;; sharing toggle / badge (patched back by POST /share)
-       (h/raw (share-html uid storage-id))
+       (h/raw (share-html uid storage-id link-token))
        [:span {:class "spacer"}]
        ;; who am I + sign out
        [:span {:style "font:12px sans-serif;color:var(--muted);white-space:nowrap;"}
@@ -656,23 +660,25 @@
 
 (defn- level-of
   "This user's effective level on the sheet: owners get :read-write; everyone
-   else gets whatever the ACL grants (:read-write | :read). nil = no access."
-  [uid id rec]
-  (if (= uid (:owner rec)) :read-write (db/access-level uid id)))
+   else gets whatever the ACL grants the uid or the link `token`
+   (:read-write | :read). nil = no access."
+  [uid id token rec]
+  (if (= uid (:owner rec)) :read-write (db/access-level uid id token)))
 
 (defn- with-access
   "POST handlers: resolve the signed-in user and sheet access from the request
-   signals. On success open the one-shot SSE response and call
-   (f uid sheet-id rec sig gen); otherwise raise the access/auth error toast.
-   The rec handed to `f` carries this user's effective `:level`."
+   signals (the link token rides in $link). On success open the one-shot SSE
+   response and call (f uid sheet-id rec sig gen); otherwise raise the
+   access/auth error toast. The rec handed to `f` carries the effective `:level`."
   [req f]
   (let [uid      (auth/req->uid req)
         sig      (read-signals req)
         sheet-id (:sheet sig)
-        rec      (accessible-rec uid sheet-id)]
+        token    (not-empty (str (:link sig)))
+        rec      (accessible-rec uid sheet-id token)]
     (if-not rec
       (deny req (if uid "no access to this sheet" "not signed in"))
-      (let [rec (assoc rec :level (level-of uid sheet-id rec))]
+      (let [rec (assoc rec :level (level-of uid sheet-id token rec) :token token)]
         (sse req (fn [gen] (f uid sheet-id rec sig gen)))))))
 
 (defn- with-owner
@@ -694,15 +700,16 @@
   [req f]
   (let [uid      (auth/req->uid req)
         sid      (qparam req "sid")
-        sheet-id (qparam req "s")]
-    (if-not (accessible-rec uid sheet-id)
+        sheet-id (qparam req "s")
+        token    (not-empty (qparam req "t"))]
+    (if-not (accessible-rec uid sheet-id token)
       {:status 403 :body "no access"}
-      (f uid sid sheet-id))))
+      (f uid sid sheet-id token))))
 
 (defn- handle-cell [req]
   (with-access req
     (fn [uid sheet-id rec {:keys [cell v sid]} gen]
-      (ensure-session! sid sheet-id uid)        ; lazy re-register + keep alive
+      (ensure-session! sid sheet-id uid (:token rec))   ; lazy re-register + keep alive
       (if (not= :read-write (:level rec))
         (signals! gen {:err "read-only access — you can't edit this sheet"})
         (let [sh   (:sh rec)
@@ -733,7 +740,7 @@
 (defn- handle-view [req]
   (with-access req
     (fn [uid sheet-id rec {:keys [r0 c0 sid]} gen]
-      (ensure-session! sid sheet-id uid)        ; lazy re-register + keep alive
+      (ensure-session! sid sheet-id uid (:token rec))   ; lazy re-register + keep alive
       (let [sh   (:sh rec)
             view {:r0 (max 0 (long (or r0 0))) :c0 (max 0 (long (or c0 0)))}]
         (set-session-view! sid view)
@@ -760,7 +767,7 @@
   [req]
   (with-access req
     (fn [uid sheet-id rec {:keys [sel edit sid]} gen]
-      (ensure-session! sid sheet-id uid)
+      (ensure-session! sid sheet-id uid (:token rec))
       (let [can-write? (= :read-write (:level rec))]
         (swap! sessions* update sid assoc
                :cursor  (when (addr/valid? sel) sel)
@@ -784,14 +791,14 @@
    edits elsewhere can be pushed here. Stays open — never close-sse! on open."
   [req]
   (with-stream-access req
-    (fn [uid sid sheet-id]
+    (fn [uid sid sheet-id token]
       (hk/->sse-response req
         {hk/on-open
          (fn [gen]
            (when (and sid (re-matches sid-re sid))
              ;; reconnect: keep the existing session's view/dims, just swap the
              ;; (dead) generator for the new one. fresh connect: register.
-             (ensure-session! sid sheet-id uid)
+             (ensure-session! sid sheet-id uid token)
              (swap! sessions* update sid assoc :gen gen)
              ;; flush once so the client sees an established, open stream (an SSE
              ;; that sends nothing looks "finished" -> client reconnect storm).
@@ -821,19 +828,22 @@
   (case lvl :read-write "can edit" :read "can view" "no access"))
 
 (defn- share-html
-  "The #sharebar fragment. Visitors see a read-only badge. The owner gets a
-   popover (toggled by $sharepanel) to set the public level, copy the link, and
-   grant/revoke direct per-user shares (by name in dev, email in prod)."
-  [uid sheet-id]
+  "The #sharebar fragment. Visitors see a read-only badge (their effective
+   level, given the link `token` they arrived with). The owner gets a popover
+   (toggled by $sharepanel) to set the capability-link level, copy/rotate the
+   secret link, and grant/revoke direct per-user shares (name in dev, email in
+   prod)."
+  [uid sheet-id token]
   (let [owner     (owner-of sheet-id)
         [_ sname] (store/split-id sheet-id)
         owner?    (= uid owner)
-        pub       (db/public-level sheet-id)          ; :read | :read-write | nil
+        link      (db/link-grant sheet-id)             ; {:token :level} | nil
+        lvl       (:level link)
         grants    (->> (db/sheet-grants sheet-id)
                        (filter #(= :user (:kind %)))
                        (sort-by :grantee))
-        url       (str (auth/base-url) "/?u=" owner "&s=" sname)
-        badge     (cond (= pub :read-write) "🌐 public" (= pub :read) "👁 public" :else "🔒 private")
+        url       (str (auth/base-url) "/?u=" owner "&s=" sname "&t=" (:token link))
+        badge     (cond (= lvl :read-write) "🔗 link" (= lvl :read) "🔗 link" :else "🔒 private")
         add-ph    (if (auth/dev-auth?) "name to share with…" "email to share with…")
         row-style "display:flex;align-items:center;gap:.4rem;margin-bottom:.45rem;"]
     (str (h/html
@@ -841,28 +851,31 @@
            (if-not owner?
              [:span {:style "font:12px sans-serif;color:var(--muted);white-space:nowrap;"}
               (str "shared by " (or (:name (auth/user-info owner)) owner)
-                   " · " (level-label (db/access-level uid sheet-id)))]
+                   " · " (level-label (db/access-level uid sheet-id token)))]
              (list
               [:button {:class "btn" :data-on:click "$sharepanel = !$sharepanel" :title "sharing"}
                badge]
               [:div {:data-show "$sharepanel"
-                     :style (str "position:absolute;top:118%;left:0;z-index:30;width:23rem;"
+                     :style (str "position:absolute;top:118%;left:0;z-index:30;width:24rem;"
                                  "background:var(--bg);border:1px solid var(--line);border-radius:6px;"
                                  "box-shadow:0 4px 16px rgba(0,0,0,.18);padding:.7rem;"
                                  "font:12px sans-serif;color:var(--fg);")}
-               ;; public level
+               ;; capability link
                [:div {:style row-style}
                 [:span {:style "flex:1;"} "Anyone with the link"]
                 [:select {:class "tool"
-                          :data-on:change "$shareact='public', $plevel=el.value, @post('/share')"}
-                 [:option {:value "none"       :selected (nil? pub)}          "no access"]
-                 [:option {:value "read"       :selected (= pub :read)}       "can view"]
-                 [:option {:value "read-write" :selected (= pub :read-write)} "can edit"]]]
-               (when pub
-                 [:input {:readonly true :value url :title "share link"
-                          :style (str "width:100%;box-sizing:border-box;font:11px monospace;"
-                                      "padding:4px 6px;border:1px solid var(--grid);"
-                                      "border-radius:var(--radius);color:var(--muted);margin-bottom:.5rem;")}])
+                          :data-on:change "$shareact='link', $plevel=el.value, @post('/share')"}
+                 [:option {:value "none"       :selected (nil? lvl)}          "no access"]
+                 [:option {:value "read"       :selected (= lvl :read)}       "can view"]
+                 [:option {:value "read-write" :selected (= lvl :read-write)} "can edit"]]]
+               (when link
+                 [:div {:style "display:flex;gap:.3rem;margin-bottom:.5rem;"}
+                  [:input {:readonly true :value url :title "secret share link"
+                           :style (str "flex:1;box-sizing:border-box;font:11px monospace;"
+                                       "padding:4px 6px;border:1px solid var(--grid);"
+                                       "border-radius:var(--radius);color:var(--muted);")}]
+                  [:button {:class "btn" :title "make a new link (invalidates the old one)"
+                            :data-on:click "$shareact='rotate', @post('/share')"} "↻"]])
                ;; per-user grants
                [:div {:style "border-top:1px solid var(--grid);padding-top:.5rem;"}
                 (if (seq grants)
@@ -884,20 +897,22 @@
 
 (defn- evict-unauthorized!
   "Reap every NON-OWNER session on `sheet-id` whose access was just revoked
-   (access-level now nil) — e.g. public turned off, or their direct grant
-   removed. Their held stream closes; the next request 403s. A mere downgrade
-   (edit -> view) is NOT evicted; the /cell write-guard handles it."
+   (access-level now nil) — e.g. the link disabled or rotated (their stored
+   token no longer matches), or a direct grant removed. Their held stream
+   closes; the next request 403s. A mere downgrade (edit -> view) keeps access,
+   so it is NOT evicted; the /cell write-guard handles it."
   [sheet-id]
   (let [owner (owner-of sheet-id)]
     (doseq [[sid s] @sessions*]
       (when (and (= sheet-id (:sheet s))
                  (not= owner (:uid s))
-                 (nil? (db/access-level (:uid s) sheet-id)))
+                 (nil? (db/access-level (:uid s) sheet-id (:token s))))
         (reap-session! sid)))))
 
 (defn- handle-share
   "Owner-only sharing mutations, dispatched on the $shareact signal:
-   - public: set the :everyone level from $plevel (none/read/read-write)
+   - link:   set the capability-link level from $plevel (none/read/read-write)
+   - rotate: mint a new link token (kills old links)
    - grant:  share to the $gtarget person at $glevel (resolve name/email -> uid)
    - revoke: drop the $grantee user grant
    Re-renders #sharebar and evicts anyone who just lost access."
@@ -906,7 +921,8 @@
     (fn [uid sheet-id _rec {:keys [sid shareact plevel gtarget glevel grantee]} gen]
       (ensure-session! sid sheet-id uid)
       (let [err (case (str shareact)
-                  "public" (do (db/set-public! sheet-id (level-kw plevel)) nil)
+                  "link"   (do (db/set-link-level! sheet-id (level-kw plevel)) nil)
+                  "rotate" (do (db/rotate-link! sheet-id) nil)
                   "grant"  (if-let [g (auth/resolve-grantee gtarget)]
                              (if (= g uid)
                                "that's you — you already own this sheet"
@@ -916,10 +932,9 @@
                                  (db/remove-share! sheet-id grantee :user))
                                nil)
                   nil)]
-        (swap! sheets* assoc-in [sheet-id :public] (db/public? sheet-id))
         (save-rec! sheet-id)
         (evict-unauthorized! sheet-id)
-        (d*/patch-elements! gen (share-html uid sheet-id))
+        (d*/patch-elements! gen (share-html uid sheet-id nil))
         (signals! gen {:err (or err "") :gtarget ""})))))
 
 ;; --- auth routes (login page, OAuth redirects, logout) -------------------
@@ -1016,11 +1031,12 @@
       (redirect "/login")
       (let [sname (let [s (qparam req "s")] (if (store/valid-name? s) s "default"))
             owner (let [o (qparam req "u")] (when (and o (re-matches auth/uid-re o)) o))
+            token (not-empty (qparam req "t"))
             id    (store/storage-id (or owner uid) sname)
-            rec   (when id (accessible-rec uid id))]
+            rec   (when id (accessible-rec uid id token))]
         (if rec
           {:status 200 :headers {"Content-Type" "text/html"}
-           :body (page (:sh rec) id sname uid)}
+           :body (page (:sh rec) id sname uid token)}
           {:status 403 :headers {"Content-Type" "text/html"}
            :body (denied-page uid)})))))
 

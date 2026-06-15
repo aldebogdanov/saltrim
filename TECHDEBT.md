@@ -150,6 +150,22 @@ REMAINING:
   email shares only reach users who've already signed in (no pending invites);
   a `:read` viewer with an open editor sees writes blocked only on commit (no
   proactive UI lock-out).
+- **Capability-link sharing — DONE (Datahike step 2c).** "Anyone with the link"
+  is now a `:link` grant whose `grantee` is an unguessable token carried in the
+  URL (`?t=…`), not the guessable `<owner>__<name>` URL. Closes the enumeration
+  hole (knowing a name + sheet name no longer grants access) and adds
+  **rotation** (`rotate-link!` mints a new token, killing old links). One link
+  per sheet at a level (view/edit). The token rides through every layer: page
+  seeds `$link`, POSTs send it, `/stream` takes `?t=`; sessions remember their
+  token so a rotate/downgrade re-checks them in `evict-unauthorized!`. The old
+  blanket `:everyone` tier is GONE — `migrate-everyone->link!` upgrades any
+  legacy public grant to a link on load. db: `link-grant`/`set-link-level!`/
+  `rotate-link!`; `access-level` now takes `[uid sheet-id token]`.
+  REMAINING: **discoverable-public gallery** (opt-in publish + its own paginated
+  browse view — deliberately NOT the personal picker, to avoid clutter) and a
+  bounded **recents** list for link-visited sheets are both deferred; the link
+  token is stored in plaintext (it's a capability URL, not a credential — fine,
+  but note it's readable in the DB).
 - **Spindel pinned at 0.1.15**: 0.1.23 changes spin-cancellation semantics and
   breaks the structural-rebuild path (recomputed cells come back
   `{:error "Spin cancelled by user"}`; 2 engine-test failures). Bumping spindel

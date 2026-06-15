@@ -41,50 +41,79 @@
       "second registration is a no-op")
   (testing "owner ref is set when the user exists, skipped otherwise"
     (is (true? (db/ensure-sheet! "ghost__x" "ghost" "x")))) ; no such user — must not throw
-  (testing "an unregistered sheet has no grants and is private"
-    (is (false? (db/public? "nobody__none")))
-    (is (nil?   (db/access-level "anyone" "nobody__none")))))
+  (testing "an unregistered sheet has no link and is private"
+    (is (nil? (db/link-grant "nobody__none")))
+    (is (nil? (db/access-level "anyone" "nobody__none" nil)))))
 
-(deftest public-grant-levels-and-access
+(deftest capability-link-levels-and-access
   (db/upsert-user! {:uid "dev-ann" :name "Ann"})
   (db/ensure-sheet! "dev-ann__sheet" "dev-ann" "sheet")
-  (testing "private by default"
-    (is (nil? (db/public-level "dev-ann__sheet")))
-    (is (false? (db/public? "dev-ann__sheet")))
-    (is (nil?   (db/access-level "dev-bob" "dev-ann__sheet"))))
-  (testing "public read-only grants :read to anyone (not :read-write)"
-    (is (= :read (db/set-public! "dev-ann__sheet" :read)))
-    (is (= :read (db/public-level "dev-ann__sheet")))
-    (is (= :read (db/access-level "dev-bob" "dev-ann__sheet"))))
-  (testing "raising to read-write updates in place (no duplicate :everyone row)"
-    (is (= :read-write (db/set-public! "dev-ann__sheet" :read-write)))
-    (is (= 1 (count (db/sheet-grants "dev-ann__sheet"))))
-    (is (= :read-write (db/access-level "dev-bob" "dev-ann__sheet"))))
-  (testing "nil removes the public grant"
-    (is (nil? (db/set-public! "dev-ann__sheet" nil)))
-    (is (false? (db/public? "dev-ann__sheet")))
-    (is (empty? (db/sheet-grants "dev-ann__sheet")))
-    (is (nil?   (db/access-level "dev-bob" "dev-ann__sheet")))))
+  (testing "private by default — no link, no access even with a bogus token"
+    (is (nil? (db/link-grant "dev-ann__sheet")))
+    (is (nil? (db/access-level "dev-bob" "dev-ann__sheet" nil)))
+    (is (nil? (db/access-level "dev-bob" "dev-ann__sheet" "deadbeef"))))
+  (testing "enabling a view link mints a token; only the holder gets :read"
+    (let [{:keys [token level]} (db/set-link-level! "dev-ann__sheet" :read)]
+      (is (= :read level))
+      (is (string? token))
+      (is (= :read (db/access-level "dev-bob" "dev-ann__sheet" token)))
+      (is (nil?    (db/access-level "dev-bob" "dev-ann__sheet" nil))
+          "no token = no access (the name+sheet is no longer enough)")
+      (is (nil?    (db/access-level "dev-bob" "dev-ann__sheet" "wrong")))))
+  (testing "raising the level keeps the SAME token (update in place)"
+    (let [t0 (:token (db/link-grant "dev-ann__sheet"))
+          {:keys [token level]} (db/set-link-level! "dev-ann__sheet" :read-write)]
+      (is (= t0 token) "token stable across a level change")
+      (is (= :read-write level))
+      (is (= 1 (count (db/sheet-grants "dev-ann__sheet"))) "still one link row")
+      (is (= :read-write (db/access-level "dev-bob" "dev-ann__sheet" token)))))
+  (testing "rotating mints a NEW token and invalidates the old one"
+    (let [old (:token (db/link-grant "dev-ann__sheet"))
+          {new :token} (db/rotate-link! "dev-ann__sheet")]
+      (is (not= old new))
+      (is (nil?       (db/access-level "dev-bob" "dev-ann__sheet" old)))
+      (is (= :read-write (db/access-level "dev-bob" "dev-ann__sheet" new)))))
+  (testing "nil removes the link entirely"
+    (is (nil? (db/set-link-level! "dev-ann__sheet" nil)))
+    (is (nil? (db/link-grant "dev-ann__sheet")))
+    (is (empty? (db/sheet-grants "dev-ann__sheet")))))
+
+(deftest legacy-everyone-migrates-to-link
+  (db/upsert-user! {:uid "dev-ann" :name "Ann"})
+  (db/ensure-sheet! "dev-ann__old" "dev-ann" "old")
+  ;; simulate a pre-link public sheet (an :everyone grant from PR-A/B)
+  (db/set-share! "dev-ann__old" "*" :everyone :read)
+  (db/migrate-everyone->link! "dev-ann__old")
+  (let [{:keys [token level]} (db/link-grant "dev-ann__old")]
+    (is (= :read level) "level preserved")
+    (is (string? token) "now a token-gated link")
+    (is (= 1 (count (db/sheet-grants "dev-ann__old"))) "the :everyone row is gone")
+    (is (= :read (db/access-level "dev-bob" "dev-ann__old" token))))
+  (testing "calling again is a no-op"
+    (let [t0 (:token (db/link-grant "dev-ann__old"))]
+      (db/migrate-everyone->link! "dev-ann__old")
+      (is (= t0 (:token (db/link-grant "dev-ann__old")))))))
 
 (deftest direct-user-grants
   (db/upsert-user! {:uid "dev-ann" :name "Ann"})
   (db/ensure-sheet! "dev-ann__sheet" "dev-ann" "sheet")
   (testing "a :user grant only reaches that user"
     (is (= :read (db/set-share! "dev-ann__sheet" "dev-bob" :user :read)))
-    (is (= :read (db/access-level "dev-bob" "dev-ann__sheet")))
-    (is (nil?    (db/access-level "dev-cat" "dev-ann__sheet"))))
+    (is (= :read (db/access-level "dev-bob" "dev-ann__sheet" nil)))
+    (is (nil?    (db/access-level "dev-cat" "dev-ann__sheet" nil))))
   (testing "grant-level reports the specific grant"
     (is (= :read (db/grant-level "dev-ann__sheet" "dev-bob" :user)))
     (is (nil?    (db/grant-level "dev-ann__sheet" "dev-cat" :user))))
-  (testing "a public :read combines with a user :read-write -> highest wins"
-    (db/set-public! "dev-ann__sheet" :read)
-    (db/set-share! "dev-ann__sheet" "dev-bob" :user :read-write)
-    (is (= :read-write (db/access-level "dev-bob" "dev-ann__sheet")))
-    (is (= :read       (db/access-level "dev-cat" "dev-ann__sheet"))))
-  (testing "revoking the user grant drops them back to the public level"
-    (is (true? (db/remove-share! "dev-ann__sheet" "dev-bob" :user)))
-    (is (= :read (db/access-level "dev-bob" "dev-ann__sheet"))))
-  (testing "shared-with lists direct grants only (not public)"
+  (testing "a view link combines with a user :read-write -> highest wins"
+    (let [{tok :token} (db/set-link-level! "dev-ann__sheet" :read)]
+      (db/set-share! "dev-ann__sheet" "dev-bob" :user :read-write)
+      (is (= :read-write (db/access-level "dev-bob" "dev-ann__sheet" tok)))
+      (is (= :read       (db/access-level "dev-cat" "dev-ann__sheet" tok)))))
+  (testing "revoking the user grant drops Bob back to the link level"
+    (let [tok (:token (db/link-grant "dev-ann__sheet"))]
+      (is (true? (db/remove-share! "dev-ann__sheet" "dev-bob" :user)))
+      (is (= :read (db/access-level "dev-bob" "dev-ann__sheet" tok)))))
+  (testing "shared-with lists direct grants only (not the link)"
     (db/set-share! "dev-ann__sheet" "dev-cat" :user :read)
     (let [shared (db/sheets-shared-with "dev-cat")]
       (is (= [{:sheet-id "dev-ann__sheet" :name "sheet" :level :read}] shared)))

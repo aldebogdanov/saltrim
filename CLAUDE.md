@@ -43,7 +43,7 @@ If the user types `/caveman`, invoke the `caveman` Skill.
 - **Spike risky unknowns first** (there are `spike*.clj` files proving Spindel
   behavior). Don't build UI on unproven engine assumptions.
 - **Test after engine changes**: `clojure -X:test` (must stay green, currently
-  31 tests / 139 assertions; `db`/`auth` suites use the `:memory` Datahike
+  32 tests / 149 assertions; `db`/`auth` suites use the `:memory` Datahike
   backend). Add tests for new engine behavior.
 - **Check `app.js` syntax** after editing: `node --check resources/public/app.js`.
 - Keep `TECHDEBT.md` current — append when you defer something, mark items DONE.
@@ -145,10 +145,13 @@ sweep), live collaboration (push streams + reconnect), logical scroll, keyboard
 navigation, **auth + multi-tenancy** (OAuth GitHub/Google + dev login, per-user
 sheets `<uid>__<name>`, named presence). Dev login is on by default when no
 `CLORAX_*_CLIENT_ID/SECRET` env vars are set. **Sharing** is a Datahike ACL of
-`share` grants (db ns): public (`:everyone`) at a **read-only or edit** level
-plus **direct per-user grants** (share by name in dev / email in prod);
-owner-only share panel; `/cell` write-guard enforces `:read` vs `:read-write`;
-the picker lists 'shared with you' sheets. Next candidates (user's call):
+`share` grants (db ns): a **capability link** (`:link` grant — an unguessable
+token in the URL, `?t=…`, rotatable) at a **read-only or edit** level, plus
+**direct per-user grants** (share by name in dev / email in prod); owner-only
+share panel; `/cell` write-guard enforces `:read` vs `:read-write`; the picker
+lists 'shared with you' sheets. There is no blanket public-to-everyone tier —
+broad sharing is the link (the old `:everyone` flag auto-migrates to a link).
+Next candidates (user's call):
 **style/format as reactive properties** (persistence format is ready for it),
 conflict policy, group/org grants (schema has `:group` kind). See `TECHDEBT.md`
 for deferred items.

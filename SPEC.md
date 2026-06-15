@@ -141,17 +141,34 @@ await chain).
   before `connect` (same spec → same pool) to avoid using a closed pool.
 - **User ids**: `<prefix>-<ext-id>` sanitized to `[a-z0-9-]` (`gh-…`, `gg-…`,
   `dev-…`), max 24 chars — no underscores by construction (see storage ids).
-- **Tenancy**: every request resolves through `accessible-rec`: owners reach
-  (and auto-create) their own sheets; a foreign sheet is reachable iff it
-  exists and is `:public`. Unauthenticated → redirect `/login` (page) or an
+- **Tenancy**: every request resolves through `accessible-rec [uid id token]`:
+  owners reach (and auto-create) their own sheets; a foreign sheet is reachable
+  iff the user holds a grant (a direct `:user` share) or carries the sheet's
+  capability-link `token`. Unauthenticated → redirect `/login` (page) or an
   `$err` toast / 403 (API, stream). `?s=<name>` opens your own sheet,
-  `?u=<owner>&s=<name>` someone else's shared one.
-- **Sharing**: owner-only `POST /share` toggles `:public` (persisted
-  immediately); the `#sharebar` toolbar fragment shows the toggle + share link
-  to the owner, a "shared by <name>" badge to visitors. Anyone signed-in can
-  edit a public sheet (live collaboration); there is no read-only tier yet.
-  **Unsharing evicts**: going public→private reaps every non-owner session on
-  the sheet (`evict-foreign!`) so their stream drops and further access fails.
+  `?u=<owner>&s=<name>&t=<token>` someone else's shared one.
+- **Sharing**: a Datahike ACL of `share` grants (`db` ns). Each grant is
+  `(sheet, grantee, grantee-kind, level)` where kind ∈ `:user | :link`
+  (`:group` reserved; `:everyone` is a legacy kind, auto-migrated) and level ∈
+  `:read | :read-write`. **Ownership is not a grant** — it is derived from the
+  `<owner>__<name>` id. Two paths:
+  - **Capability link** (`:link`): an unguessable token (`grantee`) that lives
+    only in the URL (`?t=…`), at view or edit level. Rotatable
+    (`rotate-link!`). This is the "anyone with the link" mechanism — there is no
+    blanket public-to-everyone tier, so knowing a name + sheet name grants
+    nothing.
+  - **Direct grants** (`:user`): share to one person by name (dev) / email
+    (prod, resolved via `auth/resolve-grantee` → `db/uid-by-email`).
+  `access-level` combines the caller's `:user` grant and the `:link` grant when
+  the token matches, taking the highest level. Owner-only `POST /share`
+  dispatches on `$shareact` (`link` / `rotate` / `grant` / `revoke`) and
+  re-renders the `#sharebar` popover. The `/cell` write-guard rejects a write
+  unless the effective level is `:read-write`.
+  **Losing access evicts**: after any share change, `evict-unauthorized!` reaps
+  every non-owner session whose access is now nil (link disabled/rotated, or
+  grant removed — sessions remember their token to be re-checked); their stream
+  drops and further access fails. A mere downgrade (edit→view) keeps the
+  session; the write-guard handles it.
 - **Sheet picker**: the toolbar `#sheetpicker` dropdown lists the user's sheets
   (`store/list-names`) and navigates on change; `#sheetbox` opens/creates a
   sheet by a new name.
@@ -214,7 +231,8 @@ that the client `translate`s.
   unauthenticated, 403 page when denied.
 - `GET /login`, `GET /auth/<provider>[/callback]`, `GET /auth/dev?name=`,
   `POST /logout` — identity (see above).
-- `POST /share` — owner-only `:public` toggle; patches `#sharebar`.
+- `POST /share` — owner-only sharing mutation (`$shareact`: link / rotate /
+  grant / revoke); patches `#sharebar`.
 - `GET /app.js`, `GET /datastar.js` — vendored assets.
 - `GET /stream?sid=&s=` — **persistent** per-session SSE (auth + access checked;
   403 otherwise). Registers the session, stores its generator, flushes once to

@@ -43,8 +43,8 @@
    {:db/ident :sheet/created-at :db/valueType :db.type/long   :db/cardinality :db.cardinality/one}
 
    {:db/ident :share/sheet        :db/valueType :db.type/ref     :db/cardinality :db.cardinality/one}
-   {:db/ident :share/grantee      :db/valueType :db.type/string  :db/cardinality :db.cardinality/one} ; uid | group-id | "*"
-   {:db/ident :share/grantee-kind :db/valueType :db.type/keyword :db/cardinality :db.cardinality/one} ; :user | :group | :everyone
+   {:db/ident :share/grantee      :db/valueType :db.type/string  :db/cardinality :db.cardinality/one} ; uid | group-id | link-token
+   {:db/ident :share/grantee-kind :db/valueType :db.type/keyword :db/cardinality :db.cardinality/one} ; :user | :group | :link (:everyone = legacy, migrated)
    {:db/ident :share/level        :db/valueType :db.type/keyword :db/cardinality :db.cardinality/one} ; :read | :read-write
    {:db/ident :share/created-at   :db/valueType :db.type/long    :db/cardinality :db.cardinality/one}])
 
@@ -192,22 +192,20 @@
        (map (fn [[grantee kind level]] {:grantee grantee :kind kind :level level}))))
 
 (defn access-level
-  "Highest grant level `uid` holds on `sheet-id` via shares (NOT ownership):
-   :read-write | :read | nil. Considers :everyone grants and :user grants for
-   this uid."
-  [uid sheet-id]
+  "Highest level `uid` (carrying optional capability `token`) holds on
+   `sheet-id` via shares (NOT ownership): :read-write | :read | nil. Considers
+   direct :user grants for this uid and the :link grant when `token` matches its
+   secret. There is no blanket :everyone tier — broad sharing IS the link, so a
+   sheet is reachable only by its owner, the people granted to, or whoever holds
+   the unguessable link token."
+  [uid sheet-id token]
   (let [levels (for [{:keys [grantee kind level]} (sheet-grants sheet-id)
-                     :when (or (= kind :everyone)
-                               (and (= kind :user) (= grantee uid)))]
+                     :when (or (and (= kind :user) (= grantee uid))
+                               (and (= kind :link) token (= grantee token)))]
                  level)]
     (cond (some #{:read-write} levels) :read-write
           (some #{:read} levels)       :read
           :else                        nil)))
-
-(defn public?
-  "True iff `sheet-id` has an :everyone grant (any level)."
-  [sheet-id]
-  (boolean (some #(= :everyone (:kind %)) (sheet-grants sheet-id))))
 
 (defn- grant-eid [sheet-id grantee kind]
   (d/q '[:find ?s . :in $ ?sid ?g ?k
@@ -246,19 +244,72 @@
     (d/transact (conn) [[:db/retractEntity eid]])
     true))
 
-(defn public-level
-  "The public (:everyone) level for `sheet-id` — :read | :read-write | nil."
-  [sheet-id]
-  (grant-level sheet-id "*" :everyone))
+;; --- capability link ------------------------------------------------------
+;; "Anyone with the link" = a :link grant whose `grantee` is an unguessable
+;; secret token (stored in the URL, not derivable from owner/sheet names). One
+;; link per sheet, at a level; rotating mints a new token (kills old links).
 
-(defn set-public!
-  "Set the public (:everyone) grant on `sheet-id` to `level` (:read |
-   :read-write), or remove it when `level` is nil/false. Returns `level`."
+(defn- link-eid [sheet-id]
+  (d/q '[:find ?s . :in $ ?sid
+         :where [?sh :sheet/id ?sid] [?s :share/sheet ?sh]
+                [?s :share/grantee-kind :link]]
+       @(conn) sheet-id))
+
+(defn link-grant
+  "The sheet's capability-link grant as {:token :level}, or nil if none."
+  [sheet-id]
+  (when-let [eid (link-eid sheet-id)]
+    (let [m (d/pull @(conn) [:share/grantee :share/level] eid)]
+      {:token (:share/grantee m) :level (:share/level m)})))
+
+(def ^:private link-rng (java.security.SecureRandom.))
+
+(defn- gen-link-token []
+  (let [b (byte-array 16)]
+    (.nextBytes link-rng b)
+    (apply str (map #(format "%02x" (bit-and (long %) 0xff)) b))))
+
+(defn set-link-level!
+  "Set the capability-link level for `sheet-id` to `level` (:read |
+   :read-write), minting a token on first enable. `level` nil removes the link.
+   The token is STABLE across level changes — only `rotate-link!` changes it.
+   Returns the resulting {:token :level}, or nil when removed."
   [sheet-id level]
-  (if level
-    (set-share! sheet-id "*" :everyone level)
-    (remove-share! sheet-id "*" :everyone))
-  (or level nil))
+  (let [eid (link-eid sheet-id)]
+    (cond
+      (nil? level) (do (when eid (d/transact (conn) [[:db/retractEntity eid]])) nil)
+      eid          (do (d/transact (conn) [{:db/id eid :share/level level}])
+                       (link-grant sheet-id))
+      :else        (let [tok (gen-link-token)]
+                     (d/transact (conn) [{:share/sheet [:sheet/id sheet-id]
+                                          :share/grantee tok
+                                          :share/grantee-kind :link
+                                          :share/level level
+                                          :share/created-at (now)}])
+                     {:token tok :level level}))))
+
+(defn rotate-link!
+  "Mint a NEW token for the existing link grant (invalidating old links), keeping
+   its level. Returns the new {:token :level}, or nil if there is no link."
+  [sheet-id]
+  (when-let [eid (link-eid sheet-id)]
+    (let [tok (gen-link-token)]
+      (d/transact (conn) [{:db/id eid :share/grantee tok}])
+      (link-grant sheet-id))))
+
+(defn migrate-everyone->link!
+  "One-shot upgrade: convert a legacy public (:everyone) grant — from before
+   capability links — into a :link grant at the same level (fresh token). Safe
+   to call on every load; a no-op once there is no :everyone grant left."
+  [sheet-id]
+  (when-let [eid (d/q '[:find ?s . :in $ ?sid
+                        :where [?sh :sheet/id ?sid] [?s :share/sheet ?sh]
+                               [?s :share/grantee-kind :everyone]]
+                      @(conn) sheet-id)]
+    (let [lvl (:share/level (d/pull @(conn) [:share/level] eid))]
+      (d/transact (conn) [[:db/retractEntity eid]])
+      (when-not (link-eid sheet-id)
+        (set-link-level! sheet-id lvl)))))
 
 (defn sheets-shared-with
   "Sheets directly shared TO `uid` (a :user grant) as maps
