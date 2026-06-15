@@ -548,6 +548,11 @@
         [cb rb] (view-base view)
         editing? (= editing cursor)
         tag (or uname "•")
+        ;; the tag normally floats above the cell (CSS top:-15px); on the top
+        ;; rendered row that's clipped by #cellclip's overflow, so flip it below.
+        top-row? (zero? (- ri rb))
+        tag-style (str "background:" color
+                       (when top-row? (str ";top:" (dec RH) "px;border-radius:0 3px 3px 3px")))
         base (format (str "left:%dpx;top:%dpx;width:%dpx;height:%dpx;border-color:%s;")
                      (* (- ci cb) CW) (* (- ri rb) RH) (dec CW) (dec RH) color)]
     (str (h/html
@@ -556,7 +561,7 @@
                           (str base "background:" (rgba color "0.16")
                                ";pointer-events:auto;cursor:not-allowed;")
                           base)}
-           [:span {:class "peertag" :style (str "background:" color)}
+           [:span {:class "peertag" :style tag-style}
             (if editing? (str tag " editing…") tag)]]))))
 
 (defn- peers-html
