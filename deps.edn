@@ -47,6 +47,7 @@
   ;; Step 0 spike — prove signal/spin lifecycle on real Spindel.
   :spike {:main-opts ["-m" "uno.michelada.saltrim.spike"]}
   :spike0b {:main-opts ["-m" "uno.michelada.saltrim.spike0b"]}
+  :spikesci {:main-opts ["-m" "uno.michelada.saltrim.spikesci"]}
   :web {:main-opts ["-m" "uno.michelada.saltrim.web"]}
 
   ;; Build a runnable uberjar (java -jar target/saltrim-<v>.jar).
