@@ -6,12 +6,22 @@ Read `SPEC.md` for the technical architecture. This file = how to work here.
 
 ## MCP servers usage
 
-- **Qdrant:** When available, use Qdrant MCP server (`mcp-server-qdrant`, 
-  `qdrant-local`, etc...) for persistent vector memory. When using it, explicitly
-  use collection name `dev-saltrim` (project history: `dev-calcloj` →
-  `dev-clorax` → `dev-saltrim` across renames; older collections kept as
-  backups). If the MCP tools error, the Qdrant REST API on
-  `localhost:6333` works directly (scroll/upsert).
+- **Qdrant (preferred memory):** Use the Qdrant MCP server (`mcp-server-qdrant`,
+  `qdrant-local`, etc...) for persistent vector memory — it is the **preferred**
+  store (semantic recall across sessions). Explicitly use collection name
+  `dev-saltrim` (project history: `dev-calcloj` → `dev-clorax` → `dev-saltrim`
+  across renames; older collections kept as backups). If the MCP tools error
+  (they have — empty errors, often a corrupt fastembed model cache or a stale
+  server process), the Qdrant REST API on `localhost:6333` works directly:
+  `POST /collections/dev-saltrim/points/query` (embed the query first) or
+  `/points/scroll` for reads; embed with the MCP's own fastembed python env and
+  `PUT /points` for writes — see the `qdrant-collection-saltrim` memory for the
+  exact recipe.
+- **Mirror memory both ways.** Qdrant can be unavailable (MCP broken, server
+  down, or you're offline), so **also** write anything worth keeping to the
+  file-based memory under `~/.claude/projects/.../memory/` — it loads every
+  session regardless of Qdrant health. Qdrant is the preferred/searchable copy;
+  the file store is the always-available mirror. Keep them in sync.
 - **Clojure:** Always use `clojure-mcp` for interactive Clojure development. REPL
   is Clojure's superpower. If nREPL server isn't active, run it using command 
   `clojure -M:nrepl --port 7888` background command. Do not use Claude default 
