@@ -35,6 +35,38 @@ Formulas that depend on other cells recompute automatically when those cells
 change. Circular references are rejected. Errors show as `#ERR` in the cell and
 a toast message describing what went wrong.
 
+A **stdlib** is available bare in every formula: math (`sum`, `product`, `round`,
+`sqrt`, `pow`, `sign`, …), stats (`mean`/`avg`, `median`, `variance`, `stdev`),
+text (`upper`, `lower`, `trim`, `join`, `split`, `str-replace`, `includes?`, …),
+and date over ISO `yyyy-MM-dd` strings (`today`, `year`, `month`, `day`,
+`days-between`).
+
+### Reusable functions (the `ƒ` library)
+
+The `ƒ` button (top bar) opens this sheet's **definitions library**: your own
+functions and constants, kept as separate entries, callable from any cell. They
+run in the same sandbox as formulas (pure, no host interop) and are saved with
+the sheet.
+
+```clojure
+;; one entry:
+(defn margin [rev cost] (/ (- rev cost) rev))
+;; another entry:
+(def vat 1.16)
+```
+
+```clojure
+;; then in cells:
+=(margin #cell A1 #cell B1)
+=(* #cell A1 vat)
+```
+
+Each entry is **edited independently**, and while one collaborator is editing an
+entry it is **locked** for everyone else (their view shows a lock badge). All
+entries merge, in order, into the sheet's program; **Save** recompiles every cell
+against it (for you and any collaborators). The built-in functions (above) are
+shown read-only and can't be edited.
+
 ### Styling a cell
 
 The third toolbar row styles the **selected** cell. Pick a property, type a

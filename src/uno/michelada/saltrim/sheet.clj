@@ -24,10 +24,12 @@
         styles   (atom {})
         cols     (atom {})        ; ci -> width-px  (sparse; default elsewhere)
         rows     (atom {})        ; ri -> height-px (sparse)
+        sci      (atom (formula/new-ctx nil))  ; per-sheet SCI ctx: stdlib + user defs
+        defs     (atom [])        ; library: ordered vector of chunks {:id :src} (persisted)
         rt       (ctx/create-execution-context
                   {:metadata {:registry registry :vals vals}})]
     {:rt rt :registry registry :vals vals :meta meta :styles styles
-     :cols cols :rows rows}))
+     :cols cols :rows rows :sci sci :defs defs}))
 
 (defn- classify [raw]
   (let [t (some-> raw str/trim)]
@@ -66,7 +68,7 @@
 (defn- write-cell!
   "Local update of one cell. Returns true if addr's PUBLIC spin object was
    created/replaced/removed (structural change -> dependents must rebuild)."
-  [{:keys [registry vals meta]} addr raw]
+  [{:keys [registry vals meta sci]} addr raw]
   (let [prev-kind (get-in @meta [addr :kind])
         old-spin  (get @registry addr)]
     (case (classify raw)
@@ -95,7 +97,7 @@
       (let [{:keys [form deps]} (formula/parse (subs (str/trim raw) 1))
             _  (when (would-cycle? meta addr deps)
                  (throw (ex-info "circular reference" {:addr addr :deps deps})))
-            sp (formula/compile form)]
+            sp (formula/compile @sci form)]
         (when old-spin (spin-core/cleanup-spin! old-spin))
         (swap! registry assoc addr sp)
         (swap! meta assoc addr {:raw raw :kind :formula :deps deps})
@@ -141,11 +143,15 @@
   (ctx/close-context! rt))
 
 (defn value
-  "Current computed value of `addr`, or nil if blank. Errors -> {:error msg}."
-  [{:keys [rt registry]} addr]
-  (when-let [ref (get @registry addr)]
+  "Current computed value of `addr`, or nil if blank. Errors -> {:error msg}
+   (runtime errors, or a compile error recorded when the formula couldn't be
+   built against the sheet's current definitions)."
+  [{:keys [rt registry meta]} addr]
+  (if-let [ref (get @registry addr)]
     (binding [ec/*execution-context* rt]
-      (try @ref (catch Exception e {:error (.getMessage e)})))))
+      (try @ref (catch Exception e {:error (.getMessage e)})))
+    (when-let [err (get-in @meta [addr :err])]
+      {:error err})))
 
 (defn raw   [{:keys [meta]} addr] (get-in @meta [addr :raw]))
 (defn kind  [{:keys [meta]} addr] (get-in @meta [addr :kind]))
@@ -163,14 +169,14 @@
 (defn- compile-style
   "Build a style entry for raw source, or nil if blank. `=`-formulas compile to
    a Spin (with `$val` bound to the owner's value); literals store the string."
-  [{:keys [rt]} addr raw]
+  [{:keys [rt sci]} addr raw]
   (let [t (some-> raw str/trim)]
     (cond
       (or (nil? t) (= "" t)) nil
       (str/starts-with? t "=")
       (binding [ec/*execution-context* rt]
         (let [{:keys [form deps]} (formula/parse (subs t 1) addr)]
-          {:raw raw :kind :formula :deps deps :spin (formula/compile form)}))
+          {:raw raw :kind :formula :deps deps :spin (formula/compile @sci form)}))
       :else {:raw raw :kind :literal :deps #{} :spin nil})))
 
 (defn set-style!
@@ -274,11 +280,108 @@
 (defn load-document!
   "Rebuild a sheet's cells (and their style props) from a document map.
    Order-independent: formula refs resolve at run time, so a cell may load
-   before its dependencies."
-  [sheet doc]
-  (doseq [[addr props] doc]
-    (when-let [raw (:value props)]
-      (set-cell! sheet addr raw))
-    (doseq [[prop raw] (:style props)]
-      (set-style! sheet addr prop raw)))
-  sheet)
+   before its dependencies. Tolerant: a cell/style whose formula can't compile
+   (e.g. it calls a name the sheet's current definitions don't provide) is kept
+   as an error (its raw is preserved; `value` reports {:error …}) instead of
+   aborting the load. Returns {:errors [[addr msg] …]}."
+  [{:keys [meta] :as sheet} doc]
+  (let [errs (atom [])]
+    (doseq [[addr props] doc]
+      (when-let [raw (:value props)]
+        (try (set-cell! sheet addr raw)
+             (catch Exception e
+               (swap! errs conj [addr (.getMessage e)])
+               (swap! meta assoc addr {:raw raw :kind :error :err (.getMessage e)}))))
+      (doseq [[prop raw] (:style props)]
+        (try (set-style! sheet addr prop raw)
+             (catch Exception e
+               (swap! errs conj [(str addr " " (name prop)) (.getMessage e)])))))
+    {:errors @errs}))
+
+;; --- per-sheet definitions: a chunk LIBRARY (user functions; ROADMAP #2) --
+;;
+;; Each sheet has its own SCI namespace (`:sci`) built from the stdlib plus the
+;; user's definitions. The definitions are a LIBRARY: an ordered vector of chunks
+;; `{:id :src}`, each a block of top-level forms ((defn …)/(def …)) edited
+;; independently (and lockable per chunk for collaboration — see web). All chunks
+;; merge (in order) into one source that builds the context; every formula in the
+;; sheet can call the resulting functions/constants. Any change rebuilds the
+;; context and recompiles the whole cell graph against it. Persisted with the
+;; sheet. Name conflicts across chunks are resolved by eval order (later wins) —
+;; a real conflict policy is TBD.
+
+(defn- chunk-id [] (str "d" (subs (str (random-uuid)) 0 8)))
+
+(defn- merge-src
+  "Concatenate the non-blank chunk sources (in order) into one definitions
+   source string for the SCI context."
+  [chunks]
+  (str/join "\n\n" (keep (fn [{:keys [src]}] (not-empty (some-> src str/trim))) chunks)))
+
+(defn defs
+  "The sheet's definitions library: an ordered vector of chunks {:id :src}."
+  [{:keys [defs]}]
+  @defs)
+
+(defn merged-defs
+  "All chunk sources merged into one string (what the SCI context is built from)."
+  [sheet]
+  (merge-src (defs sheet)))
+
+(defn- clear-all!
+  "Tear down every cell + style spin and empty the source maps for a full
+   rebuild. Leaves axis sizing (:cols/:rows) and :defs/:sci intact."
+  [sheet]
+  (run! spin-core/cleanup-spin! (vals @(:registry sheet)))
+  (doseq [props (vals @(:styles sheet))
+          e     (vals props)]
+    (when-let [sp (:spin e)] (spin-core/cleanup-spin! sp)))
+  (reset! (:registry sheet) {})
+  (reset! (:vals sheet) {})
+  (reset! (:meta sheet) {})
+  (reset! (:styles sheet) {}))
+
+(defn- apply-defs!
+  "Replace the library with `chunks` and rebuild the whole sheet against the new
+   SCI context. The merged source is validated first — if it doesn't evaluate,
+   this throws and leaves the sheet (library, context, cells) untouched. Per-cell
+   compile failures afterwards are tolerated (the cell keeps its raw and reads as
+   an error). Returns {:errors [[addr msg] …]} from the rebuild."
+  [{:keys [rt sci defs] :as sheet} chunks]
+  (let [chunks (vec chunks)
+        ctx    (formula/new-ctx (merge-src chunks))   ; throws on bad source
+        doc    (document sheet)]
+    (reset! defs chunks)
+    (reset! sci ctx)
+    (binding [ec/*execution-context* rt]
+      (clear-all! sheet)
+      (let [res (load-document! sheet doc)]
+        (settle! sheet)
+        res))))
+
+(defn set-defs!
+  "Replace the whole definitions library and rebuild. Accepts a chunk vector, or
+   a plain string (wrapped as a single chunk — convenient for tests/loading a
+   legacy single-source `:defs`). Returns {:errors …}."
+  [sheet chunks]
+  (apply-defs! sheet
+               (cond
+                 (string? chunks) (if (str/blank? chunks) [] [{:id (chunk-id) :src chunks}])
+                 :else            (mapv (fn [c] (update c :id #(or % (chunk-id)))) chunks))))
+
+(defn add-def!
+  "Append a new chunk with source `src`; rebuild. Returns {:id <new> :errors …}.
+   A chunk whose merged source doesn't evaluate is rejected (apply-defs! throws)."
+  [sheet src]
+  (let [c {:id (chunk-id) :src (str src)}]
+    (assoc (apply-defs! sheet (conj (defs sheet) c)) :id (:id c))))
+
+(defn update-def!
+  "Replace chunk `id`'s source; rebuild. Returns {:errors …}."
+  [sheet id src]
+  (apply-defs! sheet (mapv #(if (= (:id %) id) (assoc % :src (str src)) %) (defs sheet))))
+
+(defn remove-def!
+  "Drop chunk `id`; rebuild. Returns {:errors …}."
+  [sheet id]
+  (apply-defs! sheet (filterv #(not= (:id %) id) (defs sheet))))

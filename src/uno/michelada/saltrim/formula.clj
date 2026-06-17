@@ -78,31 +78,97 @@
                  form0)]
      {:form form :deps (deps form)})))
 
-;; --- SCI sandbox --------------------------------------------------------
-;; Default SCI core (a curated, side-effect-free clojure.core subset with real
-;; lexical scope and NO host interop) plus `abs`. A per-sheet namespace and a
-;; richer predefined stdlib are the next step (ROADMAP item 2).
+;; --- SCI sandbox + stdlib ----------------------------------------------
+;; SCI runs the user expression in a curated, side-effect-free subset of
+;; clojure.core (real lexical scope, NO host interop the user can reach). On top
+;; we merge a spreadsheet stdlib (math / stats / text / date): plain host fns
+;; exposed by name, callable bare from any formula. Names are chosen NOT to
+;; shadow clojure.core (so map/reduce/str/… keep their meaning). Each sheet gets
+;; its OWN context (isolation) built from this base plus the sheet's user `defs`
+;; — see `new-ctx` (ROADMAP item 2: per-sheet namespace + functions).
 
-(def ^:private sci-ctx (sci/init {:namespaces {'clojure.core {'abs abs}}}))
+(defn- ld ^java.time.LocalDate [s] (java.time.LocalDate/parse (str s)))
+
+(defn- mean* [c] (if (seq c) (/ (double (reduce + 0 c)) (count c)) 0))
+(defn- var* [c]
+  (let [n (count c)]
+    (if (zero? n) 0
+        (let [m (mean* c)] (/ (reduce + (map #(let [d (- % m)] (* d d)) c)) n)))))
+
+(def stdlib
+  "Predefined functions merged into clojure.core for every formula sandbox.
+   Grouped by category; all pure, none shadowing a clojure.core name."
+  {;; math
+   'abs abs
+   'ceil    (fn [x] (long (Math/ceil (double x))))
+   'floor   (fn [x] (long (Math/floor (double x))))
+   'round   (fn [x] (Math/round (double x)))
+   'sqrt    (fn [x] (Math/sqrt (double x)))
+   'pow     (fn [b e] (Math/pow (double b) (double e)))
+   'exp     (fn [x] (Math/exp (double x)))
+   'ln      (fn [x] (Math/log (double x)))
+   'log10   (fn [x] (Math/log10 (double x)))
+   'sign    (fn [x] (long (Math/signum (double x))))
+   'sum     (fn [c] (reduce + 0 c))
+   'product (fn [c] (reduce * 1 c))
+   ;; stats
+   'mean   mean*
+   'avg    mean*
+   'median (fn [c] (let [s (vec (sort c)) n (count s)]
+                     (cond (zero? n) 0
+                           (odd? n)  (nth s (quot n 2))
+                           :else (/ (+ (nth s (dec (quot n 2))) (nth s (quot n 2))) 2.0))))
+   'variance var*
+   'stdev    (fn [c] (Math/sqrt (double (var* c))))
+   ;; text
+   'upper        str/upper-case
+   'lower        str/lower-case
+   'trim         str/trim
+   'join         (fn ([c] (str/join c)) ([sep c] (str/join sep c)))
+   'split        (fn [s sep] (vec (str/split (str s) (re-pattern (java.util.regex.Pattern/quote (str sep))))))
+   'str-replace  (fn [s a b] (str/replace (str s) (str a) (str b)))
+   'starts-with? (fn [s p] (str/starts-with? (str s) (str p)))
+   'ends-with?   (fn [s p] (str/ends-with? (str s) (str p)))
+   'includes?    (fn [s p] (str/includes? (str s) (str p)))
+   'blank?       (fn [s] (str/blank? (str s)))
+   ;; date (ISO yyyy-MM-dd strings)
+   'today        (fn [] (str (java.time.LocalDate/now)))
+   'year         (fn [s] (.getYear (ld s)))
+   'month        (fn [s] (.getMonthValue (ld s)))
+   'day          (fn [s] (.getDayOfMonth (ld s)))
+   'days-between (fn [a b] (.between java.time.temporal.ChronoUnit/DAYS (ld a) (ld b)))})
+
+(defn new-ctx
+  "A fresh per-sheet SCI context: the stdlib merged into clojure.core, then the
+   sheet's user `defs` (a string of top-level forms, e.g. (defn …)) evaluated
+   into its namespace, so cells in that sheet can call them. Throws if `defs`
+   doesn't evaluate — the caller surfaces it and leaves the sheet unchanged.
+   `defs` may be nil/blank (just the stdlib)."
+  [defs]
+  (let [ctx (sci/init {:namespaces {'clojure.core stdlib}})]
+    (when-not (str/blank? defs)
+      (sci/eval-string* ctx defs))
+    ctx))
 
 (defn- sci-fn
   "Compile the pure user `body` (markers already replaced by the value `syms`)
-   to a host-callable fn of those values, sandboxed by SCI."
-  [syms body]
-  (sci/eval-form (sci/fork sci-ctx) (list 'fn (vec syms) body)))
+   to a host-callable fn of those values, sandboxed by SCI `ctx`."
+  [ctx syms body]
+  (sci/eval-form (sci/fork ctx) (list 'fn (vec syms) body)))
 
 ;; --- compile ------------------------------------------------------------
 
 (defn compile
-  "Marker form -> Spin. SCI-compiles the user body over resolved cell values;
-   the spin awaits each distinct referenced cell once (de-dup) and calls the
-   SCI fn. SCI never sees spin/await/track."
-  [form]
+  "Marker form -> Spin, using the sheet's SCI `ctx` (stdlib + user defs). SCI-
+   compiles the user body over resolved cell values; the spin awaits each
+   distinct referenced cell once (de-dup) and calls the SCI fn. SCI never sees
+   spin/await/track."
+  [ctx form]
   (let [addrs (vec (deps form))
         syms  (mapv (fn [_] (gensym "c_")) addrs)
         a->s  (zipmap addrs syms)
         body  (walk/postwalk (fn [x] (if (ref? x) (a->s (second x)) x)) form)
-        user-fn (sci-fn syms body)
+        user-fn (sci-fn ctx syms body)
         bnds (vec (mapcat (fn [a s]
                             [s (list 'await (list 'uno.michelada.saltrim.runtime/lookup a))])
                           addrs syms))

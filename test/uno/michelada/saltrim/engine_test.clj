@@ -192,3 +192,113 @@
     (let [s (mk)]
       (is (thrown? clojure.lang.ExceptionInfo (put s "Z1" "=(slurp \"/etc/passwd\")")))
       (is (thrown? clojure.lang.ExceptionInfo (put s "Z2" "=(System/exit 0)"))))))
+
+(deftest stdlib
+  (testing "math + stats, callable bare"
+    (let [s (mk)]
+      (put s "A1" "10") (put s "A2" "20") (put s "A3" "30")
+      (put s "B1" "=(sum #cells A1:A3)")
+      (put s "B2" "=(mean #cells A1:A3)")
+      (put s "B3" "=(round (sqrt 2))")
+      (put s "B4" "=(product #cells A1:A3)")
+      (put s "B5" "=(median #cells A1:A3)")
+      (is (= 60 (v s "B1")))
+      (is (= 20.0 (v s "B2")))
+      (is (= 1 (v s "B3")))
+      (is (= 6000 (v s "B4")))
+      (is (= 20 (v s "B5")))))
+  (testing "text"
+    (let [s (mk)]
+      (put s "A1" "=(upper \"hi\")")
+      (put s "A2" "=(join \"-\" [1 2 3])")
+      (put s "A3" "=(count (split \"a,b,c\" \",\"))")
+      (is (= "HI" (v s "A1")))
+      (is (= "1-2-3" (v s "A2")))
+      (is (= 3 (v s "A3")))))
+  (testing "date (ISO strings)"
+    (let [s (mk)]
+      (put s "A1" "=(year \"2026-06-17\")")
+      (put s "A2" "=(days-between \"2026-06-01\" \"2026-06-17\")")
+      (is (= 2026 (v s "A1")))
+      (is (= 16 (v s "A2")))))
+  (testing "stdlib names do not shadow clojure.core (e.g. replace)"
+    (let [s (mk)]
+      (put s "A1" "=(replace {1 :a} [1 2 1])")     ; core replace, not our str-replace
+      (is (= [:a 2 :a] (v s "A1")))
+      (put s "A2" "=(str-replace \"a-b\" \"-\" \"+\")")
+      (is (= "a+b" (v s "A2"))))))
+
+(deftest per-sheet-defs
+  (testing "a user-defined fn + const is callable from cells"
+    (let [s (mk)]
+      (sh/set-defs! s "(defn tax [x] (* x 0.2))\n(def vat 1.5)")
+      (put s "A1" "100")
+      (put s "A2" "=(tax #cell A1)")
+      (put s "A3" "=(* #cell A1 vat)")
+      (is (= 20.0 (v s "A2")))
+      (is (= 150.0 (v s "A3")))
+      (is (= "(defn tax [x] (* x 0.2))\n(def vat 1.5)" (sh/merged-defs s)))))
+  (testing "editing defs recompiles dependent cells"
+    (let [s (mk)]
+      (sh/set-defs! s "(defn tax [x] (* x 0.2))")
+      (put s "A1" "100")
+      (put s "A2" "=(tax #cell A1)")
+      (is (= 20.0 (v s "A2")))
+      (sh/set-defs! s "(defn tax [x] (* x 0.5))")   ; redefine
+      (is (= 50.0 (v s "A2")) "cell picks up the new definition")))
+  (testing "removing a used fn -> cell reports an error, others survive; errors collected"
+    (let [s (mk)]
+      (sh/set-defs! s "(defn tax [x] (* x 0.2))")
+      (put s "A1" "100")
+      (put s "A2" "=(tax #cell A1)")
+      (put s "A3" "=(* #cell A1 2)")
+      (let [{:keys [errors]} (sh/set-defs! s "")]   ; drop tax
+        (is (seq errors) "the cell that used tax is reported")
+        (is (= "A2" (ffirst errors))))
+      (is (:error (v s "A2")) "A2 now reads as an error")
+      (is (= 200 (v s "A3")) "an unrelated cell still computes")))
+  (testing "bad defs are rejected and leave the sheet unchanged"
+    (let [s (mk)]
+      (sh/set-defs! s "(defn ok [x] x)")
+      (put s "A1" "=(ok 7)")
+      (is (= 7 (v s "A1")))
+      (is (thrown? Exception (sh/set-defs! s "(defn broken [x] (")))  ; unbalanced
+      (is (= 7 (v s "A1")) "still works on the previous defs")))
+  (testing "definitions are isolated per sheet"
+    (let [s1 (mk) s2 (mk)]
+      (sh/set-defs! s1 "(defn secret [] 42)")
+      (put s1 "A1" "=(secret)")
+      (is (= 42 (v s1 "A1")))
+      (is (thrown? clojure.lang.ExceptionInfo (put s2 "A1" "=(secret)"))
+          "another sheet cannot see s1's defs"))))
+
+(deftest defs-library
+  (testing "add/update/remove chunks; all merge into the program"
+    (let [s (mk)
+          id1 (:id (sh/add-def! s "(defn tri [x] (* x 3))"))
+          id2 (:id (sh/add-def! s "(def k 100)"))]
+      (put s "A1" "4")
+      (put s "A2" "=(+ (tri #cell A1) k)")
+      (is (= 112 (v s "A2")) "both chunks visible")
+      (is (= 2 (count (sh/defs s))))
+      (is (every? :id (sh/defs s)) "each chunk has a stable id")
+      (testing "update one chunk recompiles dependents"
+        (sh/update-def! s id1 "(defn tri [x] (* x 10))")
+        (is (= 140 (v s "A2"))))
+      (testing "remove a chunk -> dependent errors, the other still resolves"
+        (let [{:keys [errors]} (sh/remove-def! s id2)]
+          (is (seq errors)))
+        (is (:error (v s "A2")))
+        (is (= 1 (count (sh/defs s)))))))
+  (testing "a chunk whose source doesn't evaluate is rejected (library unchanged)"
+    (let [s (mk)]
+      (sh/add-def! s "(defn ok [x] x)")
+      (is (thrown? Exception (sh/add-def! s "(defn bad [")))
+      (is (= 1 (count (sh/defs s))))))
+  (testing "set-defs! accepts a chunk vector; merged-defs concatenates"
+    (let [s (mk)]
+      (sh/set-defs! s [{:id "a" :src "(defn f [x] (inc x))"}
+                       {:id "b" :src "(def g 5)"}])
+      (put s "A1" "=(+ (f 1) g)")
+      (is (= 7 (v s "A1")))
+      (is (= "(defn f [x] (inc x))\n\n(def g 5)" (sh/merged-defs s))))))

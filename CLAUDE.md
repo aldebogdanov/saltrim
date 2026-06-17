@@ -212,13 +212,20 @@ broad sharing is the link (the old `:everyone` flag auto-migrates to a link).
 **Cell presentation** (PR #14): reactive per-cell style (`$val`, separate style
 layer, 5 CSS props) + number-format masks (`fmt` ns, `:format` prop) +
 per-column/row sizing (sparse `:cols`/`:rows`, prefix-sum virtualizer, drag to
-resize); in-app help modal + README user guide. **Client = ClojureScript**: the
+resize); in-app help modal + README user guide. **Per-sheet namespace** (PR #24):
+each sheet has its own SCI context — a predefined stdlib (math/stats/text/date,
+bare, read-only) plus the user's own functions/constants kept as a **library of
+chunks** (the `ƒ` modal): each chunk `{:id :src}` edited independently with a
+**collaborative per-chunk lock** (session `:editdef`; `/deflock` `/defunlock`
+`/defsave` `/defadd` `/defdel`; #deflib pushed per session), all merged in order
+into the sheet program, persisted as `:defs` (vector) and recompiled live;
+`formula/compile` takes the sheet ctx. **Client = ClojureScript** (PR #25): the
 JS engine is ported to `app.cljs` (plain CLJS compiler, no node), the address +
 geometry code shared as `.cljc`, and the old hidden-trigger UI replaced by a
 Datastar-attribute + custom-event bridge.
 
-**What's next lives in `ROADMAP.md`** (single source). Headline track: formula
-engine → **SCI** (fixes `let`/locals, enables per-sheet namespaces + user fns),
-collapsible-toolbar UI rework, **JS → CLJS** (done), then multi-selection +
-cut/copy/paste. Cheap wins: dependency-graph view, cell assertions. Boss fight: git-like
-branching (forces cells → Datahike). See `TECHDEBT.md` for deferred items.
+**What's next lives in `ROADMAP.md`** (single source). SCI, per-sheet ns, and
+**JS → CLJS** are all DONE; next is the collapsible-toolbar UI rework, then
+multi-selection + cut/copy/paste. Cheap wins: dependency-graph view, cell
+assertions. Boss fight: git-like branching (forces cells → Datahike). See
+`TECHDEBT.md` for deferred items.

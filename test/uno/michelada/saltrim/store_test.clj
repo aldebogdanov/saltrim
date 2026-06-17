@@ -43,6 +43,26 @@
 (deftest load-missing-nil
   (is (nil? (store/load-sheet "no_such_sheet_xyz"))))
 
+(def ^:private defs-id "test_defs_roundtrip")
+
+(deftest defs-roundtrip
+  (io/delete-file (io/file "data" (str defs-id ".edn")) true)
+  (try
+    (let [s (sheet/create-sheet)]
+      (sheet/add-def! s "(defn dbl [x] (* 2 x))")
+      (sheet/add-def! s "(def k 100)")
+      (sheet/set-cell! s "A1" "21")
+      (sheet/set-cell! s "A2" "=(+ (dbl #cell A1) k)")   ; uses a user fn + const
+      (sheet/settle! s)
+      (store/save! defs-id s))
+    (testing "the definitions library persists and applies before cells on reload"
+      (let [s2 (store/load-sheet defs-id)]
+        (sheet/settle! s2)
+        (is (= 2 (count (sheet/defs s2))) "both chunks round-trip")
+        (is (every? :id (sheet/defs s2)) "chunk ids preserved")
+        (is (= 142 (sheet/value s2 "A2")) "cell using the user fn + const recomputed")))
+    (finally (io/delete-file (io/file "data" (str defs-id ".edn")) true))))
+
 (deftest names-and-storage-ids
   (testing "sheet names exclude underscores (owner__name separator)"
     (is (store/valid-name? "budget-2026"))

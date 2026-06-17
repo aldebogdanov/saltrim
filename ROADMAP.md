@@ -24,11 +24,14 @@ interpretation with real lexical scope, controlled vars, no host `eval`.
   `lookup/await/track/…`.
 - Prerequisite for per-sheet namespaces (item 2).
 
-### 2. Per-sheet namespace + functions  *(needs SCI)*
-Give each sheet its own SCI namespace where the user can **define functions**
-reusable across that sheet's cells, plus ship **predefined collections** (a
-stdlib: math, stats, text, date). Persist user defs with the sheet. Turns a
-sheet into a small program.
+### 2. Per-sheet namespace + functions  *(SHIPPED — PR #24)*
+Each sheet has its own SCI context: a predefined **stdlib** (math / stats / text
+/ date, callable bare, read-only) plus the user's **definitions library** —
+functions/constants kept as separate chunks in the `ƒ` modal, each edited
+independently with a **collaborative per-chunk lock**, all merged into the sheet
+program, reusable from every cell, persisted with the sheet (`:defs`) and
+recompiled live. Turns a sheet into a small program. Open follow-ups: a real
+name-conflict policy across chunks; a shared cross-sheet library; richer stdlib.
 
 ### 3. UI architecture: collapsible control rows  *(before more controls land)*
 The toolbar keeps growing (sheet/share, formula bar, style row, soon clipboard…).
