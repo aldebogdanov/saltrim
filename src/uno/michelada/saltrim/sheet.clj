@@ -373,13 +373,16 @@
   "Append a new chunk with source `src`; rebuild. Returns {:id <new> :errors …}.
    A chunk whose merged source doesn't evaluate is rejected (apply-defs! throws)."
   [sheet src]
-  (let [c {:id (chunk-id) :src (str src)}]
+  (let [c {:id (chunk-id) :src (str src) :edited (System/currentTimeMillis)}]
     (assoc (apply-defs! sheet (conj (defs sheet) c)) :id (:id c))))
 
 (defn update-def!
-  "Replace chunk `id`'s source; rebuild. Returns {:errors …}."
+  "Replace chunk `id`'s source (stamping its last-edit time); rebuild. {:errors …}."
   [sheet id src]
-  (apply-defs! sheet (mapv #(if (= (:id %) id) (assoc % :src (str src)) %) (defs sheet))))
+  (apply-defs! sheet (mapv #(if (= (:id %) id)
+                              (assoc % :src (str src) :edited (System/currentTimeMillis))
+                              %)
+                           (defs sheet))))
 
 (defn remove-def!
   "Drop chunk `id`; rebuild. Returns {:errors …}."

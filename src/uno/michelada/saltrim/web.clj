@@ -461,8 +461,10 @@
              "definitions library: write your own functions/constants as separate entries and call "
              "them from any cell. e.g. add "
              [:span {:style kbd} "(defn margin [rev cost] (/ (- rev cost) rev))"] " then use "
-             [:span {:style kbd} "=(margin #cell A1 #cell B1)"] ". Each entry is edited on its own — "
-             "while you edit one it's locked for other collaborators; saving recompiles every cell."]
+             [:span {:style kbd} "=(margin #cell A1 #cell B1)"] ". Each entry collapses to name "
+             "badges; Edit expands it and " [:span {:style kbd} "⤢"] " opens a big editor (also next "
+             "to the formula and style bars). While you edit one it's locked for other "
+             "collaborators; saving recompiles every cell."]
 
             [:div {:style h3} "Styling a cell"]
             [:p {:style p} "Use the third toolbar row: pick a property, type a value or an "
@@ -490,7 +492,7 @@
             [:p {:style p} "The link / lock button (top bar, owner only) shares the sheet by capability "
              "link or with specific people, at view or edit level."]]]))))
 
-(declare deflib-html)
+(declare deflib-html bigedit-html)
 
 (def ^:private stdlib-reference
   "Read-only reference of the built-in functions (always available, can't be
@@ -582,9 +584,11 @@
                (str
                 ;; design tokens — centralize colors/geometry so a merge can't
                 ;; silently drift them and so inline styles can share them.
-                ":root{--bg:#fff;--panel:#f6f6f6;--line:#bbb;--grid:#ddd;"
-                "--fg:#222;--muted:#666;--accent:#4a90d9;--accent2:#7aa7f0;"
-                "--danger:#c0392b;--radius:4px;}"
+                ;; palette tuned to the SaltRim logo: blue grid/parens, lime
+                ;; slice, slate wordmark — softer neutrals than the old grey/blue.
+                ":root{--bg:#fff;--panel:#f4f6f8;--line:#c7ccd1;--grid:#e2e6ea;"
+                "--fg:#3a4149;--muted:#7a828b;--accent:#2f8fd8;--accent2:#9ec9ee;"
+                "--accent-bg:#eaf4fc;--lime:#7cc62e;--danger:#c0392b;--radius:4px;}"
                 ;; toolbar: two rows. row 1 = picker/new/share/identity,
                 ;; row 2 = cell-ref + formula bar. .tool/.btn unify the inputs
                 ;; and buttons that used to repeat the same inline style string.
@@ -594,6 +598,14 @@
                 ".tool.mono{font-family:monospace;}"
                 ".btn{font:12px sans-serif;padding:5px 8px;border:1px solid var(--line);"
                 "border-radius:var(--radius);background:var(--panel);cursor:pointer;}"
+                ".btn:hover{border-color:var(--accent);}"
+                ;; primary action button (Save / Apply) — the brand accent
+                ".btn.primary{background:var(--accent);color:#fff;border-color:var(--accent);}"
+                ".btn.primary:hover{filter:brightness(1.06);}"
+                ;; definition name badges (collapsed library cards)
+                ".badge{display:inline-block;font:600 11px/1.5 monospace;color:var(--accent);"
+                "background:var(--accent-bg);border:1px solid var(--accent2);"
+                "border-radius:10px;padding:0 .5rem;}"
                 ".spacer{flex:1;}"
                 ;; resize grips: a thin hit-zone on a header's trailing edge that
                 ;; /app.js drags. The #rzguide is the single moving guide line.
@@ -662,8 +674,12 @@
              :data-signals:defspanel "false"
              :data-signals:defid "''"
              :data-signals:defsrc "''"
+             ;; shared big-editor modal (formula bar / style bar / definitions)
+             :data-signals:bigedit "false"
+             :data-signals:bigwhat "''"
+             :data-signals:big "''"
              :data-signals:help "false"
-             :style "font-family:sans-serif;margin:0;padding:.6rem;"}
+             :style "font-family:sans-serif;margin:0;padding:.6rem;min-height:100vh;background:var(--bg);color:var(--fg);"}
       [:div {:id "toast" :data-show "$err != ''" :data-text "$err"
              :data-on:click "$err=''"
              :style (str "position:fixed;top:1rem;right:1rem;max-width:26rem;background:#c0392b;"
@@ -671,6 +687,7 @@
                          "cursor:pointer;box-shadow:0 2px 8px rgba(0,0,0,.3);z-index:20;")}]
       (h/raw (help-html))
       (h/raw (defs-html storage-id))
+      (h/raw (bigedit-html))
       ;; ── toolbar row 1: sheet management + sharing + identity ───────────
       [:div {:class "toolrow"}
        (sheet-picker uid storage-id sname)
@@ -702,7 +719,8 @@
                 :data-on:focus "$edit=true, @post('/presence')"
                 :data-on:keydown "evt.key==='Enter' && ($cell=$sel, @post('/cell'))"
                 :data-on:blur "$cell=$sel, @post('/cell'), $edit=false, @post('/presence')"
-                :style "flex:1;"}]]
+                :style "flex:1;"}]
+       [:button {:class "btn" :title "big editor" :data-on:click "$big=$v, $bigwhat='v', $bigedit=true"} "⤢"]]
       ;; ── toolbar row 3: style of the selected cell ──────────────────────
       ;; prop dropdown + a literal-or-=formula source, applied to $sel on Enter
       ;; (like the formula bar — no separate button). $val is the cell's own
@@ -718,7 +736,8 @@
        [:input {:id "stylesrcbox" :class "tool mono" :data-bind:stylesrc ""
                 :placeholder "color / mask / =formula (use $val) — Enter to apply"
                 :data-on:keydown "evt.key==='Enter' && ($cell=$sel, @post('/style'))"
-                :style "flex:1;"}]]
+                :style "flex:1;"}]
+       [:button {:class "btn" :title "big editor" :data-on:click "$big=$stylesrc, $bigwhat='style', $bigedit=true"} "⤢"]]
       ;; logical-scroll viewport (custom wheel + scrollbars in /app.js)
       (grid-layers sh {:r0 0 :c0 0})
 
@@ -1008,66 +1027,108 @@
   (some (fn [[k s]] (when (and (= sheet-id (:sheet s)) (= (:editdef s) id)) k))
         @sessions*))
 
-(defn- def-name
-  "Display label for a chunk: the symbol of its first (def/defn …) form."
+(defn- def-names
+  "The symbols a chunk declares — the names of every top-level (def…)/(defn…)
+   form — shown as badges on the collapsed card. Empty source -> [\"untitled\"]."
   [src]
-  (or (second (re-find #"\(def[a-z-]*\s+([A-Za-z0-9*+!?<>=_.%/-]+)" (str src)))
-      "untitled"))
+  (let [ns (map second (re-seq #"\(def[a-z]*\s+([A-Za-z0-9*+!?<>=_.%/-]+)" (str src)))]
+    (if (seq ns) (vec ns) ["untitled"])))
+
+(defn- fmt-edited
+  "Epoch-ms -> \"yyyy-MM-dd HH:mm\" (local), or nil."
+  [ms]
+  (when ms
+    (.format (java.time.format.DateTimeFormatter/ofPattern "yyyy-MM-dd HH:mm")
+             (java.time.LocalDateTime/ofInstant (java.time.Instant/ofEpochMilli (long ms))
+                                                (java.time.ZoneId/systemDefault)))))
 
 (defn- deflib-html
-  "Inner HTML of #deflib for session `sid`: each chunk read-only with Edit /
-   Delete, except the one this session holds (an editable textarea bound to
-   $defsrc with Save / Cancel). A chunk held by another session shows a lock
-   badge and stays read-only. `sid` may be nil (initial page render: all
-   read-only, no own-edit)."
+  "Inner HTML of #deflib for session `sid`. An ACCORDION: each chunk shows
+   collapsed (tier 1) as its declared-name badges + last-edit time, with Edit /
+   delete. Edit (`/deflock`) expands it (tier 2) into a textarea bound to $defsrc
+   with Save / Cancel and a ⤢ that opens the shared big editor (tier 3). A chunk
+   held by another session shows a lock badge and stays collapsed. `sid` may be
+   nil (initial page render: all read-only, no own-edit)."
   [sid sheet-id]
   (let [sh     (:sh (@sheets* sheet-id))
         chunks (when sh (sheet/defs sh))
-        card   "border:1px solid var(--grid);border-radius:6px;padding:.5rem .6rem;margin:.4rem 0;"
-        pre    "margin:.3rem 0 0;font:12px/1.35 monospace;white-space:pre-wrap;color:var(--fg);"
-        nm     "font:600 12px sans-serif;"
+        card   "border:1px solid var(--grid);border-radius:6px;padding:.45rem .6rem;margin:.4rem 0;"
+        row    "display:flex;align-items:center;gap:.4rem;flex-wrap:wrap;"
+        when-s "font:11px sans-serif;color:var(--muted);white-space:nowrap;"
         ta     (str "width:100%;box-sizing:border-box;min-height:7rem;margin:.3rem 0;"
-                    "white-space:pre;font:13px/1.4 monospace;resize:vertical;")]
+                    "white-space:pre;font:13px/1.4 monospace;resize:vertical;")
+        badges (fn [src] (for [n (def-names src)] [:span {:class "badge"} n]))]
     (str (h/html
           [:div
            (if (empty? chunks)
              [:p {:style "font:13px sans-serif;color:var(--muted);margin:.3rem 0;"}
               "No definitions yet — add one below."]
-             (for [{:keys [id src]} chunks
+             (for [{:keys [id src edited]} chunks
                    :let [editor (def-editor-of sheet-id id)
                          mine?  (and sid (= editor sid))]]
                [:div {:style card}
                 (cond
+                  ;; tier 2/3 — this session is editing: textarea + ⤢ big editor
                   mine?
                   [:div
-                   [:div {:style "display:flex;align-items:center;gap:.5rem;"}
-                    [:span {:style nm} (def-name src)] [:span {:style "flex:1;"}]
-                    [:span {:style "font:11px sans-serif;color:var(--accent);"} "editing"]]
+                   [:div {:style row}
+                    (badges src) [:span {:style "flex:1;"}]
+                    [:span {:style "font:11px sans-serif;color:var(--accent);"} "editing"]
+                    [:button {:class "btn" :title "open the big editor"
+                              :data-on:click "$big=$defsrc, $bigwhat='def', $bigedit=true"} "⤢"]]
                    [:textarea {:class "tool mono" :data-bind:defsrc "" :spellcheck "false"
                                :placeholder "(defn double [x] (* 2 x))" :style ta}]
                    [:div {:style "display:flex;gap:.4rem;"}
-                    [:button {:class "btn" :data-on:click "@post('/defsave')"
-                              :style "background:var(--accent);color:#fff;border-color:var(--accent);"} "Save"]
+                    [:button {:class "btn primary" :data-on:click "@post('/defsave')"} "Save"]
                     [:button {:class "btn" :data-on:click "@post('/defunlock')"} "Cancel"]]]
 
+                  ;; locked by another collaborator: collapsed, no Edit
                   editor
-                  [:div
-                   [:div {:style "display:flex;align-items:center;gap:.5rem;"}
-                    [:span {:style nm} (def-name src)] [:span {:style "flex:1;"}]
-                    [:span {:style "font:11px sans-serif;color:var(--muted);"}
-                     (str "🔒 " (or (get-in @sessions* [editor :uname]) "someone") " editing")]]
-                   [:pre {:style pre} src]]
+                  [:div {:style row}
+                   (badges src) [:span {:style "flex:1;"}]
+                   [:span {:style when-s}
+                    (str "🔒 " (or (get-in @sessions* [editor :uname]) "someone") " editing")]]
 
+                  ;; tier 1 collapsed: name badges + last-edit time + Edit / delete
                   :else
-                  [:div
-                   [:div {:style "display:flex;align-items:center;gap:.4rem;"}
-                    [:span {:style nm} (def-name src)] [:span {:style "flex:1;"}]
-                    [:button {:class "btn" :data-on:click (str "$defid='" id "', @post('/deflock')")} "Edit"]
-                    [:button {:class "btn" :data-on:click (str "$defid='" id "', @post('/defdel')")
-                              :title "delete this definition"} "🗑"]]
-                   [:pre {:style pre} src]])]))
+                  [:div {:style row}
+                   (badges src) [:span {:style "flex:1;"}]
+                   (when-let [w (fmt-edited edited)] [:span {:style when-s} (str "edited " w)])
+                   [:button {:class "btn" :data-on:click (str "$defid='" id "', @post('/deflock')")} "Edit"]
+                   [:button {:class "btn" :data-on:click (str "$defid='" id "', @post('/defdel')")
+                             :title "delete this definition"} "🗑"]])]))
            [:button {:class "btn" :data-on:click "@post('/defadd')" :style "margin-top:.3rem;"}
             "+ Add definition"]]))))
+
+(defn- bigedit-html
+  "A large shared editor modal (#bigedit). Opened from the formula bar, the style
+   bar, or a definition card by setting $big (the text to edit), $bigwhat (which
+   target: 'v' | 'style' | 'def') and $bigedit=true. Apply writes $big back to the
+   target signal and posts to the matching endpoint — entirely declarative."
+  []
+  (let [ta (str "width:100%;box-sizing:border-box;min-height:52vh;"
+                "font:13px/1.5 monospace;white-space:pre;resize:vertical;"
+                "border:1px solid var(--line);border-radius:var(--radius);padding:.5rem .6rem;")]
+    (str (h/html
+          [:div {:id "bigeditwrap" :data-show "$bigedit" :data-on:click "$bigedit=false"
+                 :style (str "position:fixed;inset:0;z-index:60;background:rgba(0,0,0,.35);"
+                             "display:flex;align-items:flex-start;justify-content:center;padding:4vh 1rem;")}
+           [:div {:data-on:click "evt.stopPropagation()"
+                  :style (str "background:var(--bg);border:1px solid var(--line);border-radius:8px;"
+                              "box-shadow:0 8px 32px rgba(0,0,0,.25);max-width:48rem;width:100%;padding:1rem 1.1rem;")}
+            [:div {:style "display:flex;align-items:center;margin-bottom:.4rem;"}
+             [:h2 {:style "margin:0;font:600 15px sans-serif;flex:1;"
+                   :data-text (str "$bigwhat==='v' ? 'Edit value / formula' : "
+                                   "($bigwhat==='style' ? 'Edit style source' : 'Edit definition')")}]
+             [:button {:class "btn" :data-on:click "$bigedit=false" :title "close"} "✕"]]
+            [:textarea {:id "bigbox" :class "mono" :data-bind:big "" :spellcheck "false" :style ta}]
+            [:div {:style "display:flex;gap:.4rem;margin-top:.5rem;justify-content:flex-end;"}
+             [:button {:class "btn" :data-on:click "$bigedit=false"} "Cancel"]
+             [:button {:class "btn primary"
+                       :data-on:click
+                       (str "($bigwhat==='v' ? ($v=$big, $cell=$sel, @post('/cell')) : "
+                            "$bigwhat==='style' ? ($stylesrc=$big, $cell=$sel, @post('/style')) : "
+                            "($defsrc=$big, @post('/defsave'))), $bigedit=false")} "Apply"]]]]))))
 
 (defn- push-deflib! [gen sid sheet-id]
   (patch-inner! gen "#deflib" (deflib-html sid sheet-id)))
@@ -1577,30 +1638,35 @@
     set-cookie (assoc-in [:headers "Set-Cookie"] set-cookie)))
 
 (defn- login-page [err]
-  (let [field (str "font:13px sans-serif;padding:6px 8px;border:1px solid #bbb;"
+  (let [field (str "font:13px sans-serif;padding:6px 8px;border:1px solid #c7ccd1;"
                    "border-radius:4px;")]
     (str
      "<!doctype html>"
      (h/html
       [:html
-       [:head [:meta {:charset "utf-8"}] [:title "SaltRim — sign in"]]
-       [:body {:style "font-family:sans-serif;max-width:24rem;margin:14vh auto;"}
-        [:h1 {:style "font-weight:600;"} "SaltRim"]
-        [:p {:style "color:#666;"} "Sign in to open your sheets."]
+       [:head [:meta {:charset "utf-8"}] [:title "SaltRim — sign in"]
+        [:link {:rel "icon" :type "image/png" :href "/favicon.png"}]]
+       ;; explicit light bg so an OS dark theme can't black out the page; the
+       ;; centered column lives in an inner wrapper.
+       [:body {:style "font-family:sans-serif;margin:0;min-height:100vh;background:#fff;color:#3a4149;"}
+        [:div {:style "max-width:24rem;margin:0 auto;padding:14vh 1rem 0;"}
+        [:img {:src "/SaltRim.png" :alt "SaltRim"
+               :style "display:block;margin:0 auto .6rem;width:180px;height:auto;"}]
+        [:p {:style "color:#7a828b;text-align:center;margin-top:0;"} "Sign in to open your sheets."]
         (when err
           [:p {:style "color:#c0392b;font:13px sans-serif;"} (url-decode err)])
         [:div {:style "display:flex;flex-direction:column;gap:.6rem;"}
          (for [[k p] (auth/providers)]
            [:a {:href (str "/auth/" (name k))
                 :style (str field "text-align:center;text-decoration:none;"
-                            "background:#f6f6f6;color:#222;display:block;")}
+                            "background:#f4f6f8;color:#3a4149;display:block;")}
             (str "Continue with " (:label p))])
          (when (auth/dev-auth?)
            [:form {:method "get" :action "/auth/dev"
                    :style "display:flex;gap:.4rem;"}
             [:input {:name "name" :placeholder "your name (dev login)"
                      :autofocus true :style (str field "flex:1;")}]
-            [:button {:style field} "Sign in"]])]]]))))
+            [:button {:style field} "Sign in"]])]]]]))))
 
 (defn- denied-page [uid]
   (str
@@ -1690,6 +1756,12 @@
                             {:status 200 :headers {"Content-Type" "text/javascript"}
                              :body (slurp r)}
                             {:status 404 :body "no app.js"})
+    ;; brand wordmark (login page)
+    [:get "/SaltRim.png"] (if-let [r (io/resource "SaltRim.png")]
+                            {:status 200 :headers {"Content-Type" "image/png"
+                                                   "Cache-Control" "max-age=86400"}
+                             :body (io/input-stream r)}
+                            {:status 404 :body "no logo"})
     ;; both the explicit link (/favicon.png) and the browser's automatic
     ;; /favicon.ico request (covers pages without the <link>, e.g. login)
     ([:get "/favicon.png"] [:get "/favicon.ico"])

@@ -61,11 +61,15 @@ the sheet.
 =(* #cell A1 vat)
 ```
 
-Each entry is **edited independently**, and while one collaborator is editing an
-entry it is **locked** for everyone else (their view shows a lock badge). All
-entries merge, in order, into the sheet's program; **Save** recompiles every cell
-against it (for you and any collaborators). The built-in functions (above) are
-shown read-only and can't be edited.
+Each entry collapses to **badges** of the names it declares plus its last-edit
+time; **Edit** expands it into a textarea, and **⤢** opens a full-size editor.
+While one collaborator is editing an entry it is **locked** for everyone else
+(their view shows a lock badge). All entries merge, in order, into the sheet's
+program; **Save** recompiles every cell against it (for you and any
+collaborators). The built-in functions (above) are shown read-only.
+
+The same **⤢ big editor** sits next to the formula bar and the style bar, for
+composing longer formulas or style expressions in a roomy modal.
 
 ### Styling a cell
 
