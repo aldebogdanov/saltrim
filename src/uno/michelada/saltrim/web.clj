@@ -586,7 +586,7 @@
                 ;; silently drift them and so inline styles can share them.
                 ;; palette tuned to the SaltRim logo: blue grid/parens, lime
                 ;; slice, slate wordmark — softer neutrals than the old grey/blue.
-                ":root{--bg:#fff;--panel:#f4f6f8;--line:#c7ccd1;--grid:#e2e6ea;"
+                ":root{--bg:#fefefe;--panel:#f4f6f8;--line:#c7ccd1;--grid:#e2e6ea;"
                 "--fg:#3a4149;--muted:#7a828b;--accent:#2f8fd8;--accent2:#9ec9ee;"
                 "--accent-bg:#eaf4fc;--lime:#7cc62e;--danger:#c0392b;--radius:4px;}"
                 ;; toolbar: two rows. row 1 = picker/new/share/identity,
@@ -1648,7 +1648,7 @@
         [:link {:rel "icon" :type "image/png" :href "/favicon.png"}]]
        ;; explicit light bg so an OS dark theme can't black out the page; the
        ;; centered column lives in an inner wrapper.
-       [:body {:style "font-family:sans-serif;margin:0;min-height:100vh;background:#fff;color:#3a4149;"}
+       [:body {:style "font-family:sans-serif;margin:0;min-height:100vh;background:#fefefe;color:#3a4149;"}
         [:div {:style "max-width:24rem;margin:0 auto;padding:14vh 1rem 0;"}
         [:img {:src "/SaltRim.png" :alt "SaltRim"
                :style "display:block;margin:0 auto .6rem;width:180px;height:auto;"}]
