@@ -683,6 +683,11 @@
                 ;; default cell/editor box = this SHEET's default axis sizes (a
                 ;; sized column/row overrides inline per cell). Server-rendered so
                 ;; changing the sheet default reflows the grid on reload.
+                ;; the grid is a selection surface, not text: suppress native text
+                ;; selection so Shift/range-selecting cells doesn't highlight their
+                ;; text. The floating editor re-enables it so you can select while
+                ;; editing (toolbar inputs live outside #viewport, unaffected).
+                "#viewport{-webkit-user-select:none;user-select:none;}"
                 (let [dw (dec (sheet/default-col-w sh)) dh (dec (sheet/default-row-h sh))]
                   (format (str ".cell{position:absolute;width:%dpx;height:%dpx;"
                                "box-sizing:border-box;border:1px solid var(--grid);"
@@ -690,7 +695,8 @@
                                "white-space:nowrap;background:var(--bg);}"
                                "#editor{position:absolute;width:%dpx;height:%dpx;"
                                "box-sizing:border-box;border:1px solid var(--accent);"
-                               "padding:2px 4px;font:13px monospace;outline:none;z-index:6;}")
+                               "padding:2px 4px;font:13px monospace;outline:none;z-index:6;"
+                               "-webkit-user-select:text;user-select:text;}")
                           dw dh dw dh))
                 ;; selection / editing OVERLAY (#self), server-rendered. Literal %
                 ;; in the gradients -> kept OUT of the format call above.
