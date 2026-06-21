@@ -24,6 +24,7 @@
             [uno.michelada.saltrim.auth :as auth]
             [uno.michelada.saltrim.db :as db]
             [uno.michelada.saltrim.fmt :as fmt]
+            [uno.michelada.saltrim.formula :as formula]
             [uno.michelada.saltrim.sheet :as sheet]
             [uno.michelada.saltrim.store :as store]
             [uno.michelada.saltrim.util :as util :refer [timed]]
@@ -504,6 +505,12 @@
              "+arrows extends a range · " [:span {:style kbd} "Ctrl/⌘"] "+click adds another range · "
              [:span {:style kbd} "Delete"] " clears the selected cells (undoable)."]
 
+            [:div {:style h3} "Copy / paste"]
+            [:p {:style p} [:span {:style kbd} "Ctrl/⌘+C"] " copy · " [:span {:style kbd} "Ctrl/⌘+X"]
+             " cut · " [:span {:style kbd} "Ctrl/⌘+V"] " paste at the selected cell. Pasted formulas "
+             "shift their references relative to the move (copy " [:span {:style kbd} "=(+ #cell A1 1)"]
+             " down a row pastes " [:span {:style kbd} "=(+ #cell A2 1)"] ")."]
+
             [:div {:style h3} "Undo / redo"]
             [:p {:style p} [:span {:style kbd} "Ctrl/⌘+Z"] " undoes your last edit · "
              [:span {:style kbd} "Ctrl/⌘+Shift+Z"] " (or " [:span {:style kbd} "Ctrl+Y"] ") redoes. "
@@ -840,6 +847,10 @@
              :data-on:sr-redo__window "@post('/redo')"
              ;; clear the current selection (Delete/Backspace from app.cljs)
              :data-on:sr-clear__window "$selcells=evt.detail.ranges, @post('/clear')"
+             ;; clipboard (Ctrl/⌘ C / X / V from app.cljs) — selection rides in $selcells
+             :data-on:sr-copy__window  "$selcells=evt.detail.ranges, @post('/copy')"
+             :data-on:sr-cut__window   "$selcells=evt.detail.ranges, @post('/cut')"
+             :data-on:sr-paste__window "$selcells=evt.detail.ranges, @post('/paste')"
              ;; commit an in-progress edit (app.cljs fires this before a resize
              ;; drag, whose preventDefault would otherwise swallow the blur)
              :data-on:sr-commit__window "$edit && ($cell=$sel, @post('/cell'), $edit=false, $celledit=false, @post('/presence'))"
@@ -1456,6 +1467,98 @@
                 (catch Throwable e
                   (signals! gen {:err (pretty-err (.getMessage e))}))))))))))
 
+;; --- clipboard (copy / cut / paste) ---------------------------------------
+;; A per-session clipboard ({:origin [c0 r0] :w :h :cells [{:dc :dr :value}]}),
+;; captured server-side so it works for off-window ranges. v1 is a single
+;; rectangular range, value-level; paste shifts formula refs RELATIVE to the move
+;; (see formula/shift-refs). Cut = copy + clear. (Multi-range, style/granularity
+;; and cross-sheet are follow-ups.)
+
+(defn- first-range
+  "Top-left/bottom-right [c0 r0 c1 r1] of the FIRST \"TL:BR\" range in `selcells`,
+   or nil."
+  [selcells]
+  (when-let [r (->> (str/split (str selcells) #"\s+") (remove str/blank?) first)]
+    (let [[a b] (str/split r #":")
+          {ca :ci ra :ri} (addr/parse a)
+          {cb :ci rb :ri} (addr/parse (or b a))]
+      [(min ca cb) (min ra rb) (max ca cb) (max ra rb)])))
+
+(defn- capture-clip [sh c0 r0 c1 r1]
+  {:origin [c0 r0] :w (inc (- c1 c0)) :h (inc (- r1 r0))
+   :cells (vec (for [r (range r0 (inc r1)) c (range c0 (inc c1))
+                     :let [a (addr/make c r) v (sheet/raw sh a)]
+                     :when v]
+                 {:dc (- c c0) :dr (- r r0) :value v}))})
+
+(defn- handle-copy [req]
+  (with-access req
+    (fn [uid sheet-id rec {:keys [sid selcells]} gen]
+      (ensure-session! sid sheet-id uid (:token rec))
+      (when-let [[c0 r0 c1 r1] (first-range selcells)]
+        (swap! sessions* assoc-in [sid :clip] (capture-clip (:sh rec) c0 r0 c1 r1)))
+      (signals! gen {:err ""}))))                  ; copy is silent (like everywhere)
+
+(defn- paste-cells!
+  "Write `clip` so its top-left lands at (tc,tr): each cell's value, formula refs
+   shifted by the move. Records per-cell undo. Returns the affected addresses."
+  [sh sid clip tc tr]
+  (let [[oc orr] (:origin clip)
+        dc (- tc oc) dr (- tr orr)
+        affected (atom [])]
+    (doseq [{cdc :dc cdr :dr value :value} (:cells clip)
+            :let [a      (addr/make (+ tc cdc) (+ tr cdr))
+                  before (sheet/raw sh a)
+                  src    (if (str/starts-with? (str value) "=")
+                           (formula/shift-refs value dc dr) value)]]
+      (swap! affected into (cons a (sheet/dependents* sh a)))
+      (sheet/set-cell! sh a src)
+      (record-edit! sid a :value before (sheet/raw sh a)))
+    (distinct @affected)))
+
+(defn- handle-paste [req]
+  (with-access req
+    (fn [uid sheet-id rec {:keys [sid selcells]} gen]
+      (ensure-session! sid sheet-id uid (:token rec))
+      (if (not= :read-write (:level rec))
+        (signals! gen {:err "read-only access — you can't edit this sheet"})
+        (let [sh   (:sh rec)
+              clip (get-in @sessions* [sid :clip])
+              tgt  (first-range selcells)]
+          (when (and clip tgt (seq (:cells clip)))
+            (locking edit-lock
+              (try
+                (let [affected (paste-cells! sh sid clip (first tgt) (second tgt))]
+                  (when (seq affected)
+                    (sheet/settle! sh) (save-rec! sheet-id uid)
+                    (push-changes! gen sid sheet-id sh affected)))
+                (catch Throwable e
+                  (signals! gen {:err (pretty-err (.getMessage e))}))))))))))
+
+(defn- handle-cut [req]
+  (with-access req
+    (fn [uid sheet-id rec {:keys [sid selcells]} gen]
+      (ensure-session! sid sheet-id uid (:token rec))
+      (if (not= :read-write (:level rec))
+        (signals! gen {:err "read-only access — you can't edit this sheet"})
+        (when-let [[c0 r0 c1 r1] (first-range selcells)]
+          (let [sh   (:sh rec)
+                clip (capture-clip sh c0 r0 c1 r1)]
+            (swap! sessions* assoc-in [sid :clip] clip)
+            (locking edit-lock
+              (try
+                (let [affected (atom [])]
+                  (doseq [{cdc :dc cdr :dr value :value} (:cells clip)
+                          :let [a (addr/make (+ c0 cdc) (+ r0 cdr))]]
+                    (swap! affected into (cons a (sheet/dependents* sh a)))
+                    (sheet/set-cell! sh a "")
+                    (record-edit! sid a :value value nil))
+                  (when (seq @affected)
+                    (sheet/settle! sh) (save-rec! sheet-id uid)
+                    (push-changes! gen sid sheet-id sh (distinct @affected))))
+                (catch Throwable e
+                  (signals! gen {:err (pretty-err (.getMessage e))}))))))))))
+
 (defn- handle-view [req]
   (with-access req
     (fn [uid sheet-id rec {:keys [r0 c0 sid]} gen]
@@ -1982,6 +2085,9 @@
     [:post "/undo"]       (handle-undo req)
     [:post "/redo"]       (handle-redo req)
     [:post "/clear"]      (handle-clear req)
+    [:post "/copy"]       (handle-copy req)
+    [:post "/cut"]        (handle-cut req)
+    [:post "/paste"]      (handle-paste req)
     [:post "/size"]       (handle-size req)
     [:post "/props"]      (handle-props req)
     [:post "/deflock"]    (handle-deflock req)

@@ -59,13 +59,18 @@ the marquee is drawn locally into `#selrange` (peers see only the active cell).
 First consumer: **Delete** clears the selection (`/clear`, per-cell undo entries).
 Next consumers: style-to-selection + the clipboard (#6).
 
-### 6. Cut / copy / paste
-Clipboard over cells with **granularity**: paste *all*, *values only*,
-*style only*, or *format only*. Define the semantics up front:
-- relative vs absolute reference shift on paste,
-- multi-range paste rules,
-- cross-sheet paste.
-Keyboard + menu, both.
+### 6. Cut / copy / paste  *(SHIPPED v1 — branch `feat/multi-select`)*
+`Ctrl/⌘+C` copy · `Ctrl/⌘+X` cut · `Ctrl/⌘+V` paste. A **per-session server
+clipboard** (works for off-window ranges), captured from the selection's first
+rectangle. Paste lands at the selected cell with **relative reference shift**
+(copy `=(+ #cell A1 1)` down a row pastes `=(+ #cell A2 1)`; refs clamp at A1 —
+`formula/shift-refs`). Cut = copy + clear; paste/cut record per-cell undo. Server
+holds the clip in the session (`/copy` `/cut` `/paste`); selection rides in
+`$selcells`.
+Decided semantics: refs are **relative** on paste (SaltRim has no `$`-absolute
+syntax). **Deferred:** paste *granularity* (values / style / format only),
+multi-range copy, style/format in the clip, cross-sheet paste, marching-ants
+visual of the copied range.
 
 ## Cheap wins (slot in anytime; assertions pair well after SCI)
 - **Semantic graph view** — visualize the cell dependency graph (we already

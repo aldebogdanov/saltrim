@@ -132,6 +132,12 @@ sheet-wide default column width and row height.
 - **Ctrl/⌘+click** adds another range (multi-range selection).
 - **Delete** / **Backspace** clears the selected cells (undoable).
 
+### Copy / cut / paste
+
+- **Ctrl/⌘+C** copy · **Ctrl/⌘+X** cut · **Ctrl/⌘+V** paste at the selected cell.
+- Pasted **formulas shift their references** relative to the move — copy
+  `=(+ #cell A1 1)` down a row and it pastes `=(+ #cell A2 1)`.
+
 ### Undo / redo
 
 - **Ctrl/⌘+Z** undoes your last edit; **Ctrl/⌘+Shift+Z** (or **Ctrl+Y**) redoes.

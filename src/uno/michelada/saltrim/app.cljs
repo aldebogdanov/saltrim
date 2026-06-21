@@ -303,6 +303,10 @@
       (cond
         (and mod (= low "z")) (do (.preventDefault e) (emit! (if (.-shiftKey e) "sr-redo" "sr-undo")))
         (and mod (= low "y")) (do (.preventDefault e) (emit! "sr-redo"))
+        ;; clipboard — copy/cut/paste the selection (server holds the clip)
+        (and mod (= low "c")) (when (seq (:ranges @SEL)) (.preventDefault e) (emit! "sr-copy"  #js {:ranges (sel-ranges-str)}))
+        (and mod (= low "x")) (when (seq (:ranges @SEL)) (.preventDefault e) (emit! "sr-cut"   #js {:ranges (sel-ranges-str)}))
+        (and mod (= low "v")) (when (seq (:ranges @SEL)) (.preventDefault e) (emit! "sr-paste" #js {:ranges (sel-ranges-str)}))
         (#{"Delete" "Backspace"} k) (when (seq (:ranges @SEL)) (.preventDefault e) (clear-sel!))
         :else
         (let [act (sel-active)]
