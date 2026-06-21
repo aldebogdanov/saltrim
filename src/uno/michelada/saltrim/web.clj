@@ -654,6 +654,8 @@
                 ".btn{font:12px sans-serif;padding:5px 8px;border:1px solid var(--line);"
                 "border-radius:var(--radius);background:var(--panel);cursor:pointer;}"
                 ".btn:hover{border-color:var(--accent);}"
+                ;; toggled-on section chip (e.g. 🎨 format) — tinted, not loud
+                ".btn.active{background:var(--accent-bg);border-color:var(--accent);color:var(--accent);}"
                 ;; primary action button (Save / Apply) — the brand accent
                 ".btn.primary{background:var(--accent);color:#fff;border-color:var(--accent);}"
                 ".btn.primary:hover{filter:brightness(1.06);}"
@@ -731,6 +733,8 @@
              :data-signals:grantee "''"
              :data-signals:styleprop "'bg'"
              :data-signals:stylesrc "''"
+             ;; collapsible toolbar sections (formula bar stays; others toggle)
+             :data-signals:fmtbar "false"
              :data-signals:rzcmd "''"
              ;; definitions library (ƒ modal)
              :data-signals:defspanel "false"
@@ -765,6 +769,10 @@
        ;; sharing toggle / badge (patched back by POST /share)
        (h/raw (share-html uid storage-id link-token))
        [:span {:class "spacer"}]
+       ;; section toggle: show/hide the format row (the pattern future control
+       ;; rows — clipboard, data — reuse, so the bar never just grows)
+       [:button {:class "btn" :data-class:active "$fmtbar"
+                 :data-on:click "$fmtbar = !$fmtbar" :title "format / style controls"} "🎨"]
        [:button {:class "btn" :data-on:click "$defspanel=true" :title "sheet definitions (reusable functions)"} "ƒ"]
        (when owner?
          [:button {:class "btn" :data-on:click "$propspanel=true" :title "sheet properties"} "⚙"])
@@ -790,11 +798,12 @@
                 :data-on:blur "$cell=$sel, @post('/cell'), $edit=false, @post('/presence')"
                 :style "flex:1;"}]
        [:button {:class "btn" :title "big editor" :data-on:click "$big=$v, $bigwhat='v', $bigedit=true"} "⤢"]]
-      ;; ── toolbar row 3: style of the selected cell ──────────────────────
+      ;; ── toolbar row 3: style of the selected cell (collapsible) ────────
       ;; prop dropdown + a literal-or-=formula source, applied to $sel on Enter
       ;; (like the formula bar — no separate button). $val is the cell's own
-      ;; value, e.g. =(if (> $val 100) "tomato" "white")
-      [:div {:class "toolrow"}
+      ;; value, e.g. =(if (> $val 100) "tomato" "white"). Hidden until the 🎨
+      ;; toggle ($fmtbar) reveals it — keeps the default bar lean.
+      [:div {:class "toolrow" :data-show "$fmtbar"}
        [:select {:id "stylepropbox" :class "tool" :data-bind:styleprop ""
                  :data-on:change
                  (str "const c=document.getElementById('c_'+$sel);"
