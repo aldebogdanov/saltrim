@@ -27,11 +27,11 @@ on load. Multiple clients edit one sheet live.
 | `constants` (`.cljc`) | Grid geometry (cell/gutter/header px, window size, overscan, scrollbar thickness). One source of truth for server renderer + `app.cljs`. |
 | `app` (`.cljs`) | Browser engine: logical-scroll math (custom wheel + scrollbars, sub-cell transforms), editor positioning, column/row resize, keyboard nav, session beacon. Bridges to the server only via `sr-*` window CustomEvents. Compiled to `/app.js`. |
 | `auth` | Identity: OAuth 2.0 code flow (GitHub/Google, providers are data), name-only dev login, auth-token cookies; orchestrates hashing + the user/token registry in `db`. |
-| `db` | Datahike-backed registry (users, auth tokens; sheets+shares next). Backends: H2 dev/staging, YugabyteDB prod (konserve-jdbc fork), `:memory` for tests. |
+| `db` | Datahike-backed store: users, auth tokens, sheets+shares, **and sheet content** (cells as per-property, branch-aware datoms). Backends: H2 dev/staging, YugabyteDB prod (konserve-jdbc fork), `:memory` for tests. |
 | `runtime` | Referenced by compiled formula bodies. `lookup`/`lookup-val` resolve a cell against the **current execution context's metadata** (works on executor threads). |
 | `formula` | Parse + compile formulas to Spins. |
 | `sheet` | Cell registry over one Spindel execution context. The engine API. |
-| `store` | File persistence of the source document (`data/<id>.edn`). |
+| `store` | Persistence seam over `db`: the source document (cells + per-branch scalars) as datoms, branch `"main"`. Keeps `save!`/`load-record`/`exists?`/`list-names`. |
 | `web` | http-kit server, rendering, SSE handlers, sessions, collaboration. |
 | `spike*` | REPL spikes proving Spindel behavior (kept as living docs). |
 
@@ -102,23 +102,33 @@ Cycles: `sheet/would-cycle?` walks the forward dep graph from the new deps; if i
 reaches the cell being set, reject before compile (a cycle StackOverflows the
 await chain).
 
-## Persistence (`store`)
+## Persistence (`store` over `db`)
 
-- Persist the **source document**, not the Spindel graph: `{addr {:value raw}}`,
-  a per-cell **property map** (room for `:style`/`:format` later, each a reactive
-  property compiled from its own source). EDN at `<dir>/<id>.edn`, where `dir`
-  is `SALTRIM_DATA_DIR` (default `data/`).
-- **fmt 2** wraps it in an ownership envelope:
-  `{:fmt 2 :owner uid :public bool :cells …}`. fmt 1 files (pre-auth) load as
-  owner nil + public true (legacy sheets stay readable). `load-record` returns
-  `{:sh :owner :public}`; `load-sheet` just the engine.
+- Persist the **source document**, not the Spindel graph — in **Datahike**, as
+  datoms (not files; the old `data/<id>.edn` store is retired). The unit is one
+  **property of a cell on a branch**: a `:cellprop` entity per
+  `(sheet, branch, addr, prop)` → `src`. The cell's value is the `:value` prop;
+  each style/format prop (`:bg`/`:fg`/`:format`/…) is its own cellprop, so adding
+  a presentational property needs **no schema change**. `:cellprop/author` records
+  the current writer's uid (for per-user undo); the change time is Datahike's
+  built-in `:db/txInstant`.
+- Per-`(sheet, branch)` **content scalars** (axis-size defaults `dcw`/`drh`, the
+  sparse `cols`/`rows` maps, the `defs` library) ride on a `:branch` entity as
+  longs + edn-string blobs. Branch `"main"` is the default; the branch dimension
+  is the seed of git-like branching (fork = copy a branch's cellprops; per-prop
+  `as-of` = Datahike history).
+- `save!` is **diff-based** — it compares the runtime document against the db and
+  transacts only changed props (+ retracts removed). Required: with
+  `:keep-history? true`, re-asserting an unchanged datom is *not* a no-op (it logs
+  a redundant history entry), so a blind whole-sheet re-transact would churn
+  history. See `spikes/04-db-cell-storage.clj`.
+- `load-record` rebuilds the reactive graph from the cellprops + branch scalars by
+  replaying `set-cell!`/`set-style!` (order-independent; defs applied first). A
+  reloaded sheet is fully live. Returns `{:sh :owner :public}` — owner is derived
+  from the id; public/sharing live in the share ACL, not the document.
 - **Storage ids are namespaced per owner**: `<owner-uid>__<name>`. Owner uids
   are `[a-z0-9-]` only (no underscores) and names `[A-Za-z0-9-]` (no
   underscores), so `split-id` is unambiguous on the first `__`.
-- `load-sheet` rebuilds the reactive graph by replaying `set-cell!` (order-
-  independent — formula refs resolve at run time). A reloaded sheet is fully live.
-- `valid-id?` guards path traversal. Behind `save!`/`load-record` so the backend
-  can become Datahike/SQL later.
 
 ## Identity & multi-tenancy (`auth` + `web`)
 
@@ -134,8 +144,9 @@ await chain).
   carries the secret; the DB stores only its **SHA-256 hash** (`db`, Datahike)
   — users and tokens survive restarts. `POST /logout` revokes the token **and
   reaps the user's live sessions** (presence markers / edit locks don't linger).
-- **Datahike store** (`db`): users + auth tokens (sheet metadata + shares move
-  here next; sheet CELL data stays in the file store). Backend is env-driven:
+- **Datahike store** (`db`): users, auth tokens, sheet metadata + shares, **and
+  sheet content** (cells as per-property branch-aware datoms — see Persistence).
+  Backend is env-driven:
   H2 file (`data/saltrim-h2`) for dev/staging, a full JDBC url
   (`SALTRIM_DB_JDBC_URL`) for YugabyteDB in prod, `:memory` for tests
   (`SALTRIM_DB_BACKEND=mem`). `:keep-history? true` (as-of underpins the planned

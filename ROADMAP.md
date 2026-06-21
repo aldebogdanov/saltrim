@@ -72,9 +72,20 @@ Keyboard + menu, both.
   violations; reuses the formula path + reactive recompute. Nicer once SCI lands.
 
 ## Strategic (the boss fight)
-- **Git-like sheet branching** — branch / merge / as-of on sheets. Forces
-  **cells → Datahike** (file-EDN storage retires). Multi-PR effort; see the DB
-  design notes. Everything else is smaller than this.
+- **Cells → Datahike** ✅ SHIPPED *(branch `feat/db-sheet-storage`)* — sheet
+  content moved out of file EDN into the database as **per-property, branch-aware
+  datoms** `(sheet, branch, addr, prop) → src` (+ a `:branch` entity for
+  per-branch scalars). File store retired (no migration; fresh start). `save!`
+  diff-saves (no history churn). `:cellprop/author` captured for undo. The branch
+  dimension (`"main"`) + `db/fork-branch!` + per-prop `as-of` are the substrate
+  for the rest. See `spikes/04-db-cell-storage.clj`.
+- **Git-like sheet branching** — the lifecycle on top of that substrate: a branch
+  picker, fork/switch, **merge** (app-level 3-way; define the conflict policy),
+  and as-of viewing. Still the biggest remaining piece.
+- **Per-user undo/redo** — local *selective* undo: revert the caller's latest
+  **live** cellprop edit (author = uid, value still theirs) to its history
+  predecessor; superseded edits are no-ops (preserves collaborators' work).
+  Enabled by `:cellprop/author` + history; UI is Ctrl+Z, per-tab stack.
 
 ## Polish / governance (fold in opportunistically)
 - date/time format masks; color-picker + toggle controls for styling;
