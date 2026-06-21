@@ -1,5 +1,6 @@
 (ns uno.michelada.saltrim.db-test
   (:require [clojure.test :refer [deftest testing is use-fixtures]]
+            [datahike.api :as d]
             [mount.core :as mount]
             [uno.michelada.saltrim.db :as db]))
 
@@ -138,3 +139,66 @@
   (is (= "gh-7" (db/uid-by-email "  Eve@Example.io ")) "trimmed")
   (is (nil? (db/uid-by-email "missing@example.io")))
   (is (nil? (db/uid-by-email ""))))
+
+;; --- sheet content: cells (per-property) + branch scalars -----------------
+
+(def ^:private S "dev-ann__s")
+
+(defn- cell-author [sid addr]
+  (d/q '[:find ?a . :in $ ?k :where [?c :cellprop/key ?k] [?c :cellprop/author ?a]]
+       @db/conn (str sid "|main|" addr "|value")))
+
+(deftest cell-doc-roundtrip-and-diff
+  (db/upsert-user! {:uid "dev-ann" :name "Ann"})
+  (db/ensure-sheet! S "dev-ann" "s")
+  (let [doc {"A1" {:value "99"}
+             "B1" {:value "=(* #cell A1 2)"}
+             "A2" {:value "=(+ 1 2)" :style {:bg "tomato" :align "center"}}}]
+    (db/save-doc! S doc "dev-ann")
+    (is (= doc (db/sheet-doc S)) "document round-trips (value + style props)")
+    (testing "diff-save: re-saving the SAME doc writes nothing"
+      (is (= {:changed 0 :removed 0} (db/save-doc! S doc "dev-ann"))))
+    (testing "change one prop + drop one cell -> only those touched"
+      (let [doc2 (-> doc (assoc-in ["A1" :value] "100") (dissoc "B1"))]
+        (is (= {:changed 1 :removed 1} (db/save-doc! S doc2 "dev-ann")))
+        (let [d (db/sheet-doc S)]
+          (is (= "100" (get-in d ["A1" :value])))
+          (is (not (contains? d "B1")) "B1 retracted")
+          (is (= {:bg "tomato" :align "center"} (get-in d ["A2" :style])) "untouched style kept"))))))
+
+(deftest cell-author-and-history
+  (db/upsert-user! {:uid "dev-ann" :name "Ann"})
+  (db/upsert-user! {:uid "dev-bob" :name "Bob"})
+  (db/ensure-sheet! S "dev-ann" "s")
+  (db/save-doc! S {"A1" {:value "5"}}  "dev-ann")
+  (db/save-doc! S {"A1" {:value "10"}} "dev-bob")
+  (testing "current author = last writer (drives 'undo my changes')"
+    (is (= "dev-bob" (cell-author S "A1"))))
+  (testing "every value retained in history (as-of/undo source)"
+    (is (= #{"5" "10"}
+           (set (d/q '[:find [?v ...] :in $ ?k :where [?c :cellprop/key ?k] [?c :cellprop/src ?v]]
+                     (d/history @db/conn) (str S "|main|A1|value")))))))
+
+(deftest branch-meta-and-fork
+  (db/upsert-user! {:uid "dev-ann" :name "Ann"})
+  (db/ensure-sheet! S "dev-ann" "s")
+  (db/save-doc! S {"A1" {:value "1"}} "dev-ann")
+  (db/set-branch-meta! S {:dcw 60 :drh 20 :defs "[{:id \"d1\" :src \"(def k 1)\"}]"})
+  (is (= 60 (:dcw (db/branch-meta S))))
+  (is (= "[{:id \"d1\" :src \"(def k 1)\"}]" (:defs (db/branch-meta S))))
+  (testing "diff-upsert: re-setting the same scalars reports no change"
+    (is (empty? (db/set-branch-meta! S {:dcw 60 :drh 20}))))
+  (testing "fork copies cells + scalars; then branches diverge"
+    (db/fork-branch! S "main" "exp")
+    (is (= (db/sheet-doc S "main") (db/sheet-doc S "exp")) "exp starts identical")
+    (is (= 60 (:dcw (db/branch-meta S "exp"))) "scalars copied")
+    (db/save-doc! S "exp" {"A1" {:value "777"}} "dev-ann")
+    (is (= "1"   (get-in (db/sheet-doc S "main") ["A1" :value])) "main untouched")
+    (is (= "777" (get-in (db/sheet-doc S "exp")  ["A1" :value])) "exp diverged")))
+
+(deftest sheets-of-owner-lists-registered
+  (db/upsert-user! {:uid "dev-ann" :name "Ann"})
+  (db/ensure-sheet! "dev-ann__a" "dev-ann" "a")
+  (db/ensure-sheet! "dev-ann__b" "dev-ann" "b")
+  (is (= ["dev-ann__a" "dev-ann__b"] (db/sheets-of-owner "dev-ann")))
+  (is (empty? (db/sheets-of-owner "dev-nobody"))))

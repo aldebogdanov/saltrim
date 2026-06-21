@@ -98,10 +98,13 @@
           rec))))
 
 (defn- save-rec!
-  "Persist a loaded sheet together with its ownership meta."
-  [id]
-  (when-let [{:keys [sh owner]} (@sheets* id)]
-    (store/save! id sh {:owner owner})))
+  "Persist a loaded sheet's content to the db, authored by `author` uid (the
+   acting user — recorded per changed cell for per-user undo). `author` is nil
+   for non-edit autosaves (e.g. the save on session unload)."
+  ([id] (save-rec! id nil))
+  ([id author]
+   (when-let [{:keys [sh]} (@sheets* id)]
+     (store/save! id sh {:author author}))))
 
 (defn- accessible-rec
   "The record for storage id IF `uid` (carrying optional link `token`) may
@@ -157,7 +160,7 @@
   [sheet-id]
   (when (and (zero? (sessions-on sheet-id)) (@sheets* sheet-id))
     (let [{:keys [sh]} (@sheets* sheet-id)]
-      (save-rec! sheet-id)
+      (save-rec! sheet-id)                ; autosave on unload — no acting user
       (sheet/close! sh)
       (swap! sheets* dissoc sheet-id))))
 
@@ -1319,7 +1322,7 @@
                 (throw (ex-info "locked by another collaborator" {:locked cell})))
               (sheet/set-cell! sh cell (str v))
               (sheet/settle! sh)
-              (save-rec! sheet-id)              ; autosave (source + meta)
+              (save-rec! sheet-id uid)              ; autosave (source + meta)
               (push-changes! gen sid sheet-id sh
                              (cons cell (into (sheet/dependents* sh cell)
                                               (sheet/style-dependents sh cell))))
@@ -1345,7 +1348,7 @@
             (try
               (sheet/set-style! sh cell prop src)
               (sheet/settle! sh)
-              (save-rec! sheet-id)
+              (save-rec! sheet-id uid)
               ;; only the styled cell re-renders now; style refs to OTHER cells
               ;; just register the edge for future value changes.
               (push-changes! gen sid sheet-id sh [cell])
@@ -1386,7 +1389,7 @@
               (case axis
                 "col" (sheet/set-col-width!  sh i s)
                 "row" (sheet/set-row-height! sh i s))
-              (save-rec! sheet-id)
+              (save-rec! sheet-id uid)
               ;; positions across the whole window shift -> full re-render
               (render-window! gen sid sheet-id sh (session-view sid))
               (broadcast-window! sid sheet-id sh)
@@ -1409,7 +1412,7 @@
           (try
             (when (and w (pos? w)) (sheet/set-default-col-w! sh w))
             (when (and h (pos? h)) (sheet/set-default-row-h! sh h))
-            (save-rec! sheet-id)
+            (save-rec! sheet-id uid)
             (signals! gen {:pcw (str (sheet/default-col-w sh))
                            :prh (str (sheet/default-row-h sh)) :err ""})
             (render-window! gen sid sheet-id sh (session-view sid))
@@ -1479,7 +1482,7 @@
                 (try
                   (let [{:keys [errors]} (sheet/update-def! sh defid (str defsrc))]
                     (swap! sessions* assoc-in [sid :editdef] nil)
-                    (save-rec! sheet-id)
+                    (save-rec! sheet-id uid)
                     (signals! gen {:defid "" :defsrc "" :err (def-errs-msg errors)})
                     (render-window! gen sid sheet-id sh (session-view sid))
                     (broadcast-window! sid sheet-id sh)
@@ -1500,7 +1503,7 @@
             (locking edit-lock
               (let [{:keys [id]} (sheet/add-def! sh "")]
                 (swap! sessions* assoc-in [sid :editdef] id)
-                (save-rec! sheet-id)
+                (save-rec! sheet-id uid)
                 (signals! gen {:defid id :defsrc "" :err ""})
                 (push-deflib! gen sid sheet-id)
                 (broadcast-deflib-except! sid sheet-id)))))))))
@@ -1522,7 +1525,7 @@
                   (let [{:keys [errors]} (sheet/remove-def! sh defid)]
                     (when (= defid (get-in @sessions* [sid :editdef]))
                       (swap! sessions* assoc-in [sid :editdef] nil))
-                    (save-rec! sheet-id)
+                    (save-rec! sheet-id uid)
                     (signals! gen {:defid "" :defsrc "" :err (def-errs-msg errors)})
                     (render-window! gen sid sheet-id sh (session-view sid))
                     (broadcast-window! sid sheet-id sh)
@@ -1711,7 +1714,7 @@
                                  (db/remove-share! sheet-id grantee :user))
                                nil)
                   nil)]
-        (save-rec! sheet-id)
+        (save-rec! sheet-id uid)
         (evict-unauthorized! sheet-id)
         (d*/patch-elements! gen (share-html uid sheet-id nil))
         (signals! gen {:err (or err "") :gtarget ""})))))

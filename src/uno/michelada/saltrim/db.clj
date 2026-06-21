@@ -47,7 +47,32 @@
    {:db/ident :share/grantee      :db/valueType :db.type/string  :db/cardinality :db.cardinality/one} ; uid | group-id | link-token
    {:db/ident :share/grantee-kind :db/valueType :db.type/keyword :db/cardinality :db.cardinality/one} ; :user | :group | :link (:everyone = legacy, migrated)
    {:db/ident :share/level        :db/valueType :db.type/keyword :db/cardinality :db.cardinality/one} ; :read | :read-write
-   {:db/ident :share/created-at   :db/valueType :db.type/long    :db/cardinality :db.cardinality/one}])
+   {:db/ident :share/created-at   :db/valueType :db.type/long    :db/cardinality :db.cardinality/one}
+
+   ;; sheet CONTENT as datoms (ROADMAP boss fight: cells leave file EDN). The
+   ;; unit of edit / history / branching is ONE PROPERTY of a cell on a branch:
+   ;; (sheet, branch, addr, prop) -> src. The cell's value is just the :value
+   ;; prop; each style prop (:bg/:fg/:format/…) is its own cellprop, so adding a
+   ;; style needs no schema change. :cellprop/author (current writer uid) enables
+   ;; per-user selective undo; the change TIME is Datahike's built-in :db/txInstant.
+   {:db/ident :cellprop/key    :db/valueType :db.type/string  :db/unique :db.unique/identity :db/cardinality :db.cardinality/one} ; "<sheet>|<branch>|<addr>|<prop>"
+   {:db/ident :cellprop/sheet  :db/valueType :db.type/ref     :db/cardinality :db.cardinality/one}
+   {:db/ident :cellprop/branch :db/valueType :db.type/string  :db/cardinality :db.cardinality/one}
+   {:db/ident :cellprop/addr   :db/valueType :db.type/string  :db/cardinality :db.cardinality/one}
+   {:db/ident :cellprop/prop   :db/valueType :db.type/keyword :db/cardinality :db.cardinality/one}
+   {:db/ident :cellprop/src    :db/valueType :db.type/string  :db/cardinality :db.cardinality/one}
+   {:db/ident :cellprop/author :db/valueType :db.type/string  :db/cardinality :db.cardinality/one} ; uid of the current writer (undo)
+
+   ;; per-(sheet, branch) CONTENT scalars that vary by branch — the axis-size
+   ;; defaults + sparse maps + definitions library (edn-string blobs).
+   {:db/ident :branch/key    :db/valueType :db.type/string :db/unique :db.unique/identity :db/cardinality :db.cardinality/one} ; "<sheet>|<branch>"
+   {:db/ident :branch/sheet  :db/valueType :db.type/ref    :db/cardinality :db.cardinality/one}
+   {:db/ident :branch/name   :db/valueType :db.type/string :db/cardinality :db.cardinality/one}
+   {:db/ident :branch/dcw    :db/valueType :db.type/long   :db/cardinality :db.cardinality/one}
+   {:db/ident :branch/drh    :db/valueType :db.type/long   :db/cardinality :db.cardinality/one}
+   {:db/ident :branch/cols   :db/valueType :db.type/string :db/cardinality :db.cardinality/one} ; edn {ci width}
+   {:db/ident :branch/rows   :db/valueType :db.type/string :db/cardinality :db.cardinality/one} ; edn {ri height}
+   {:db/ident :branch/defs   :db/valueType :db.type/string :db/cardinality :db.cardinality/one}]) ; edn [chunk …]
 
 ;; --- connection -----------------------------------------------------------
 
@@ -74,9 +99,14 @@
              :table "saltrim"}
      :schema-flexibility :write :keep-history? true}))
 
-(defn- ensure-schema! [c]
-  (when-not (d/q '[:find ?e . :where [?e :db/ident :user/uid]] @c)
-    (d/transact c schema)))
+(defn- ensure-schema!
+  "Install only the schema attributes not already present — so a fresh db gets
+   the whole schema AND an existing db picks up newly-added attrs, without
+   re-asserting (which would churn history) attrs it already has."
+  [c]
+  (let [have (set (d/q '[:find [?id ...] :where [_ :db/ident ?id]] @c))
+        need (remove #(have (:db/ident %)) schema)]
+    (when (seq need) (d/transact c (vec need)))))
 
 (defn connect!
   "Connect a Datahike configuration (creating the database first if needed) and
@@ -363,3 +393,141 @@
                     [(= ?eml ?e)]
                     [?u :user/uid ?uid]]
            @conn e))))
+
+;; --- sheet content: cells (per-property) + per-branch scalars -------------
+;; The sheet's SOURCE document lives here as datoms, not a file. A cell is a set
+;; of (sheet, branch, addr, prop)->src entities (`:value` + each style prop), and
+;; the branch-varying scalars (axis-size defaults/maps, defs) ride on a `:branch`
+;; entity. Writes DIFF against the current state so unchanged props don't churn
+;; history (Datahike :keep-history? logs every re-assertion — see
+;; spikes/04-db-cell-storage.clj). Everything is branch-scoped; the default
+;; branch is "main" (git-like branching builds on this dimension later).
+
+(def MAIN "main")
+
+(defn- cp-key [sid branch addr prop] (str sid "|" branch "|" addr "|" (name prop)))
+(defn- br-key [sid branch] (str sid "|" branch))
+
+(defn sheet-doc
+  "Rebuild the source document {addr {:value raw :style {prop raw}}} for
+   (sheet-id, branch) from its cellprop datoms. Empty map if none."
+  ([sheet-id] (sheet-doc sheet-id MAIN))
+  ([sheet-id branch]
+   (->> (d/q '[:find ?addr ?prop ?src
+               :in $ ?sid ?br
+               :where [?sh :sheet/id ?sid] [?c :cellprop/sheet ?sh]
+                      [?c :cellprop/branch ?br] [?c :cellprop/addr ?addr]
+                      [?c :cellprop/prop ?prop] [?c :cellprop/src ?src]]
+             @conn sheet-id branch)
+        (reduce (fn [acc [addr prop src]]
+                  (if (= prop :value)
+                    (assoc-in acc [addr :value] src)
+                    (assoc-in acc [addr :style prop] src)))
+                {}))))
+
+(defn- doc->flat
+  "{addr {:value raw :style {prop raw}}} -> {[addr prop] src}: :value + each
+   style prop, dropping nils."
+  [doc]
+  (into {} (for [[addr {:keys [value style]}] doc
+                 [prop src] (cons [:value value] style)
+                 :when (some? src)]
+             [[addr prop] src])))
+
+(defn save-doc!
+  "DIFF-save the source document for (sheet-id, branch), authored by uid
+   `author`. Transacts only props whose src changed (new/different) and retracts
+   props no longer present — so an unchanged sheet writes nothing and history
+   stays meaningful. Returns {:changed n :removed n}."
+  ([sheet-id doc author] (save-doc! sheet-id MAIN doc author))
+  ([sheet-id branch doc author]
+   (let [old     (doc->flat (sheet-doc sheet-id branch))
+         nu      (doc->flat doc)
+         changed (for [[[addr prop] src] nu :when (not= src (get old [addr prop]))]
+                   (cond-> {:cellprop/key    (cp-key sheet-id branch addr prop)
+                            :cellprop/sheet  [:sheet/id sheet-id]
+                            :cellprop/branch branch
+                            :cellprop/addr   addr
+                            :cellprop/prop   prop
+                            :cellprop/src    src}
+                     author (assoc :cellprop/author author)))
+         removed (for [[[addr prop] _] old :when (not (contains? nu [addr prop]))]
+                   [:db/retractEntity [:cellprop/key (cp-key sheet-id branch addr prop)]])
+         tx      (vec (concat changed removed))]
+     (when (seq tx) (d/transact conn tx))
+     {:changed (count changed) :removed (count removed)})))
+
+(defn branch-meta
+  "Per-(sheet,branch) content scalars {:dcw :drh :cols :rows :defs} (cols/rows/
+   defs are edn STRINGS as stored), or nil if the branch has no entity yet."
+  ([sheet-id] (branch-meta sheet-id MAIN))
+  ([sheet-id branch]
+   (when-let [m (d/q '[:find (pull ?b [:branch/dcw :branch/drh :branch/cols :branch/rows :branch/defs]) .
+                       :in $ ?k :where [?b :branch/key ?k]]
+                     @conn (br-key sheet-id branch))]
+     {:dcw (:branch/dcw m) :drh (:branch/drh m)
+      :cols (:branch/cols m) :rows (:branch/rows m) :defs (:branch/defs m)})))
+
+(defn set-branch-meta!
+  "Diff-upsert the per-(sheet,branch) scalars from map `m` ({:dcw :drh :cols
+   :rows :defs}; cols/rows/defs as edn strings). Transacts only changed attrs
+   (no churn when unchanged) and ensures the branch entity exists."
+  ([sheet-id m] (set-branch-meta! sheet-id MAIN m))
+  ([sheet-id branch m]
+   (let [cur  (branch-meta sheet-id branch)
+         want {:dcw (some-> (:dcw m) long) :drh (some-> (:drh m) long)
+               :cols (:cols m) :rows (:rows m) :defs (:defs m)}
+         chg  (into {} (for [[a v] want :when (and (some? v) (not= v (get cur a)))]
+                         [(keyword "branch" (name a)) v]))]
+     (when (or (nil? cur) (seq chg))
+       (d/transact conn [(merge {:branch/key (br-key sheet-id branch)
+                                 :branch/sheet [:sheet/id sheet-id]
+                                 :branch/name branch}
+                                chg)]))
+     chg)))
+
+(defn sheet-registered?
+  "True if a :sheet entity exists for `sheet-id` (it has been created)."
+  [sheet-id]
+  (boolean (d/q '[:find ?e . :in $ ?id :where [?e :sheet/id ?id]] @conn sheet-id)))
+
+(defn sheet-has-content?
+  "True if (sheet-id, branch) has any cell or branch entity — i.e. something was
+   saved. (load-record returns nil otherwise so the caller makes a fresh sheet.)"
+  ([sheet-id] (sheet-has-content? sheet-id MAIN))
+  ([sheet-id branch]
+   (boolean (or (d/q '[:find ?b . :in $ ?k :where [?b :branch/key ?k]] @conn (br-key sheet-id branch))
+                (d/q '[:find ?c . :in $ ?sid ?br
+                       :where [?sh :sheet/id ?sid] [?c :cellprop/sheet ?sh] [?c :cellprop/branch ?br]]
+                     @conn sheet-id branch)))))
+
+(defn sheets-of-owner
+  "Sheet ids owned by `owner-uid` that have a registered :sheet entity — drives
+   the picker now that names live in the DB, not the filesystem."
+  [owner-uid]
+  (->> (d/q '[:find [?id ...] :in $ ?uid
+              :where [?u :user/uid ?uid] [?sh :sheet/owner ?u] [?sh :sheet/id ?id]]
+            @conn owner-uid)
+       sort vec))
+
+(defn fork-branch!
+  "Copy every cellprop + the branch scalars of (sheet-id, from) under branch
+   `to`. The seed of git-like branching: `to` starts identical, then diverges.
+   Returns the number of cellprops copied. (No undo/merge yet — storage only.)"
+  [sheet-id from to]
+  (let [rows (d/q '[:find ?addr ?prop ?src ?author
+                    :in $ ?sid ?br
+                    :where [?sh :sheet/id ?sid] [?c :cellprop/sheet ?sh]
+                           [?c :cellprop/branch ?br] [?c :cellprop/addr ?addr]
+                           [?c :cellprop/prop ?prop] [?c :cellprop/src ?src]
+                           [(get-else $ ?c :cellprop/author "") ?author]]
+                  @conn sheet-id from)
+        cells (for [[addr prop src author] rows]
+                (cond-> {:cellprop/key (cp-key sheet-id to addr prop)
+                         :cellprop/sheet [:sheet/id sheet-id]
+                         :cellprop/branch to :cellprop/addr addr
+                         :cellprop/prop prop :cellprop/src src}
+                  (not= "" author) (assoc :cellprop/author author)))]
+    (d/transact conn (vec cells))
+    (when-let [m (branch-meta sheet-id from)] (set-branch-meta! sheet-id to m))
+    (count cells)))

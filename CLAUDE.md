@@ -1,7 +1,7 @@
 # SaltRim — working instructions
 
 A simple-but-powerful spreadsheet: **Clojure** engine on **Spindel** (reactive),
-**Datastar** UI (hypermedia, SSE), file persistence, live collaboration.
+**Datastar** UI (hypermedia, SSE), Datahike persistence, live collaboration.
 Read `SPEC.md` for the technical architecture. This file = how to work here.
 
 ## MCP servers usage
@@ -104,14 +104,25 @@ reloads core.async's protocols and breaks the executor. `(reset)` is scoped to
 `src/` and is safe; `:reload` (single ns) is fine.
 Spikes are REPL walkthroughs under `spikes/` (eval forms at the REPL).
 
-**Identity store (Datahike).** Users + auth tokens live in Datahike (`db` ns),
-not files. Dev/staging defaults to an H2 file at `data/saltrim-h2`; prod sets
+**Datahike store.** Users, auth tokens, sheet metadata + shares, **and sheet
+CONTENT** all live in Datahike (`db` ns), not files. Cells are per-property,
+branch-aware datoms: a `:cellprop` per `(sheet, branch, addr, prop)` → `src`
+(value is the `:value` prop; each style/format prop is its own cellprop, so a new
+style needs no schema change), plus a `:branch` entity for per-branch scalars
+(`dcw/drh`, `cols/rows/defs` blobs). Branch `"main"` is the default — the branch
+dimension seeds git-like branching (`db/fork-branch!`; per-prop `as-of` via
+history). `:cellprop/author` = the writer uid (for per-user undo; change time is
+the built-in `:db/txInstant`). `store` is the thin seam over `db` (same
+`save!`/`load-record`/…); **`save!` diff-saves** (transact only changed props) —
+a blind re-transact churns history under `:keep-history?` (see
+`spikes/04-db-cell-storage.clj`). **The file store is RETIRED** — old
+`data/*.edn` are ignored, not migrated (collections start fresh in the db).
+Dev/staging defaults to an H2 file at `data/saltrim-h2`; prod sets
 `SALTRIM_DB_JDBC_URL` (YugabyteDB); tests use `:memory`. Env: `SALTRIM_DB_BACKEND`
 (`mem`), `SALTRIM_DB_JDBC_URL`, `SALTRIM_DB_TABLE`, `SALTRIM_DB_PATH` (H2 file),
 `SALTRIM_DB_ID` (stable store UUID). JDBC is konserve-jdbc directly (forked for
 YugabyteDB — see `deps.edn`); **datahike-jdbc is NOT used** (datahike 0.8
-connects konserve stores generically). Sheet CELL data still lives in
-`<SALTRIM_DATA_DIR>/<id>.edn` (env, default `data/`). **Spindel stays pinned at
+connects konserve stores generically). **Spindel stays pinned at
 0.1.15** — 0.1.23 breaks structural rebuild (see TECHDEBT.md).
 
 Namespaces are rooted at `uno.michelada.saltrim.*` under
@@ -241,8 +252,9 @@ JS engine is ported to `app.cljs` (plain CLJS compiler, no node), the address +
 geometry code shared as `.cljc`, and the old hidden-trigger UI replaced by a
 Datastar-attribute + custom-event bridge.
 
-**What's next lives in `ROADMAP.md`** (single source). SCI, per-sheet ns, and
-**JS → CLJS** are all DONE; next is the collapsible-toolbar UI rework, then
-multi-selection + cut/copy/paste. Cheap wins: dependency-graph view, cell
-assertions. Boss fight: git-like branching (forces cells → Datahike). See
-`TECHDEBT.md` for deferred items.
+**What's next lives in `ROADMAP.md`** (single source). SCI, per-sheet ns,
+**JS → CLJS**, and **cells → Datahike** (the boss-fight storage move) are all
+DONE; the branch dimension exists (`"main"`) but branch/merge/as-of UI + per-user
+undo are not built yet. Remaining: collapsible-toolbar UI, multi-selection +
+cut/copy/paste, the branching UI. Cheap wins: dependency-graph view, cell
+assertions. See `TECHDEBT.md` for deferred items.
