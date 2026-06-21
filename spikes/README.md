@@ -30,3 +30,4 @@ a value, mutating a signal, and re-reading interactively is the point.
 | `01-formula-string-to-spin.clj` | A formula *string* compiles to a reactive Spin wired by address, recomputes on change, and the whitelist sandbox rejects disallowed symbols. |
 | `02-await-uniform-model.clj` | Every cell is a Spin; cross-cell refs use `await` (handles Spins, unlike `track`), enabling formula→formula cascades. |
 | `03-sci-formula-eval.clj` | SCI can evaluate the *pure* user body while the `spin`/`await` wrapper stays host-compiled — the basis of the formula-engine → SCI migration. |
+| `04-db-cell-storage.clj` | Sheet cells as per-property, branch-aware Datahike datoms `(sheet,branch,addr,prop)→src`: round-trip, per-prop as-of history, branch isolation + fork. **Key finding:** `:keep-history?` logs identical re-assertions, so `save!` must DIFF (transact only changed props), not blind re-transact. |
