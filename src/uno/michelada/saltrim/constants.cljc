@@ -18,8 +18,8 @@
 (def WIN-COLS 16)       ; window size (+overscan)
 (def WIN-ROWS 34)
 (def OVER 2)            ; overscan cells
-(def MIN-COLS 26)       ; spacer never smaller than this
+(def MIN-COLS 26)       ; logical scroll extent never smaller than this
 (def MIN-ROWS 100)
-(def BUF-COLS 6)        ; scrollable buffer past used/visible range
+(def BUF-COLS 6)        ; extra scrollable buffer past the used/visible range
 (def BUF-ROWS 30)
 (def BAR 12)            ; custom scrollbar thickness px

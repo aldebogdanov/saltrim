@@ -35,12 +35,8 @@
 (defn axis-x [sh ci] (axis-off (sheet/col-widths sh) (sheet/default-col-w sh) ci))
 (defn axis-y [sh ri] (axis-off (sheet/row-heights sh) (sheet/default-row-h sh) ri))
 
-;; --- state --------------------------------------------------------------
+;; --- colors -------------------------------------------------------------
 
-;; room = [storage-id branch]. sheets* : room -> {:sh sheet :owner uid|nil}
-;; (lazy: load / create). A branch is its own collaborative working copy, so the
-;; loaded engine + every collaboration broadcast is keyed by the (sheet,branch)
-;; pair, not the bare id. The default branch is db/MAIN.
 (defn rgba [hex a]
   (let [h (subs hex 1)]
     (format "rgba(%d,%d,%d,%s)"
@@ -82,7 +78,7 @@
       (re-find #"cannot be cast" m)    "type error"
       (re-find #"Divide by zero" m)    "divide by zero"
       (re-find #"unknown cell" m)      "reference to empty cell"
-      (re-find #"disallowed symbol" m) "not allowed in a formula"
+      (re-find #"Could not resolve symbol" m) "unknown name or function in the formula"
       (re-find #"circular" m)          "circular reference"
       (re-find #"locked by another" m) "cell is being edited by another collaborator"
       :else m)))

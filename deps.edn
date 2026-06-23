@@ -11,8 +11,9 @@
         ;; SCI for sandboxed runtime formula eval (Step 4).
         org.babashka/sci {:mvn/version "0.8.43"}
 
-        ;; Datahike: identity + metadata store (users, auth tokens, and later
-        ;; sheet metadata + shares). Sheet CELL data stays in the file store.
+        ;; Datahike: the single source of truth — users, auth tokens, sheet
+        ;; metadata + shares, AND sheet content (cells as per-property,
+        ;; branch-aware datoms). The legacy file store is retired.
         ;; datahike 0.8 connects konserve stores generically — the :jdbc backend
         ;; is provided by konserve-jdbc directly (no datahike-jdbc wrapper).
         ;; konserve-jdbc + next.jdbc are FORKS carrying YugabyteDB support
@@ -35,8 +36,7 @@
         ;; Official Datastar Clojure SDK + http-kit adapter
         dev.data-star.clojure/sdk {:mvn/version "1.0.0-RC10"}
         dev.data-star.clojure/http-kit {:mvn/version "1.0.0-RC10"}
-        ring/ring-core {:mvn/version "1.12.2"}
-        metosin/reitit-ring {:mvn/version "0.7.2"}
+        ring/ring-core {:mvn/version "1.12.2"}    ; params/keyword-params/cookies middleware
         hiccup/hiccup {:mvn/version "2.0.0-RC3"}
         metosin/jsonista {:mvn/version "0.3.8"}
 

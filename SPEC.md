@@ -11,10 +11,13 @@ on load. Multiple clients edit one sheet live.
   pin, switched once the release caught up — see `deps.edn`).
 - `dev.data-star.clojure/sdk` + `http-kit` adapter `1.0.0-RC10`.
 - http-kit server, reitit not used (hand-rolled `case` router), hiccup2, jsonista.
-- `org.babashka/sci` available (sandbox option) — current formula sandbox is a
-  symbol whitelist + `eval`, not SCI (see Formulas).
-- Client: **Datastar 1.0.2** (loaded from CDN; a matching copy is vendored at
-  `resources/public/datastar.js` / `/datastar.js` as an offline fallback) +
+- `org.babashka/sci` is the formula sandbox: the user expression is evaluated by
+  SCI (real lexical scope, no host interop), not a symbol whitelist + host
+  `eval` (see Formulas).
+- Client: **Datastar 1.0.2** (the page loads it from the CDN; a matching copy is
+  vendored at `resources/public/datastar.js`, served at `/datastar.js`, for
+  offline/air-gapped use — swap the `<script src>` in `web.render/page`, where
+  the local path sits as a reader comment next to the CDN URL) +
   `resources/public/app.js`, **compiled from `src/.../app.cljs`** (plain CLJS
   compiler, no node/npm — dev watch-compiles on `(start)`, prod `:advanced` in
   `uber`). `app.legacy.js` is the pre-CLJS source, kept for reference only.
@@ -95,21 +98,29 @@ like the reader tags (`shift-refs`).
 
 Pipeline (`formula`):
 1. `parse`: `clojure.edn/read-string` with custom readers (EDN blocks `#=` RCE).
-   `#cell`/`#cells` emit neutral ref-markers `(::ref "A1")`. `:deps` = the marked
+   `#cell`/`#cells` emit neutral ref-markers `(::ref "A1")`; a postwalk rewrites
+   the `$A1`/`$A3:D8`/`$val` sugar to the same markers. `:deps` = the marked
    addresses.
-2. `validate!`: whitelist every **user** symbol (`allowed-ops`). Markers are
-   keyword-headed lists so addresses never hit the check.
-3. `lift`: replace each **distinct** ref with a `let`-bound local awaited once —
-   `(let [c_1 (await (lookup "A1")) ...] body)`. Two reasons: (a) `await` inside a
-   nested `fn` is **not** CPS-transformed (so ranges must expand statically at
-   read time, which they do), and (b) **awaiting the same cell twice glitches**
-   on recompute.
-4. `compile`: `eval (spin lifted)` in the `uno.michelada.saltrim.formula` namespace so
-   `spin`/`track`/`await` resolve and the CPS transform sees the effects.
+2. `compile`: gensym each **distinct** referenced cell, then
+   - **SCI-compile the pure user body** to a host-callable fn of those values
+     (`sci/eval-form` of `(fn [c_1 …] <body, markers→syms>)` in a fork of the
+     sheet's SCI context = stdlib + the sheet's user `defs`). SCI gives real
+     lexical scope (`let`/`fn`/destructuring) with no host interop the user can
+     reach, and never sees `spin`/`await`/`track`.
+   - **host-`eval` only the fixed infra wrapper**: a factory
+     `(fn [uf] (spin (let [c_1 (await (lookup "A1")) …] (uf c_1 …))))` in the
+     `uno.michelada.saltrim.formula` namespace, so `spin`/`await`/`track` resolve
+     and the CPS transform sees the effects; it closes over the SCI fn. Each
+     distinct cell is `await`ed once in a `let` binding — two reasons: (a)
+     `await` inside a nested `fn` is **not** CPS-transformed (so ranges expand
+     statically at read time, which they do), and (b) **awaiting the same cell
+     twice glitches** on recompute.
 
-Sandbox = EDN reader + symbol whitelist + a fixed `eval` namespace. (SCI was
-explored; the SDK's SCI integration only wires `await`, not spindel's `track`, so
-we use the real `spin` macro + whitelist instead.)
+Sandbox = EDN reader (no `#=`) + SCI for the user expression. Host `eval` is used
+only for that fixed infra wrapper (gensyms + validated cell-address strings — no
+user input reaches it). SCI replaced the old symbol-whitelist + host-`eval` of
+the body, which couldn't allow `let`/`fn` (a user's own binder names aren't in
+any whitelist). See `spikes/03-sci-formula-eval.clj`.
 
 Cycles: `sheet/would-cycle?` walks the forward dep graph from the new deps; if it
 reaches the cell being set, reject before compile (a cycle StackOverflows the
@@ -416,12 +427,15 @@ mid-edit). Two absolutely-positioned layers inside `#cellclip`, translated with
 ## Tests
 
 `clojure -X:test` — `addr`, `engine` (literals, chains, ranges, formula-over-
-formula, structural rebuild, errors, cycles), `store` (save/load roundtrip,
-valid-id, ownership envelope, fmt-1 legacy, storage-id split), `auth` (dev
-login, uid sanitizing, cookie roundtrip, token revocation), `db` (user upsert +
-created-at stability, token roundtrip/revoke, per-test isolation — `:memory`
-backend). Currently 26 tests / 101 assertions. Web/session/collab behavior is
-verified manually + via curl (see CLAUDE.md); no web unit tests yet.
+formula, structural rebuild, errors, cycles, SCI formulas, `$`-refs, defs
+library), `fmt` (number masks), `graph` (layered-DAG layout), `merge` (3-way
+plan, conflicts, actions), `store` (branch-aware save/load roundtrip + diff,
+as-of snapshot, sizing/defs roundtrip, undo/redo, valid-id, storage-id split),
+`auth` (dev login, uid sanitizing, cookie roundtrip, token revocation), `db`
+(user upsert + created-at stability, token roundtrip/revoke, shares + capability
+links, branch fork/lineage/revisions, per-test isolation — `:memory` backend).
+Currently 72 tests / 364 assertions. Web/session/collab behavior is verified
+manually + via curl (see CLAUDE.md); no web unit tests yet.
 
 ## Build & release
 
@@ -447,5 +461,6 @@ See `TECHDEBT.md`. Highlights: `WIN-COLS/ROWS` fixed
 as-of/history views use current defs+sizing (only cells are reconstructed) and
 rebuild a transient sheet per scroll; deleting a branch other collaborators are
 actively on strands them (they get denied + must reload to main); session-less
-sheets loaded by a bare `GET /` aren't swept;
-`/debug` is ungated; concurrent simultaneous edits can race a transient `#ERR`.
+sheets loaded by a bare `GET /` aren't swept; concurrent simultaneous edits can
+race a transient `#ERR`. (`/debug` is gated behind the dev auth provider —
+404 in prod.)

@@ -16,7 +16,7 @@
             [uno.michelada.saltrim.store :as store]
             [uno.michelada.saltrim.constants :refer [CW RH GUT HDR OVER BAR]]
             [uno.michelada.saltrim.web.geom :refer [axis-x axis-y col-w in-window? rgba row-h total-px url-decode view-base window]]
-            [uno.michelada.saltrim.web.state :refer [def-editor-of now owner-of palette session-view sessions* sheets*]]))
+            [uno.michelada.saltrim.web.state :refer [def-editor-of owner-of session-view sessions* sheets*]]))
 
 (defn- display [sh a]
   (let [v    (sheet/value sh a)

@@ -1,7 +1,8 @@
 (ns uno.michelada.saltrim.db
-  "Datahike-backed registry for identity and metadata. Owns users and auth
-   tokens now; sheet metadata + shares move here next. Sheet CELL data stays in
-   the file store (see `store`).
+  "Datahike-backed store of everything: users, auth tokens, sheet metadata +
+   shares, AND sheet content (cells as per-property, branch-aware datoms — see
+   the cellprop/branch schema below). The legacy per-id file store is retired
+   (`store` is now a thin seam over this ns).
 
    Backend is env-driven (`config`):
    - default (dev/staging): H2 file at `data/saltrim-h2`
@@ -37,7 +38,7 @@
    {:db/ident :token/created-at :db/valueType :db.type/long   :db/cardinality :db.cardinality/one}
    {:db/ident :token/last-seen  :db/valueType :db.type/long   :db/cardinality :db.cardinality/one}
 
-   ;; sheets + shares — schema defined now, wired in the next step
+   ;; sheets + shares
    {:db/ident :sheet/id         :db/valueType :db.type/string :db/unique :db.unique/identity :db/cardinality :db.cardinality/one}
    {:db/ident :sheet/owner      :db/valueType :db.type/ref    :db/cardinality :db.cardinality/one}
    {:db/ident :sheet/name       :db/valueType :db.type/string :db/cardinality :db.cardinality/one}
@@ -204,8 +205,9 @@
     (d/transact conn [[:db/retractEntity eid]])))
 
 ;; --- sheets + shares ------------------------------------------------------
-;; Sheet metadata + an ACL of share grants live here; the CELL data stays in
-;; the file store. A grant is (sheet, grantee, grantee-kind, level): an
+;; Sheet metadata + an ACL of share grants live here (cell content lives here
+;; too — see the cellprop section below). A grant is (sheet, grantee,
+;; grantee-kind, level): an
 ;; `:everyone` grant is the old "public" flag, a `:user` grant is a direct
 ;; share to one uid. The owner is NOT represented as a grant — ownership is
 ;; derived from the `<owner>__<name>` storage id (see `store/split-id`).

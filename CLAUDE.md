@@ -61,7 +61,7 @@ If the user types `/caveman`, invoke the `caveman` Skill.
   forms at a dev REPL; see `spikes/README.md`), not cold-run mains. Don't build
   UI on unproven engine assumptions.
 - **Test after engine changes**: `clojure -X:test` (must stay green, currently
-  37 tests / 190 assertions; `db`/`auth` suites use the `:memory` Datahike
+  72 tests / 364 assertions; `db`/`auth` suites use the `:memory` Datahike
   backend). Add tests for new engine behavior.
 - **The client is ClojureScript** (`src/.../app.cljs`, compiled to
   `resources/public/app.js`). The dev REPL `(start)` watch-compiles it on save
@@ -89,7 +89,7 @@ java -jar target/saltrim-<v>.jar  # run the built artifact (serves :8080)
 
 **Dev REPL workflow (preferred — use `clojure-mcp` against the running nREPL).**
 The system is `mount`-managed (`uno.michelada.saltrim.system`): states
-`database` → `sweeper` → `http-server`, with timed start/stop logging. From the
+`db/conn` → `web/sweeper` → `web/server`, with timed start/stop logging. From the
 REPL (`dev/user.clj` is auto-loaded):
 
 ```clojure
@@ -185,9 +185,11 @@ Gotchas learned the hard way:
 
 ## Datastar / http-kit gotchas — already solved
 
-- Datastar is **1.0.2 from the CDN** (`@v1.0.2/bundles/datastar.js`); a matching
-  copy is vendored at `resources/public/datastar.js` (served at `/datastar.js`)
-  as an offline fallback — keep the two in sync if you bump the version. SSE
+- Datastar is **1.0.2 from the CDN** (`@v1.0.2/bundles/datastar.js`); the page
+  uses the CDN URL. A matching copy is vendored at `resources/public/datastar.js`
+  (served at `/datastar.js`) for offline/air-gapped use — the local path sits as
+  a reader comment next to the CDN URL in `web.render/page`, so switching is a
+  one-line swap; keep the two in sync if you bump the version. SSE
   events: `datastar-patch-elements` / `datastar-patch-signals`. Attrs use colon
   syntax (`data-on:click`, `data-bind:x`); the event var in expressions is `evt`.
 - SSE/lifecycle now uses the official SDK (`dev.data-star.clojure/*`).

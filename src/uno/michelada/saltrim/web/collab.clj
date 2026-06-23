@@ -16,8 +16,7 @@
   (let [[owner _] (store/split-id sheet-id)]
     (sheet-rec sheet-id branch (or owner uid)))  ; acquire (load) the branch
   (swap! sessions* assoc sid {:sheet sheet-id :branch branch :room [sheet-id branch]
-                              :view {:r0 0 :c0 0}
-                              :dims nil :last-seen (now)
+                              :view {:r0 0 :c0 0} :last-seen (now)
                               :uid uid :token token
                               :uname (or (:name (auth/user-info uid)) uid)
                               :color (color-for sid) :cursor nil :editing nil

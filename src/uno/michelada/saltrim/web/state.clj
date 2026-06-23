@@ -72,7 +72,7 @@
 ;; :last-seen (ms) — real activity (edits/scrolls) refreshes it; a server-side
 ;; sweep reaps sessions idle past a TTL (the only way to handle crash/sleep,
 ;; where the beacon never fires). No client heartbeat.
-(defonce sessions* (atom {}))  ; sid -> {:sheet :view :dims :last-seen}
+(defonce sessions* (atom {}))  ; sid -> {:sheet :branch :room :view :last-seen :uid :token :uname :color :cursor :editing :editdef :gen :webkit?}
 
 (def sid-re #"[A-Za-z0-9-]{1,64}")
 (def SESSION-TTL-MS (* 30 60 1000))   ; reap sessions idle > 30 min

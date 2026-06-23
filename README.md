@@ -2,7 +2,7 @@
 
 A simple-but-powerful collaborative spreadsheet: a reactive **Clojure** engine
 (on [Spindel](https://github.com/replikativ/spindel)) with a hypermedia
-**[Datastar](https://data-star.dev)** UI (server HTML over SSE), file
+**[Datastar](https://data-star.dev)** UI (server HTML over SSE), Datahike
 persistence, authentication, sharing, and live multi-user editing.
 
 The same guide is available in the app itself — click the **?** button in the

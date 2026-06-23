@@ -181,19 +181,19 @@
         (let [sh (:sh rec)]
           (when (addr/valid? cell)
             (locking edit-lock
-            (try
-              (when (locked-by-other? sid (:room rec) cell)
-                (throw (ex-info "locked by another collaborator" {:locked cell})))
-              (let [before (sheet/raw sh cell)]
-                (sheet/set-cell! sh cell (str v))
-                (sheet/settle! sh)
-                (record-edit! sid cell :value before (sheet/raw sh cell)))
-              (save-rec! (:room rec) uid)              ; autosave (source + meta)
-              (push-changes! gen sid (:room rec) sh
-                             (cons cell (into (sheet/dependents* sh cell)
-                                              (sheet/style-dependents sh cell))))
-              (catch Throwable e
-                (signals! gen {:err (str cell ": " (pretty-err (.getMessage e)))}))))))))))
+              (try
+                (when (locked-by-other? sid (:room rec) cell)
+                  (throw (ex-info "locked by another collaborator" {:locked cell})))
+                (let [before (sheet/raw sh cell)]
+                  (sheet/set-cell! sh cell (str v))
+                  (sheet/settle! sh)
+                  (record-edit! sid cell :value before (sheet/raw sh cell)))
+                (save-rec! (:room rec) uid)              ; autosave (source + meta)
+                (push-changes! gen sid (:room rec) sh
+                               (cons cell (into (sheet/dependents* sh cell)
+                                                (sheet/style-dependents sh cell))))
+                (catch Throwable e
+                  (signals! gen {:err (str cell ": " (pretty-err (.getMessage e)))}))))))))))
 
 (defn handle-style [req]
   (with-access req
