@@ -46,7 +46,13 @@
 
         ;; XLSX export (org.apache.poi.xssf) — write a static .xlsx snapshot of
         ;; computed values + presentation. Only the workbook writer is used.
-        org.apache.poi/poi-ooxml {:mvn/version "5.3.0"}}
+        org.apache.poi/poi-ooxml {:mvn/version "5.3.0"}
+
+        ;; Logging backend for POI (it logs through log4j-api). Without an impl,
+        ;; POI prints "Log4j2 could not find a logging implementation …" and falls
+        ;; back to a SimpleLogger. Pinned to the log4j-api version POI pulls;
+        ;; configured quiet by resources/log4j2.properties (root = warn).
+        org.apache.logging.log4j/log4j-core {:mvn/version "2.23.1"}}
 
  :aliases
  {:dev {:extra-paths ["dev"]
