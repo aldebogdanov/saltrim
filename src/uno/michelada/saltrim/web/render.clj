@@ -214,26 +214,16 @@
 
 (declare share-html)
 
-(defn- help-html
-  "In-app end-user reference, toggled by $help. Mirrors README's user guide.
-   Pure server-rendered HTML shown/hidden by Datastar data-show — no app.js."
-  []
-  (let [h3  "margin:.8rem 0 .25rem;font:600 13px sans-serif;"
-        p   "margin:.2rem 0;font:13px sans-serif;color:var(--fg);"
-        kbd "font:12px monospace;background:var(--panel);border:1px solid var(--grid);border-radius:3px;padding:0 4px;"]
-    (str (h/html
-          [:div {:id "helpwrap" :data-show "$help"
-                 :data-on:click "$help=false"
-                 :style (str "position:fixed;inset:0;z-index:50;background:rgba(0,0,0,.35);"
-                             "display:flex;align-items:flex-start;justify-content:center;padding:4vh 1rem;")}
-           [:div {:data-on:click "evt.stopPropagation()"
-                  :style (str "background:var(--bg);border:1px solid var(--line);border-radius:8px;"
-                              "box-shadow:0 8px 32px rgba(0,0,0,.25);max-width:38rem;width:100%;"
-                              "max-height:88vh;overflow:auto;padding:1.1rem 1.3rem;")}
-            [:div {:style "display:flex;align-items:center;margin-bottom:.3rem;"}
-             [:h2 {:style "margin:0;font:600 18px sans-serif;flex:1;"} "SaltRim — quick guide"]
-             [:button {:class "btn" :data-on:click "$help=false" :title "close"} "✕"]]
+(def ^:private help-h3  "margin:.8rem 0 .25rem;font:600 13px sans-serif;")
+(def ^:private help-p   "margin:.2rem 0;font:13px sans-serif;color:var(--fg);")
+(def ^:private help-kbd "font:12px monospace;background:var(--panel);border:1px solid var(--grid);border-radius:3px;padding:0 4px;")
 
+;; The help modal is split across help-sections-* fns: as a single defn its body
+;; compiled to one method that overran the JVM's 64KB bytecode limit ("Method
+;; code too large"). Each part is now its own (small) method, spliced by help-html.
+(defn- help-sections-a []
+  (let [h3 help-h3 p help-p kbd help-kbd]
+    (list
             [:div {:style h3} "Cells & formulas"]
             [:p {:style p} "Type a value, or start with " [:span {:style kbd} "="]
              " for a formula (Clojure s-expressions). Reference cells with "
@@ -283,8 +273,11 @@
             [:div {:style h3} "Dependency graph"]
             [:p {:style p} "The " [:span {:style kbd} "🕸"] " button draws how cells feed each other "
              "(an arrow points from a cell to the cells that use it); click a node to select it. "
-             "Set a cell's " [:span {:style kbd} "label"] " (style row) to name its node."]
+             "Set a cell's " [:span {:style kbd} "label"] " (style row) to name its node."])))
 
+(defn- help-sections-b []
+  (let [h3 help-h3 p help-p kbd help-kbd]
+    (list
             [:div {:style h3} "Number format"]
             [:p {:style p} "Property " [:span {:style kbd} "format"] " takes a mask applied to numeric values: "
              [:span {:style kbd} "0.00"] " → 1234.50 · " [:span {:style kbd} "#,##0"] " → 1,234,567 · "
@@ -338,11 +331,30 @@
              [:b "computed value"] " (with its styling and number format) — "
              [:b "not"] " its formula. The exported file has " [:b "no live formulas and no reactivity"]
              "; editing a value in Excel won't recompute anything. Each formula's original "
-             "source is attached as a cell comment so the logic isn't lost."]
+             "source is attached as a cell comment so the logic isn't lost."])))
 
-            [:div {:style (str "margin-top:1rem;padding-top:.6rem;border-top:1px solid var(--line);"
-                               "font:11px sans-serif;color:#9aa1a9;text-align:center;")}
-             "SaltRim " (version/current)]]]))))
+(defn- help-html
+  "In-app end-user reference, toggled by $help. Mirrors README's user guide.
+   Pure server-rendered HTML shown/hidden by Datastar data-show — no app.js.
+   Body split across help-sections-* to stay under the JVM 64KB method limit."
+  []
+  (str (h/html
+        [:div {:id "helpwrap" :data-show "$help"
+               :data-on:click "$help=false"
+               :style (str "position:fixed;inset:0;z-index:50;background:rgba(0,0,0,.35);"
+                           "display:flex;align-items:flex-start;justify-content:center;padding:4vh 1rem;")}
+         [:div {:data-on:click "evt.stopPropagation()"
+                :style (str "background:var(--bg);border:1px solid var(--line);border-radius:8px;"
+                            "box-shadow:0 8px 32px rgba(0,0,0,.25);max-width:38rem;width:100%;"
+                            "max-height:88vh;overflow:auto;padding:1.1rem 1.3rem;")}
+          [:div {:style "display:flex;align-items:center;margin-bottom:.3rem;"}
+           [:h2 {:style "margin:0;font:600 18px sans-serif;flex:1;"} "SaltRim — quick guide"]
+           [:button {:class "btn" :data-on:click "$help=false" :title "close"} "✕"]]
+          (help-sections-a)
+          (help-sections-b)
+          [:div {:style (str "margin-top:1rem;padding-top:.6rem;border-top:1px solid var(--line);"
+                             "font:11px sans-serif;color:#9aa1a9;text-align:center;")}
+           "SaltRim " (version/current)]]])))
 
 (declare deflib-html bigedit-html)
 
