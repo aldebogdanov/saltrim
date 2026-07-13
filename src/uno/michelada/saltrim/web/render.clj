@@ -775,6 +775,7 @@
              :data-signals:sharepanel "false"
              :data-signals:shareact "''"
              :data-signals:plevel "''"
+             :data-signals:rotateconfirm "false"  ; new-link agreement modal open?
              :data-signals:gtarget "''"
              :data-signals:glevel "'read-write'"
              :data-signals:grantee "''"
@@ -1152,7 +1153,12 @@
         url       (str (auth/base-url) "/?t=" (:token link))   ; self-contained capability
         badge     (cond (= lvl :read-write) "🔗 link" (= lvl :read) "🔗 link" :else "🔒 private")
         add-ph    (if (auth/dev-auth?) "name to share with…" "email to share with…")
-        row-style "display:flex;align-items:center;gap:.4rem;margin-bottom:.45rem;"]
+        row-style "display:flex;align-items:center;gap:.4rem;margin-bottom:.45rem;"
+        overlay   (str "position:fixed;inset:0;z-index:50;background:rgba(0,0,0,.35);"
+                       "display:flex;align-items:flex-start;justify-content:center;padding:12vh 1rem;")
+        modal     (str "background:var(--bg);border:1px solid var(--line);border-radius:8px;"
+                       "box-shadow:0 8px 32px rgba(0,0,0,.25);max-width:22rem;width:100%;padding:1rem 1.1rem;"
+                       "font:13px sans-serif;color:var(--fg);")]
     (str (h/html
           [:div {:id "sharebar" :style "display:flex;align-items:center;gap:.4rem;position:relative;"}
            (if-not owner?
@@ -1176,13 +1182,36 @@
                  [:option {:value "read"       :selected (= lvl :read)}       "can view"]
                  [:option {:value "read-write" :selected (= lvl :read-write)} "can edit"]]]
                (when link
-                 [:div {:style "display:flex;gap:.3rem;margin-bottom:.5rem;"}
-                  [:input {:readonly true :value url :title "secret share link"
-                           :style (str "flex:1;box-sizing:border-box;font:11px monospace;"
-                                       "padding:4px 6px;border:1px solid var(--grid);"
-                                       "border-radius:var(--radius);color:var(--muted);")}]
-                  [:button {:class "btn" :title "make a new link (invalidates the old one)"
-                            :data-on:click "$shareact='rotate', @post('/share')"} "↻"]])
+                 (list
+                  [:div {:style "display:flex;gap:.3rem;margin-bottom:.5rem;"}
+                   [:input {:readonly true :value url :title "secret share link"
+                            :style (str "flex:1;box-sizing:border-box;font:11px monospace;"
+                                        "padding:4px 6px;border:1px solid var(--grid);"
+                                        "border-radius:var(--radius);color:var(--muted);")}]
+                   [:button {:class "btn" :title "copy link"
+                             :data-on:click
+                             (str "navigator.clipboard.writeText('" url "'), "
+                                  "el.textContent='✓', setTimeout(()=>el.textContent='📋',1200)")}
+                    "📋"]
+                   [:button {:class "btn" :title "make a new link (invalidates the old one)"
+                             :data-on:click "$rotateconfirm=true"} "↻"]]
+                  ;; agreement modal — rotating breaks the old link for everyone
+                  ;; who still has it, so this needs an explicit confirm step.
+                  [:div {:data-show "$rotateconfirm" :data-on:click "$rotateconfirm=false"
+                         :style overlay}
+                   [:div {:data-on:click "evt.stopPropagation()" :style modal}
+                    [:h2 {:style "margin:0 0 .5rem;font:600 15px sans-serif;"} "Make a new link?"]
+                    [:p {:style "color:var(--muted);margin:.2rem 0 .8rem;"}
+                     "This invalidates the current link. Anyone who still has it — including "
+                     "people you already shared it with — loses access until you send them "
+                     "the new one."]
+                    [:div {:style "display:flex;gap:.4rem;justify-content:flex-end;"}
+                     [:button {:class "btn" :data-on:click "$rotateconfirm=false"} "Cancel"]
+                     [:button {:class "btn primary"
+                               :style "background:var(--danger);border-color:var(--danger);"
+                               :data-on:click
+                               "$rotateconfirm=false, $shareact='rotate', @post('/share')"}
+                      "Yes, create new link"]]]]))
                ;; per-user grants
                [:div {:style "border-top:1px solid var(--grid);padding-top:.5rem;"}
                 (if (seq grants)
