@@ -82,12 +82,19 @@ visual of the copied range.
   Preview-first: the result opens in the big editor, Apply is a normal /cell
   edit. `formula/unparse` (form → `$`-sugared source, the inverse of `parse`)
   landed with this and is the substrate for the Excel importer below.
-- **Excel import (.xlsx)** — *next*: upload a workbook, each tab becomes a
-  sheet with formulas **translated** to Clojure/SCI via POI `FormulaParser`
-  RPN → marker forms → `formula/unparse`; untranslatable cells fall back to
-  their cached value + an audit `label`; values/styles/format masks/sizes
-  carry over; a permanent `excel-compat` stdlib category (`if-error`,
-  `excel-truthy`, `xmin`/`xmax`, …) covers Excel semantics.
+- **Excel import (.xlsx)** ✅ SHIPPED *(branch `feat/xlsx-import`)* — ⬆ xlsx
+  uploads a workbook; each tab becomes a new sheet with formulas **translated**
+  to Clojure/SCI (POI `FormulaParser` RPN → marker forms → `formula/unparse`,
+  ~25 functions + operators); untranslatable cells fall back to their cached
+  value + an audit `label`, and every translated cell is **verified against
+  Excel's cached value** (mismatches demoted the same way — imported sheets
+  are correct-or-labeled, with a full report page). Values/styles/format
+  masks/sizes carry over; dates → ISO strings; a permanent `excel-compat`
+  stdlib category (`if-error`, `excel-truthy`, `xmin`/`xmax`, `xround`,
+  `xdate`, `xvlookup`) covers Excel semantics; `'`-escape landed in the
+  engine (type `'123` for literal text). Deferred: SUMIF/COUNTIF criteria,
+  approximate VLOOKUP, 3D refs, named ranges, merged regions, .xls legacy
+  (see TECHDEBT).
 - **Logic audit / assertions** — per-cell assertions (`=(assert …)`) that flag
   violations; reuses the formula path + reactive recompute. (SCI already shipped,
   so `let`/`fn` are available.)

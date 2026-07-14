@@ -45,9 +45,13 @@
 (defn- parse-literal [raw]
   (let [t (str/trim raw)]
     (cond
-      (re-matches #"[-+]?\d+" t)               (Long/parseLong t)
+      ;; Excel-style escape: a leading apostrophe forces TEXT as-is — '123
+      ;; stays the string "123", '=foo displays =foo without being a formula.
+      ;; The apostrophe is not part of the value; the raw (with ') persists.
+      (str/starts-with? t "'")                  (subs t 1)
+      (re-matches #"[-+]?\d+" t)                (Long/parseLong t)
       (re-matches #"[-+]?\d*\.\d+([eE]\d+)?" t) (Double/parseDouble t)
-      :else                                    t)))
+      :else                                     t)))
 
 (defn- rdeps
   "Addresses whose formula references `addr`."

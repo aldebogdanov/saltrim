@@ -355,7 +355,21 @@
              [:b "computed value"] " (with its styling and number format) — "
              [:b "not"] " its formula. The exported file has " [:b "no live formulas and no reactivity"]
              "; editing a value in Excel won't recompute anything. Each formula's original "
-             "source is attached as a cell comment so the logic isn't lost."])))
+             "source is attached as a cell comment so the logic isn't lost."]
+
+            [:div {:style h3} "Import from Excel"]
+            [:p {:style p} "The " [:span {:style kbd} "⬆ xlsx"] " button imports an Excel workbook: "
+             "each tab becomes a " [:b "new sheet"] " of yours. Unlike export, import is " [:b "live"]
+             ": Excel formulas are " [:b "translated to Clojure"] " (SUM → "
+             [:span {:style kbd} "sum"] ", AVERAGE → " [:span {:style kbd} "mean"] ", IF → "
+             [:span {:style kbd} "if"] ", IFERROR → " [:span {:style kbd} "if-error"]
+             "…) and keep recomputing. Values, styling, number formats and column/row sizes carry over; "
+             "dates become ISO strings (" [:span {:style kbd} "2024-03-15"] ")."]
+            [:p {:style p} "Anything untranslatable (cross-sheet references, named ranges, exotic "
+             "functions) is imported as its last " [:b "computed value"] ", with the original Excel "
+             "formula kept as the cell's " [:span {:style kbd} "label"] ". Every translated formula is "
+             "verified against Excel's own cached value — mismatches are demoted to values the same "
+             "way, so an imported sheet is always correct. The import report lists all of it."])))
 
 (defn- help-html
   "In-app end-user reference, toggled by $help. Mirrors README's user guide.
@@ -388,7 +402,8 @@
   [["math"  "sum product abs ceil floor round sqrt pow exp ln log10 sign"]
    ["stats" "mean avg median variance stdev"]
    ["text"  "upper lower trim join split str-replace starts-with? ends-with? includes? blank?"]
-   ["date"  "today year month day days-between  (ISO yyyy-MM-dd strings)"]])
+   ["date"  "today year month day days-between  (ISO yyyy-MM-dd strings)"]
+   ["excel-compat" "if-error excel-truthy xmin xmax xround xdate xvlookup  (Excel semantics — the .xlsx importer targets these)"]])
 
 (defn- defs-html
   "The definitions LIBRARY modal, toggled by $defspanel. The editable library
@@ -458,6 +473,91 @@
                       :data-on:keydown "evt.key==='Enter' && @post('/props')"}]]
             [:div {:style "margin-top:1rem;text-align:right;"}
              [:button {:class "btn primary" :data-on:click "@post('/props'), $propspanel=false"} "Apply"]]]]))))
+
+(defn- import-html
+  "Import-.xlsx modal, toggled by $importpanel. A REAL multipart form (file
+   bytes can't ride Datastar JSON signals): submitting navigates to /import's
+   HTML report page. Each workbook tab becomes a new sheet owned by the user."
+  []
+  (let [p "margin:.2rem 0 .7rem;font:13px sans-serif;color:var(--muted);"
+        inp "font:13px monospace;padding:5px 6px;border:1px solid var(--line);border-radius:var(--radius);background:var(--panel);"]
+    (str (h/html
+          [:div {:id "importwrap" :data-show "$importpanel"
+                 :data-on:click "$importpanel=false"
+                 :style (str "position:fixed;inset:0;z-index:50;background:rgba(0,0,0,.35);"
+                             "display:flex;align-items:flex-start;justify-content:center;padding:4vh 1rem;")}
+           [:div {:data-on:click "evt.stopPropagation()"
+                  :style (str "background:var(--bg);border:1px solid var(--line);border-radius:8px;"
+                              "box-shadow:0 8px 32px rgba(0,0,0,.25);max-width:30rem;width:100%;"
+                              "max-height:88vh;overflow:auto;padding:1.1rem 1.3rem;")}
+            [:div {:style "display:flex;align-items:center;margin-bottom:.3rem;"}
+             [:h2 {:style "margin:0;font:600 18px sans-serif;flex:1;"} "Import Excel workbook"]
+             [:button {:class "btn" :data-on:click "$importpanel=false" :title "close"} "✕"]]
+            [:p {:style p} "Each workbook tab becomes a " [:b "new sheet"] " of yours. Formulas are "
+             [:b "translated"] " to Clojure where possible; anything untranslatable keeps its "
+             "computed value with the original formula as a label. You'll get a full report."]
+            [:form {:method "post" :action "/import" :enctype "multipart/form-data"
+                    :style "display:flex;flex-direction:column;gap:.6rem;"}
+             [:input {:type "file" :name "file" :accept ".xlsx" :required true :style inp}]
+             [:input {:type "text" :name "name" :placeholder "sheet name (optional — defaults to the file name)"
+                      :maxlength "32" :pattern "[A-Za-z0-9-]*" :style inp}]
+             [:div {:style "text-align:right;"}
+              [:button {:type "submit" :class "btn primary"} "import"]]]]]))))
+
+(def ^:private report-page-css
+  (str "body{font:14px sans-serif;margin:2rem auto;max-width:44rem;padding:0 1rem;"
+       "background:var(--bg,#fff);color:var(--fg,#222);}"
+       "table{border-collapse:collapse;width:100%;margin:.4rem 0 1rem;}"
+       "th,td{border:1px solid #ccc;padding:.3rem .5rem;font-size:13px;text-align:left;}"
+       "th{background:#f2f2f2;}code{font-family:monospace;background:#f6f6f6;padding:0 .2rem;}"
+       "a.btn{display:inline-block;border:1px solid #888;border-radius:6px;padding:.3rem .7rem;"
+       "text-decoration:none;color:inherit;margin:.2rem .4rem 0 0;}"))
+
+(defn import-error-html
+  "Standalone error page for a failed /import."
+  [msg]
+  (str (h/html
+        [:html [:head [:title "Import failed — SaltRim"] [:style (h/raw report-page-css)]]
+         [:body
+          [:h1 "Import failed"]
+          [:p [:code (str msg)]]
+          [:a {:class "btn" :href "/"} "← back"]]])))
+
+(defn import-report-html
+  "Standalone report page for a successful /import: per sheet a link + counts +
+   the audit lists (untranslated fallbacks, verify-demotions, dropped masks)."
+  [{:keys [sheets]}]
+  (str (h/html
+        [:html
+         [:head [:title "Import report — SaltRim"] [:style (h/raw report-page-css)]]
+         [:body
+          [:h1 "Imported " (count sheets) (if (= 1 (count sheets)) " sheet" " sheets")]
+          (for [{:keys [sname tab cells formulas fallbacks demoted masks-dropped]} sheets]
+            [:div
+             [:h2 [:a {:href (str "/?s=" sname)} sname]
+              [:span {:style "font:13px sans-serif;color:#888;"} "  (tab “" tab "”)"]]
+             [:p cells " cells · " formulas " formulas ("
+              (- formulas (count fallbacks) (count demoted)) " translated live, "
+              (count fallbacks) " untranslated, " (count demoted) " demoted to values)"]
+             (when (seq fallbacks)
+               (list [:h3 "Untranslated — imported as their computed value"]
+                     [:table
+                      [:tr [:th "cell"] [:th "Excel formula"] [:th "why"]]
+                      (for [{:keys [addr formula reason]} fallbacks]
+                        [:tr [:td addr] [:td [:code "=" formula]] [:td reason]])]))
+             (when (seq demoted)
+               (list [:h3 "Demoted — translated but disagreed with Excel's value"]
+                     [:table
+                      [:tr [:th "cell"] [:th "Excel formula"] [:th "kept value"]]
+                      (for [{:keys [addr formula cached]} demoted]
+                        [:tr [:td addr] [:td [:code "=" formula]] [:td (str cached)]])]))
+             (when (seq masks-dropped)
+               [:p "Number formats not carried over: "
+                (interpose ", " (map (fn [m] [:code m]) masks-dropped))])])
+          [:p "Untranslated and demoted cells keep the original Excel formula as the cell's "
+           [:code "label"] " (visible in the 🕸 dependency graph and the style row)."]
+          (for [{:keys [sname]} sheets]
+            [:a {:class "btn" :href (str "/?s=" sname)} "open " sname])]])))
 
 (defn- sheet-picker
   "Dropdown for switching sheets, grouped into 'your sheets' (👤) and 'shared
@@ -811,6 +911,8 @@
              :data-signals:big "''"
              ;; flatten (⧉): strict = only error-behavior-preserving simplify rules
              :data-signals:flatstrict "false"
+             ;; import-.xlsx modal
+             :data-signals:importpanel "false"
              :data-signals:help "false"
              ;; dependency-graph view (🕸 modal) — server renders #graphview on open
              :data-signals:graphpanel "false"
@@ -828,6 +930,7 @@
       (when-not asof? (h/raw (defs-html storage-id)))
       (when-not asof? (h/raw (bigedit-html)))
       (when (and owner? (not asof?)) (h/raw (props-html)))
+      (when-not asof? (h/raw (import-html)))
       (when-not asof? (history-modal storage-id sname branch revisions link-token owner?))
       (when-not asof? (graph-modal-html))
       ;; ── toolbar row 1: sheet management + sharing + identity ───────────
@@ -869,6 +972,12 @@
                              "styling only. No live formulas or reactivity (each formula's "
                              "source is kept as a cell comment).")}
              "⬇ xlsx"])
+          ;; import: opens the multipart-form modal — each tab becomes a NEW sheet
+          [:button {:class "btn" :data-on:click "$importpanel=true"
+                    :title (str "Import an Excel workbook (.xlsx) — each tab becomes a new "
+                                "sheet of yours, formulas translated to Clojure where possible "
+                                "(the rest keep their computed values, labeled).")}
+           "⬆ xlsx"]
           [:button {:class "btn" :data-on:click "$help=true" :title "help / quick guide"} "?"]))
        ;; who am I + sign out
        [:span {:style "font:12px sans-serif;color:var(--muted);white-space:nowrap;"}

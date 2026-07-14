@@ -14,12 +14,15 @@
             [uno.michelada.saltrim.merge :as mrg]
             [uno.michelada.saltrim.sheet :as sheet]
             [uno.michelada.saltrim.store :as store]
+            [uno.michelada.saltrim.xlsx :as xlsx]
+            [ring.middleware.multipart-params :as multipart]
+            [ring.middleware.multipart-params.byte-array :as mp-bytes]
             [starfederation.datastar.clojure.api :as d*]
             [starfederation.datastar.clojure.adapter.http-kit :as hk]
             [uno.michelada.saltrim.web.geom :refer [in-window? pretty-err qparam url-decode url-encode window]]
             [uno.michelada.saltrim.web.state :refer [accessible-rec can-read? def-editor-of locked-by-other? now owner-of save-rec! session-view sessions* set-session-view! sheets* sid-re unload-sheet!]]
             [uno.michelada.saltrim.web.sse :refer [patch-inner! read-signals signals! sse sse-opts webkit-ua?]]
-            [uno.michelada.saltrim.web.render :refer [cells-html colhead-html denied-page graph-svg login-page merge-result-html meta-html page prop-allowed? render-cells rowhead-html self-html share-html]]
+            [uno.michelada.saltrim.web.render :refer [cells-html colhead-html denied-page graph-svg import-error-html import-report-html login-page merge-result-html meta-html page prop-allowed? render-cells rowhead-html self-html share-html]]
             [uno.michelada.saltrim.web.collab :refer [broadcast! broadcast-deflib-except! broadcast-presence! broadcast-window! ensure-session! push-deflib! reap-session! render-window!]]))
 
 (def ^:private edit-lock (Object.))
@@ -1059,4 +1062,44 @@
           (if-let [rec (accessible-rec uid id branch token)]
             (xlsx-response (export/workbook-bytes (:sh rec) sname) sname)
             {:status 403 :body "no access"}))))))
+
+(defn- html-page [status body]
+  {:status status :headers {"Content-Type" "text/html; charset=utf-8"} :body body})
+
+(defn handle-import
+  "POST /import — a REAL multipart form submit (not Datastar; file bytes can't
+   ride JSON signals), answered with a full HTML report page. Parses the
+   multipart body route-scoped (no global middleware change), checks the
+   size/magic caps, and hands the workbook to xlsx/import! under the signed-in
+   uid. Nothing persists unless every tab builds."
+  [req]
+  (let [uid (auth/req->uid req)]
+    (if-not uid
+      (html-page 403 (import-error-html "not signed in"))
+      (try
+        (let [mp    (:multipart-params
+                     (multipart/multipart-params-request
+                      req {:store (mp-bytes/byte-array-store)}))
+              f     (get mp "file")
+              ^bytes bytes (:bytes f)]
+          (cond
+            (or (nil? bytes) (zero? (alength bytes)))
+            (html-page 400 (import-error-html "no file uploaded"))
+
+            (> (alength bytes) xlsx/max-bytes)
+            (html-page 400 (import-error-html
+                            (str "file too large (max " (quot xlsx/max-bytes (* 1024 1024)) " MB)")))
+
+            ;; .xlsx is a zip: PK magic
+            (not (and (<= 2 (alength bytes))
+                      (= 0x50 (bit-and 255 (aget bytes 0)))
+                      (= 0x4B (bit-and 255 (aget bytes 1)))))
+            (html-page 400 (import-error-html "not an .xlsx file"))
+
+            :else
+            (html-page 200 (import-report-html
+                            (xlsx/import! (java.io.ByteArrayInputStream. bytes) uid
+                                          (xlsx/base-name (get mp "name") (:filename f)))))))
+        (catch Throwable e
+          (html-page 400 (import-error-html (.getMessage e))))))))
 

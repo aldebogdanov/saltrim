@@ -351,3 +351,30 @@ of presentation. Intentional limits / future polish:
 - **POI adds ~12 MB to the uberjar** (poi-ooxml + xmlbeans). Verified to work from
   the packaged jar; the one-time `log4j-core not found` line at startup is a benign
   POI logging fallback.
+
+## xlsx import (feat/xlsx-import)
+
+`/import` translates Excel formulas to Clojure via POI `FormulaParser` RPN;
+everything outside the vocabulary falls back to the cached value + a `label`,
+and a verify pass demotes translated cells that disagree with Excel's cache.
+Deferred (all land as labeled values today, so sheets stay correct):
+
+- **SUMIF / COUNTIF / AVERAGEIF criteria strings** (`">5"`, `"a*"`) need a
+  small criteria parser; map onto `filter` + the aggregate.
+- **Approximate-match VLOOKUP** (4th arg TRUE/omitted) — needs sorted-scan
+  semantics; only exact match (`FALSE`) translates.
+- **Cross-sheet references** (`Other!A1`, 3D areas) — SaltRim has no
+  cross-sheet refs yet; revisit if/when it does.
+- **Named ranges** — could resolve through POI's workbook names into plain
+  refs at translate time.
+- **Whole-column/row ranges** (`A:A`) — ranges expand statically; needs a
+  bounded "used range" clamp to translate safely.
+- **Merged regions** — imported as the top-left value only (no merge concept).
+- **Excel `=` text comparison is case-insensitive**; ours is exact. Verify
+  demotes any cell where this changes the result.
+- **`.xls` (BIFF8 legacy)** — XSSF only; HSSF would need the same walk over
+  `HSSFWorkbook`.
+- **Styles-only blank cells are dropped** (`load-document!` skips cells with
+  no value — matches how SaltRim itself persists today).
+- **Trailing spaces in text cells** are lost to `parse-literal`'s trim (the
+  apostrophe escape preserves leading ones).

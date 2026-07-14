@@ -15,7 +15,7 @@
             [mount.core :refer [defstate]]
             [uno.michelada.saltrim.web.state :refer [SWEEP-MS sessions* sheets*]]
             [uno.michelada.saltrim.web.collab :refer [sweep!]]
-            [uno.michelada.saltrim.web.handlers :refer [auth-routes handle-branch handle-cell handle-clear handle-copy handle-cut handle-defadd handle-defdel handle-deflock handle-defsave handle-defunlock handle-export handle-flatten handle-graph handle-insert handle-merge handle-paste handle-presence handle-props handle-redo handle-root handle-session-end handle-share handle-size handle-stream handle-style handle-undo handle-view handle-viewat]])
+            [uno.michelada.saltrim.web.handlers :refer [auth-routes handle-branch handle-cell handle-clear handle-copy handle-cut handle-defadd handle-defdel handle-deflock handle-defsave handle-defunlock handle-export handle-flatten handle-graph handle-import handle-insert handle-merge handle-paste handle-presence handle-props handle-redo handle-root handle-session-end handle-share handle-size handle-stream handle-style handle-undo handle-view handle-viewat]])
   (:gen-class))
 
 (defn- app [req]
@@ -53,6 +53,7 @@
       {:status 404 :body "no favicon"})
     [:get "/stream"]         (handle-stream req)
     [:get "/export.xlsx"]    (handle-export req)
+    [:post "/import"]        (handle-import req)
     [:post "/session/end"]   (handle-session-end req)
     ;; dev-only diagnostics: exposed only under the name-only dev provider
     [:get "/debug"]       (if-not (auth/dev-auth?)
