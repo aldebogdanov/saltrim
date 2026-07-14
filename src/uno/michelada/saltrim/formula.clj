@@ -41,6 +41,7 @@
      compile  : marker-form -> Spin (SCI-compile body, lift refs, eval spin)."
   (:refer-clojure :exclude [compile await])
   (:require [clojure.edn :as edn]
+            [clojure.set :as set]
             [clojure.string :as str]
             [clojure.walk :as walk]
             [sci.core :as sci]
@@ -52,8 +53,13 @@
 
 ;; --- parse --------------------------------------------------------------
 
-(defn- ref-marker [addr] (list ::ref addr))
-(defn- ref? [x] (and (seq? x) (= ::ref (first x))))
+(defn ref-marker
+  "The parsed representation of a cell reference: (::ref \"A1\")."
+  [addr] (list ::ref addr))
+
+(defn ref?
+  "Is `x` a parsed cell-ref marker?"
+  [x] (and (seq? x) (= ::ref (first x))))
 
 (def ^:private readers
   {;; #cell A1 -> (::ref "A1")
@@ -137,6 +143,166 @@
                     :else                  (or (rel-ref x self) (dollar-ref x) x)))
                 form0)]
      {:form form :deps (deps form)})))
+
+;; --- unparse (inverse of parse) ------------------------------------------
+
+(defn range-marker
+  "Marker for a rectangular range, used when BUILDING forms for `unparse`
+   (e.g. by an importer): renders as `$A1:B2`. `parse` never emits this — it
+   expands ranges to a (vector …) of refs at read time — so unparsing a range
+   marker and re-parsing yields the EXPANDED vector form (asymmetric by
+   design)."
+  [a b] (list ::range a b))
+
+(defn range-ref?
+  "Is `x` an unparse-side range marker?"
+  [x] (and (seq? x) (= ::range (first x))))
+
+(defn- vector-range
+  "When `x` is a (vector …) seq of ≥2 ref markers whose addresses form a FULL
+   row-major rectangle (exactly what a `$A1:B2` range parses to), the
+   [top-left bottom-right] corner pair — else nil."
+  [x]
+  (when (and (seq? x) (= 'vector (first x)))
+    (let [ms (rest x)]
+      (when (and (<= 2 (count ms)) (every? ref? ms))
+        (let [as (mapv second ms)
+              ps (mapv addr/parse as)
+              tl (addr/make (reduce min (map :ci ps)) (reduce min (map :ri ps)))
+              br (addr/make (reduce max (map :ci ps)) (reduce max (map :ri ps)))]
+          (when (= as (addr/range-cells tl br))
+            [tl br]))))))
+
+(defn unparse
+  "Marker form -> formula source WITHOUT the leading `=` — the inverse of
+   `parse`. Cell refs render as the terse `$` sugar: (::ref \"A1\") -> $A1; a
+   (vector …) of refs forming a full rectangle re-collapses to $A1:B2; a range
+   marker (see `range-marker`) renders as $A1:B2 directly. Everything else
+   prints as EDN, so for any form in the image of `parse`:
+     (= form (:form (parse (unparse form))))."
+  [form]
+  (cond
+    (ref? form)       (str "$" (second form))
+    (range-ref? form) (str "$" (nth form 1) ":" (nth form 2))
+    (seq? form)       (if-let [[tl br] (vector-range form)]
+                        (str "$" tl ":" br)
+                        (str "(" (str/join " " (map unparse form)) ")"))
+    (vector? form)    (str "[" (str/join " " (map unparse form)) "]")
+    (map? form)       (str "{" (str/join ", " (map (fn [[k v]]
+                                                     (str (unparse k) " " (unparse v)))
+                                                   form)) "}")
+    (set? form)       (str "#{" (str/join " " (map unparse form)) "}")
+    :else             (pr-str form)))
+
+;; --- inline (flatten a formula over its dependencies) --------------------
+
+(defn- all-syms
+  "Every symbol occurring anywhere in `form`."
+  [form]
+  (let [acc (volatile! #{})]
+    (walk/postwalk (fn [x] (when (symbol? x) (vswap! acc conj x)) x) form)
+    @acc))
+
+(defn- destructured-syms
+  "All symbols inside one binding FORM (a symbol, or a destructuring
+   vector/map) — the names it binds."
+  [b]
+  (let [acc (volatile! #{})]
+    (walk/postwalk (fn [x] (when (and (symbol? x) (not= '& x)) (vswap! acc conj x)) x) b)
+    @acc))
+
+(defn- binding-vec-syms
+  "Binder symbols of a let/loop/for-style binding VECTOR [b v b v …], incl.
+   destructuring and for/doseq `:let [b v …]` sub-vectors (other keyword
+   modifiers bind nothing)."
+  [bv]
+  (reduce (fn [acc [b v]]
+            (cond
+              (= :let b)   (into acc (binding-vec-syms v))
+              (keyword? b) acc                       ; :when / :while / …
+              :else        (into acc (destructured-syms b))))
+          #{} (partition 2 bv)))
+
+(defn- fn-param-syms
+  "Binder symbols of a (fn …) form: optional name + params of every arity."
+  [x]
+  (reduce (fn [acc el]
+            (cond
+              (symbol? el) (conj acc el)
+              (vector? el) (into acc (destructured-syms el))
+              (and (seq? el) (vector? (first el))) (into acc (destructured-syms (first el)))
+              :else acc))
+          #{} (rest x)))
+
+(defn direct-binders
+  "Symbols BOUND by form `x` itself (not by nested forms): let/loop/for/doseq/
+   binding vectors, fn params/name, letfn fns, catch. Nil when `x` binds
+   nothing. Shared with the simplifier (its rules must not fire on locally
+   shadowed operator names)."
+  [x]
+  (when (and (seq? x) (symbol? (first x)))
+    (let [h (name (first x))]
+      (cond
+        (and (#{"let" "let*" "loop" "loop*" "for" "doseq" "binding"} h)
+             (vector? (second x)))
+        (binding-vec-syms (second x))
+
+        (#{"fn" "fn*"} h)
+        (fn-param-syms x)
+
+        (and (= "letfn" h) (vector? (second x)))
+        (reduce (fn [acc f] (if (seq? f) (into acc (fn-param-syms (cons 'fn f))) acc))
+                #{} (second x))
+
+        (and (= "catch" h) (symbol? (nth x 2 nil)))
+        #{(nth x 2)}))))
+
+(def max-inline-nodes
+  "Refuse to inline past this many nodes — a flattened formula bigger than this
+   isn't readable anyway, and the cap also bounds the walk defensively."
+  5000)
+
+(defn- inline*
+  [x form-of scope n]
+  (when (< max-inline-nodes (vswap! n inc))
+    (throw (ex-info "too large to flatten" {:size @n})))
+  (cond
+    (ref? x)
+    (if-let [body (form-of (second x))]
+      (let [clash (set/intersection scope (all-syms body))]
+        (if (seq clash)
+          (throw (ex-info (str "flatten would capture " (str/join ", " (sort (map str clash)))
+                               " — bound in an enclosing formula and used by "
+                               (second x))
+                          {:collisions clash :addr (second x)}))
+          (inline* body form-of scope n)))
+      x)
+
+    (seq? x)
+    (let [scope (into scope (direct-binders x))]
+      (apply list (map #(inline* % form-of scope n) x)))
+
+    (vector? x) (mapv #(inline* % form-of scope n) x)
+    (map? x)    (into {} (map (fn [[k v]] [(inline* k form-of scope n)
+                                           (inline* v form-of scope n)]) x))
+    (set? x)    (into #{} (map #(inline* % form-of scope n) x))
+    :else x))
+
+(defn inline
+  "Recursively substitute every ref marker whose target is a FORMULA cell with
+   that cell's parsed form; refs to literal/blank cells stay leaf markers.
+   `form-of` maps addr -> marker form for formula cells, nil otherwise. Sheets
+   are DAGs (cycles are rejected at install), so the substitution terminates —
+   and `max-inline-nodes` bounds it defensively anyway.
+
+   Hygiene: refuses (ex-info :collisions) when an inlined body would land under
+   a binding form that binds one of the body's symbols. The check is
+   conservative — it also refuses when the body binds that name itself, or when
+   the binder only shadows it in a sibling position — a refusal never corrupts,
+   it just asks the user to rename the binder."
+  [form form-of]
+  (let [fo (memoize form-of)]
+    (inline* form fo #{} (volatile! 0))))
 
 ;; --- reference shifting (clipboard paste) -------------------------------
 
