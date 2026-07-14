@@ -210,6 +210,25 @@
                 (catch Throwable e
                   (signals! gen {:err (str cell ": " (pretty-err (.getMessage e)))}))))))))))
 
+(defn handle-flatten
+  "Compute the flattened (+ simplified) source of the selected formula cell and
+   open it in the big editor for review — a pure PREVIEW ($flatstrict picks the
+   strict rule set). Nothing is written here: the editor's Apply posts /cell,
+   so the write guard, undo, autosave and broadcast all run there."
+  [req]
+  (with-access req
+    (fn [uid sheet-id rec {:keys [sid sel flatstrict]} gen]
+      (ensure-session! sid sheet-id (:branch rec) uid (:token rec))
+      (let [sh (:sh rec)]
+        (if-not (and (addr/valid? sel) (= :formula (sheet/kind sh sel)))
+          (signals! gen {:err (str (or (not-empty (str sel)) "the selection")
+                                   " isn't a formula cell — nothing to flatten")})
+          (try
+            (signals! gen {:big     (sheet/flatten-src sh sel (when flatstrict {:strict true}))
+                           :bigwhat "v" :bigedit true :err ""})
+            (catch Throwable e
+              (signals! gen {:err (str sel ": " (pretty-err (.getMessage e)))}))))))))
+
 (declare selected-cells)
 
 (defn handle-style

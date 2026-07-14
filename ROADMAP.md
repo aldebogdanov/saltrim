@@ -73,6 +73,21 @@ visual of the copied range.
   layout, jump-to-cell (not just select), a dedicated label field, edge styling.
 - **Terse cell refs** ✅ SHIPPED *(branch `feat/formula-dollar-refs`)* — `$A1` /
   `$A3:D8` as shorthand for `#cell` / `#cells` (relative; shift on paste).
+- **Flatten formula (⧉)** ✅ SHIPPED *(branch `feat/flatten-formula`)* — inline
+  every transitively referenced formula into the selected cell's expression
+  (literal refs stay refs; conservative hygiene refusal on binder capture),
+  then simplify it (constant folding, associative flattening, `(+ x 1)` →
+  `(inc x)`, literal-`if` pruning; identity rules like `(+ x 0)` → `x` behind a
+  **strict** toggle since they can turn a blank-ref error into a blank).
+  Preview-first: the result opens in the big editor, Apply is a normal /cell
+  edit. `formula/unparse` (form → `$`-sugared source, the inverse of `parse`)
+  landed with this and is the substrate for the Excel importer below.
+- **Excel import (.xlsx)** — *next*: upload a workbook, each tab becomes a
+  sheet with formulas **translated** to Clojure/SCI via POI `FormulaParser`
+  RPN → marker forms → `formula/unparse`; untranslatable cells fall back to
+  their cached value + an audit `label`; values/styles/format masks/sizes
+  carry over; a permanent `excel-compat` stdlib category (`if-error`,
+  `excel-truthy`, `xmin`/`xmax`, …) covers Excel semantics.
 - **Logic audit / assertions** — per-cell assertions (`=(assert …)`) that flag
   violations; reuses the formula path + reactive recompute. (SCI already shipped,
   so `let`/`fn` are available.)

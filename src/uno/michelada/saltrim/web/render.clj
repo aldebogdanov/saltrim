@@ -322,6 +322,19 @@
              [:span {:style kbd} "Ctrl/⌘+Shift+Z"] " (or " [:span {:style kbd} "Ctrl+Y"] ") redoes. "
              "Undo only affects your own edits — a cell a collaborator changed after you is left alone."]
 
+            [:div {:style h3} "Flatten a formula"]
+            [:p {:style p} "Select a formula cell and press " [:span {:style kbd} "⧉"]
+             " (formula bar): every formula it references is inlined in place, recursively, "
+             "into one self-contained expression — references to plain values stay references — "
+             "and the result is simplified toward idiomatic Clojure (constants folded, nested "
+             [:span {:style kbd} "(+ (+ a b) c)"] " flattened, " [:span {:style kbd} "(+ x 1)"]
+             " → " [:span {:style kbd} "(inc x)"] "…). The result opens in the big editor for "
+             "review — nothing changes until you press Apply (a normal, undoable edit)."]
+            [:p {:style p} "Tick " [:span {:style kbd} "strict"] " to keep only rewrites that "
+             "preserve error behavior exactly — e.g. without it " [:span {:style kbd} "(+ x 0)"]
+             " becomes " [:span {:style kbd} "x"] ", which turns an error over a blank cell into "
+             "a blank."]
+
             [:div {:style h3} "Branches"]
             [:p {:style p} "A branch is a parallel version of the sheet you can edit without touching the "
              "others — like git for spreadsheets. The " [:span {:style kbd} "🌿"] " picker (top bar) "
@@ -796,6 +809,8 @@
              :data-signals:bigedit "false"
              :data-signals:bigwhat "''"
              :data-signals:big "''"
+             ;; flatten (⧉): strict = only error-behavior-preserving simplify rules
+             :data-signals:flatstrict "false"
              :data-signals:help "false"
              ;; dependency-graph view (🕸 modal) — server renders #graphview on open
              :data-signals:graphpanel "false"
@@ -876,7 +891,14 @@
                 :data-on:keydown "evt.key==='Enter' && ($cell=$sel, @post('/cell'))"
                 :data-on:blur "$cell=$sel, @post('/cell'), $edit=false, @post('/presence')"
                 :style "flex:1;"}]
-       [:button {:class "btn" :title "big editor" :data-on:click "$big=$v, $bigwhat='v', $bigedit=true"} "⤢"]])
+       [:button {:class "btn" :title "big editor" :data-on:click "$big=$v, $bigwhat='v', $bigedit=true"} "⤢"]
+       ;; flatten: server computes the inlined+simplified source of the selected
+       ;; formula cell and opens it in the big editor — Apply there posts /cell
+       [:button {:class "btn" :title "flatten formula — inline every referenced formula, then simplify; review in the big editor before applying"
+                 :data-on:click "@post('/flatten')"} "⧉"]
+       [:label {:class "tool" :title "strict: only simplify rules that preserve error behavior exactly (skip e.g. (+ x 0) → x, which turns a blank-ref error into a blank)"
+                :style "display:flex;align-items:center;gap:.25rem;font:11px sans-serif;color:var(--muted);"}
+        [:input {:type "checkbox" :data-bind:flatstrict ""}] "strict"]])
       ;; ── toolbar row 3: style of the selected cell (collapsible) ────────
       ;; prop dropdown + a literal-or-=formula source, applied to $sel on Enter
       ;; (like the formula bar — no separate button). $val is the cell's own

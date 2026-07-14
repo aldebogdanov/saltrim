@@ -186,6 +186,30 @@ sheet-wide default column width and row height.
 - Undo is **per-user**: it only rolls back *your own* edits, and a cell a
   collaborator changed after you is left untouched.
 
+### Flatten a formula
+
+Select a formula cell and press **⧉** (next to the formula bar): every formula
+it references is **inlined in place, recursively**, producing one
+self-contained expression — references to plain values stay references. With
+`A1 =(* $A2 $A3)`, `A3 =(+ $B1 $B2)`, `B2 =(inc $B3)`, flattening A1 gives:
+
+```clojure
+=(* $A2 (+ $B1 (inc $B3)))
+```
+
+The result is also **simplified** toward idiomatic Clojure: constants folded
+(`(+ 1 2)` → `3`), nested associative calls flattened
+(`(+ a (+ b c))` → `(+ a b c)`), `(+ x 1)` → `(inc x)`, `(if true a b)` → `a`,
+and (unless **strict** is ticked) identities dropped (`(+ x 0)` → `x`).
+
+- The flattened source opens in the **big editor** for review — nothing changes
+  until you press **Apply** (a normal, undoable edit of the cell).
+- The **strict** checkbox keeps only rewrites that preserve error behavior
+  exactly: e.g. `(+ x 0)` → `x` turns an error over a blank cell into a blank,
+  so it's skipped in strict mode.
+- Flatten refuses (with a toast) when a local binding in one formula would
+  capture a name used by an inlined one — rename the binding and retry.
+
 ### Branches
 
 A **branch** is a parallel version of a sheet you can edit independently — like

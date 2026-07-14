@@ -13,6 +13,7 @@
             [uno.michelada.saltrim.addr :as addr]
             [uno.michelada.saltrim.constants :as c]
             [uno.michelada.saltrim.formula :as formula]
+            [uno.michelada.saltrim.simplify :as simplify]
             [org.replikativ.spindel.signal :as sig]
             [org.replikativ.spindel.spin.core :as spin-core]
             [org.replikativ.spindel.engine.core :as ec]
@@ -165,6 +166,22 @@
    #{}. The reverse of `dependents*`; together they are the dependency-graph
    edges."
   [{:keys [meta]} addr] (get-in @meta [addr :deps] #{}))
+
+(defn flatten-src
+  "The FLATTENED source of formula cell `addr` (with its leading =): every
+   transitively referenced formula cell's body inlined in place (refs to
+   literal/blank cells stay refs), then simplified toward idiomatic Clojure —
+   `mode` {:strict true} keeps only rewrites that preserve error behavior
+   exactly (see the simplify ns). Pure preview: computes a source string,
+   changes nothing. Throws (ex-info) on a non-formula cell, a hygiene
+   collision, or an oversized result."
+  [{:keys [meta] :as sheet} addr mode]
+  (when-not (= :formula (kind sheet addr))
+    (throw (ex-info (str addr " isn't a formula cell") {:addr addr})))
+  (let [pf      (fn [a] (:form (formula/parse (subs (str/trim (raw sheet a)) 1) a)))
+        form-of (fn [a] (when (= :formula (get-in @meta [a :kind])) (pf a)))]
+    (str "=" (formula/unparse (simplify/simplify (formula/inline (pf addr) form-of)
+                                                 mode)))))
 
 ;; --- style layer --------------------------------------------------------
 ;;
