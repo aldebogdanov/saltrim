@@ -57,8 +57,10 @@ a toast message describing what went wrong.
 A **stdlib** is available bare in every formula: math (`sum`, `product`, `round`,
 `sqrt`, `pow`, `sign`, …), stats (`mean`/`avg`, `median`, `variance`, `stdev`),
 text (`upper`, `lower`, `trim`, `join`, `split`, `str-replace`, `includes?`, …),
-and date over ISO `yyyy-MM-dd` strings (`today`, `year`, `month`, `day`,
-`days-between`).
+date over ISO `yyyy-MM-dd` strings (`today`, `year`, `month`, `day`,
+`days-between`), and excel-compat helpers with Excel semantics (`if-error`,
+`excel-truthy`, `xmin`, `xmax`, `xround`, `xdate`, `xvlookup`) that the .xlsx
+importer targets.
 
 **Empty cells** read as `nil`. The aggregate stdlib functions (`sum`, `mean`,
 `median`, `product`, `variance`, `stdev`) **ignore blanks**, so a roomy range over
@@ -265,6 +267,40 @@ so the exported file has **no live formulas and no reactivity**: changing a valu
 in Excel won't recompute anything. Each formula's original source is attached as
 a **cell comment** so the logic isn't lost. The export respects what you're
 viewing — the current branch, or a read-only history snapshot.
+
+### Import from Excel
+
+The **⬆ xlsx** button imports an Excel workbook: every tab becomes a **new
+sheet** of yours. Unlike export, import is **live** — Excel formulas are
+**translated to Clojure** and keep recomputing:
+
+| Excel | SaltRim |
+|---|---|
+| `SUM(A1:A10)` | `=(sum $A1:A10)` |
+| `IF(A1>2,SUM(B1:B3),0)` | `=(if (> $A1 2) (sum $B1:B3) 0)` |
+| `IFERROR(A1/B1,0)` | `=(if-error (fn [] (/ $A1 $B1)) 0)` |
+| `VLOOKUP("k",A1:C10,2,FALSE)` | `=(xvlookup "k" $A1:C10 3 2)` |
+
+Supported out of the box: arithmetic (`+ - * / ^ % &`), comparisons, `SUM`,
+`AVERAGE`, `MEDIAN`, `MIN`/`MAX`, `COUNT`/`COUNTA`, `IF`/`AND`/`OR`/`NOT`
+(with Excel's number-truthiness via `excel-truthy`), `ABS`/`ROUND`/`SQRT`/
+`EXP`/`LN`/`LOG10`/`SIGN`/`POWER`, `CONCATENATE`/`&`, `LEN`/`UPPER`/`LOWER`/
+`TRIM`, `TODAY`/`YEAR`/`MONTH`/`DAY`/`DATE`, `IFERROR`, and exact-match
+`VLOOKUP`. These lean on a permanent **excel-compat** stdlib category
+(`if-error`, `excel-truthy`, `xmin`, `xmax`, `xround`, `xdate`, `xvlookup`) —
+usable from any formula, listed in the ƒ modal.
+
+Values, styling, number-format masks and column/row sizes carry over; dates
+become ISO strings (`2024-03-15`); text that looks like a number or a formula
+is protected with a leading apostrophe (`'123` — works when typing, too).
+
+**Anything untranslatable** (cross-sheet references, named ranges,
+whole-column ranges, other functions) is imported as its last **computed
+value**, with the original Excel formula kept as the cell's `label`. Every
+translated formula is then **verified against Excel's own cached value** —
+mismatches (e.g. Excel's blank-as-zero arithmetic) are demoted to values the
+same way. An imported sheet is always *correct-or-labeled*; the import report
+lists every fallback and demotion.
 
 ## Running & development
 

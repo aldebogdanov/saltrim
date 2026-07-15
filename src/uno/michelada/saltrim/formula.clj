@@ -437,6 +437,27 @@
    'month        (fn [s] (.getMonthValue (ld s)))
    'day          (fn [s] (.getDayOfMonth (ld s)))
    'days-between (fn [a b] (.between java.time.temporal.ChronoUnit/DAYS (ld a) (ld b)))
+   ;; excel-compat — Excel-semantics helpers the .xlsx importer targets, and
+   ;; useful on their own. `xmin`/`xmax` skip blank (nil) cells like the other
+   ;; aggregates (core min/max would throw); `excel-truthy` is Excel's 0=false;
+   ;; `xround` rounds half AWAY FROM ZERO like Excel's ROUND (Math/round would
+   ;; give -2.5 -> -2, Excel says -3); `xvlookup` is an exact-match VLOOKUP
+   ;; over one of our row-major flat ranges (`w` = the table width in columns).
+   'if-error     (fn [thunk fallback] (try (thunk) (catch Throwable _ fallback)))
+   'excel-truthy (fn [x] (cond (nil? x)     false
+                               (number? x)  (not (zero? x))
+                               (boolean? x) x
+                               :else        true))
+   'xmin  (fn [c] (let [n (nums c)] (when (seq n) (apply min n))))
+   'xmax  (fn [c] (let [n (nums c)] (when (seq n) (apply max n))))
+   'xround (fn [x n]
+             (let [r (.setScale (java.math.BigDecimal. (str (double x))) (int n)
+                                java.math.RoundingMode/HALF_UP)]
+               (if (pos? (int n)) (double r) (long (.longValueExact (.setScale r 0))))))
+   'xdate (fn [y m d] (format "%04d-%02d-%02d" (long y) (long m) (long d)))
+   'xvlookup (fn [k table w col]
+               (some (fn [row] (when (= k (first row)) (nth row (dec (long col)))))
+                     (partition (long w) table)))
    ;; I/O (see no-io): clear "not available" instead of an opaque cast crash
    'println no-io 'print no-io 'prn no-io 'pr no-io 'printf no-io
    'newline no-io 'flush no-io 'read no-io 'read-line no-io})
