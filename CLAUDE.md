@@ -236,7 +236,7 @@ share panel; `/cell` write-guard enforces `:read` vs `:read-write`; the picker
 lists 'shared with you' sheets. There is no blanket public-to-everyone tier —
 broad sharing is the link (the old `:everyone` flag auto-migrates to a link).
 **Cell presentation** (PR #14): reactive per-cell style (`$val`, separate style
-layer, 5 CSS props) + number-format masks (`fmt` ns, `:format` prop) +
+layer, 5 CSS props + 4 border sides) + number-format masks (`fmt` ns, `:format` prop) +
 per-column/row sizing (sparse `:cols`/`:rows`, prefix-sum virtualizer, drag to
 resize); in-app help modal + README user guide. **Per-sheet size defaults**:
 each sheet carries its own default column width / row height (`:dcw`/`:drh`,
@@ -282,5 +282,12 @@ is request-scoped (no live room/stream, scroll via `/viewat`), edits refused
 a layered SVG DAG (pure `graph` ns over `sheet/deps`; arrows dep→reader; click a
 node → `$sel`; capped at 250). Nodes show an optional per-cell `:label` (a
 metadata prop on the per-property datom path, set via the style row) else the
-address. Cheap win left: cell assertions (`=(assert …)`). See `TECHDEBT.md` for
+address. **`:label` and `:comment` are distinct meta props**: `:label` NAMES the
+cell (graph node), `:comment` is prose ABOUT it (corner flag + hover title, and
+where the .xlsx importer leaves its audit trail — it used to abuse `:label`).
+**Borders**: the style bar offers one `border` pseudo-prop plus a side dropdown
+(all/vertical/horizontal/top/bottom/left/right) whose option value is the
+comma-joined concrete prop list; `render/border-props` expands it server-side, so
+each side stays its own reactive prop (`render/border-sides` is the one map).
+Cheap win left: cell assertions (`=(assert …)`). See `TECHDEBT.md` for
 deferred items.

@@ -355,9 +355,9 @@ of presentation. Intentional limits / future polish:
 ## xlsx import (feat/xlsx-import)
 
 `/import` translates Excel formulas to Clojure via POI `FormulaParser` RPN;
-everything outside the vocabulary falls back to the cached value + a `label`,
+everything outside the vocabulary falls back to the cached value + a `comment`,
 and a verify pass demotes translated cells that disagree with Excel's cache.
-Deferred (all land as labeled values today, so sheets stay correct):
+Deferred (all land as commented values today, so sheets stay correct):
 
 - **SUMIF / COUNTIF / AVERAGEIF criteria strings** (`">5"`, `"a*"`) need a
   small criteria parser; map onto `filter` + the aggregate.
@@ -378,3 +378,20 @@ Deferred (all land as labeled values today, so sheets stay correct):
   no value — matches how SaltRim itself persists today).
 - **Trailing spaces in text cells** are lost to `parse-literal`'s trim (the
   apostrophe escape preserves leading ones).
+
+## Cell borders (style `border`)
+
+The style bar's `border` pseudo-prop writes four independent per-side props
+(`bordertop`/`borderright`/`borderbottom`/`borderleft`), each a raw CSS border
+shorthand rendered straight into the cell's inline style. Deferred:
+
+- **Borders don't survive .xlsx export.** `export/style-spec` hand-picks the
+  props it maps to POI (fill/font/align/format) and `styled?` ignores borders,
+  so a border-only cell exports unstyled. Needs a CSS-shorthand → POI
+  `BorderStyle` + `XSSFColor` mapping (width/style keywords don't line up
+  1:1 — POI has THIN/MEDIUM/THICK, not px).
+- **Excel borders aren't imported** either — the reader maps the same five
+  props only.
+- **No adjacent-cell border collapsing**: each cell draws its own edges, so a
+  `right` border and its neighbour's `left` border stack (2 lines, not 1).
+  Grid lines already sit under them; a range's outline is drawn per cell.

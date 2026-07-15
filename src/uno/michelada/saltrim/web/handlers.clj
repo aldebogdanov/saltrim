@@ -22,7 +22,7 @@
             [uno.michelada.saltrim.web.geom :refer [in-window? pretty-err qparam url-decode url-encode window]]
             [uno.michelada.saltrim.web.state :refer [accessible-rec can-read? def-editor-of locked-by-other? now owner-of save-rec! session-view sessions* set-session-view! sheets* sid-re unload-sheet!]]
             [uno.michelada.saltrim.web.sse :refer [patch-inner! read-signals signals! sse sse-opts webkit-ua?]]
-            [uno.michelada.saltrim.web.render :refer [cells-html colhead-html denied-page graph-svg import-error-html import-report-html login-page merge-result-html meta-html page prop-allowed? render-cells rowhead-html self-html share-html]]
+            [uno.michelada.saltrim.web.render :refer [border-prop border-props cells-html colhead-html denied-page graph-svg import-error-html import-report-html login-page merge-result-html meta-html page prop-allowed? render-cells rowhead-html self-html share-html]]
             [uno.michelada.saltrim.web.collab :refer [broadcast! broadcast-deflib-except! broadcast-presence! broadcast-window! ensure-session! push-deflib! reap-session! render-window!]]))
 
 (def ^:private edit-lock (Object.))
@@ -235,30 +235,32 @@
 (declare selected-cells)
 
 (defn handle-style
-  "Set a style/format/label prop. Applies to the WHOLE selection when $selcells
+  "Set a style/format/meta prop. Applies to the WHOLE selection when $selcells
    spans more than one cell (so you can style a rectangle in one go); otherwise to
-   the single active $cell. Per-cell undo; one settle/save; re-render the touched
-   cells + broadcast."
+   the single active $cell. `border` is a pseudo-prop: $borderside expands it into
+   the concrete per-side props it writes. Per-cell undo; one settle/save;
+   re-render the touched cells + broadcast."
   [req]
   (with-access req
-    (fn [uid sheet-id rec {:keys [cell sid selcells] :as sig} gen]
+    (fn [uid sheet-id rec {:keys [cell sid selcells borderside] :as sig} gen]
       (ensure-session! sid sheet-id (:branch rec) uid (:token rec))
       (let [sh    (:sh rec)
             prop  (keyword (:styleprop sig))
+            props (if (= border-prop prop) (border-props borderside) [prop])
             src   (str (:stylesrc sig))
             sel   (selected-cells selcells)
             cells (if (> (count sel) 1) sel (when (addr/valid? cell) [cell]))]
         (cond
           (not= :read-write (:level rec))
           (signals! gen {:err "read-only access — you can't edit this sheet"})
-          (not (prop-allowed? prop))
+          (not (and (seq props) (every? prop-allowed? props)))
           (signals! gen {:err (str "unknown style property: " (:styleprop sig))})
           (empty? cells)
           (signals! gen {:err "select a cell first"})
           :else
           (locking edit-lock
             (try
-              (doseq [c cells]
+              (doseq [c cells, prop props]
                 (let [before (get (sheet/style-srcs sh c) prop)]
                   (sheet/set-style! sh c prop src)
                   (record-edit! sid c prop before (get (sheet/style-srcs sh c) prop))))

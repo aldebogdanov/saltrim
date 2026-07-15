@@ -137,7 +137,9 @@
                   cell (.createCell row ci)
                   src  (sheet/raw sh a)
                   lbl  (prop sh a :label)
+                  cmt  (prop sh a :comment)
                   note (cond-> []
+                         cmt (conj (str cmt))
                          (and src (str/starts-with? (str/trim (str src)) "="))
                          (conj (str "Formula: " src))
                          lbl (conj (str "Label: " lbl)))]

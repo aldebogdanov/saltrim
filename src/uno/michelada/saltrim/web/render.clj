@@ -33,11 +33,46 @@
   "Reactive style prop -> CSS declaration. The whole supported set lives here;
    adding a property is one entry (+ a control in the style panel). Each value is
    a literal or an =-formula computed per cell into a CSS string."
-  (array-map :bg     "background-color"
-             :fg     "color"
-             :weight "font-weight"
-             :slant  "font-style"
-             :align  "text-align"))
+  (array-map :bg           "background-color"
+             :fg           "color"
+             :weight       "font-weight"
+             :slant        "font-style"
+             :align        "text-align"
+             :bordertop    "border-top"
+             :borderright  "border-right"
+             :borderbottom "border-bottom"
+             :borderleft   "border-left"))
+
+(def border-sides
+  "Border side selector -> the concrete style props it writes. The style bar
+   offers ONE `border` entry plus this side dropdown (four separate props behind
+   it, so each side stays an independently reactive property). The option VALUE
+   is the comma-joined prop list, which is also what the client reads back into
+   the source box (first prop of the group) — one source of truth for the map."
+  (array-map :all        [:bordertop :borderright :borderbottom :borderleft]
+             :vertical   [:borderleft :borderright]
+             :horizontal [:bordertop :borderbottom]
+             :top        [:bordertop]
+             :bottom     [:borderbottom]
+             :left       [:borderleft]
+             :right      [:borderright]))
+
+(def border-prop
+  "The pseudo-prop the style bar sends for a border; expanded via `border-sides`."
+  :border)
+
+(def ^:private border-prop-set (set (apply concat (vals border-sides))))
+
+(defn border-props
+  "The concrete props behind a `border` write: the comma-joined prop list carried
+   by the side dropdown's value (e.g. \"bordertop,borderbottom\"). nil when the
+   list is empty or names anything that isn't a border prop."
+  [side]
+  (let [ps (->> (str/split (str side) #",")
+                (remove str/blank?)
+                (mapv keyword))]
+    (when (and (seq ps) (every? border-prop-set ps))
+      ps)))
 
 (def value-props
   "Presentational props consumed by transforming the displayed VALUE (not CSS).
@@ -48,12 +83,28 @@
 (def meta-props
   "Per-cell METADATA props: stored + persisted like a style prop (so they ride
    the per-property datom model — branch/merge/as-of/undo for free) but neither
-   rendered as CSS nor applied to the value. `:label` is a human-readable name
-   for the cell, used as its node label in the dependency-graph view."
-  [:label])
+   rendered as CSS nor applied to the value. `:label` NAMES the cell — a short
+   identifier used as its node label in the dependency-graph view. `:comment` is
+   free prose ABOUT the cell (a note to a reader, or an audit trail left by the
+   .xlsx importer): it never names anything, it only marks the cell and shows on
+   hover."
+  [:label :comment])
 
 (defn prop-allowed? [p]
   (or (contains? style-css p) (some #{p} value-props) (some #{p} meta-props)))
+
+(def ^:private style-read-js
+  "Datastar expression: load the selected cell's source for the CURRENT prop into
+   the style box (`c` = that cell's element). For `border` the shown prop is the
+   first side of the picked group — $borderside carries the comma-joined list."
+  (str "$stylesrc=c.dataset.sty?(JSON.parse(c.dataset.sty)"
+       "[$styleprop==='border'?$borderside.split(',')[0]:$styleprop]||''):''"))
+
+(def style-bar-props
+  "The prop dropdown's entries: every writable prop, with the four border sides
+   collapsed behind the single `border` pseudo-prop (the side dropdown picks
+   which of them a write lands on)."
+  (concat (remove border-prop-set (keys style-css)) [border-prop] value-props meta-props))
 
 (defn- cell-style-decls
   "Inline CSS for `a`'s style props (only those resolving to a string; errors /
@@ -72,11 +123,13 @@
   [sh a ci ri cbase rbase]
   (let [disp (display sh a)
         raw  (or (sheet/raw sh a) disp)
-        srcs (sheet/style-srcs sh a)]      ; {prop raw} -> echoed into the style bar
+        srcs (sheet/style-srcs sh a)       ; {prop raw} -> echoed into the style bar
+        note (let [c (sheet/style-value sh a :comment)] (when (string? c) (not-empty c)))]
     ;; width/height always emitted (override OR the sheet default) so geometry is
     ;; fully data-driven: a default-size change re-renders the window and applies
     ;; live for everyone — no stale CSS, no reload.
-    [:div {:id (cell-id a) :class "cell" :data-raw raw
+    [:div {:id (cell-id a) :class (str "cell" (when note " noted")) :data-raw raw
+           :title note                     ; the comment itself, on hover
            :data-sty (when (seq srcs) (json/write-value-as-string srcs))
            :style (str (format "left:%dpx;top:%dpx;width:%dpx;height:%dpx"
                                (- (axis-x sh ci) (axis-x sh cbase))
@@ -269,9 +322,19 @@
              [:span {:style kbd} "$val"] " is the selected cell's own value, so styles can react to it."]
             [:p {:style p} "Properties: " [:span {:style kbd} "bg"] " (background), "
              [:span {:style kbd} "fg"] " (text color), " [:span {:style kbd} "weight"] " (e.g. bold), "
-             [:span {:style kbd} "slant"] " (e.g. italic), " [:span {:style kbd} "align"] " (left/right/center)."]
+             [:span {:style kbd} "slant"] " (e.g. italic), " [:span {:style kbd} "align"] " (left/right/center), "
+             [:span {:style kbd} "border"] " (a CSS border like " [:span {:style kbd} "1px solid black"]
+             ") — picking " [:span {:style kbd} "border"] " reveals a second dropdown for the side(s) it "
+             "applies to: all, vertical, horizontal, top, bottom, left, right."]
             [:p {:style p} "e.g. bg " [:span {:style kbd} "=(if (> $val 100) \"tomato\" \"white\")"]]
             [:p {:style p} "Select a range first and a style applies to every cell in it."]
+
+            [:div {:style h3} "Labels and comments"]
+            [:p {:style p} "Two more properties in the same row describe the cell rather than paint it. "
+             [:span {:style kbd} "label"] " NAMES it — a short identifier shown instead of the address in "
+             "the 🕸 dependency graph. " [:span {:style kbd} "comment"] " is a note ABOUT it: the cell gets "
+             "a small corner flag and shows the text on hover. The .xlsx importer leaves its audit trail "
+             "as comments."]
 
             [:div {:style h3} "Insert rows / columns"]
             [:p {:style p} "The " [:span {:style kbd} "insert"] " buttons (format row) add a blank row/column "
@@ -367,7 +430,7 @@
              "dates become ISO strings (" [:span {:style kbd} "2024-03-15"] ")."]
             [:p {:style p} "Anything untranslatable (cross-sheet references, named ranges, exotic "
              "functions) is imported as its last " [:b "computed value"] ", with the original Excel "
-             "formula kept as the cell's " [:span {:style kbd} "label"] ". Every translated formula is "
+             "formula kept as the cell's " [:span {:style kbd} "comment"] ". Every translated formula is "
              "verified against Excel's own cached value — mismatches are demoted to values the same "
              "way, so an imported sheet is always correct. The import report lists all of it."])))
 
@@ -495,7 +558,7 @@
              [:button {:class "btn" :data-on:click "$importpanel=false" :title "close"} "✕"]]
             [:p {:style p} "Each workbook tab becomes a " [:b "new sheet"] " of yours. Formulas are "
              [:b "translated"] " to Clojure where possible; anything untranslatable keeps its "
-             "computed value with the original formula as a label. You'll get a full report."]
+             "computed value with the original formula as a comment. You'll get a full report."]
             [:form {:method "post" :action "/import" :enctype "multipart/form-data"
                     :style "display:flex;flex-direction:column;gap:.6rem;"}
              [:input {:type "file" :name "file" :accept ".xlsx" :required true :style inp}]
@@ -555,7 +618,7 @@
                [:p "Number formats not carried over: "
                 (interpose ", " (map (fn [m] [:code m]) masks-dropped))])])
           [:p "Untranslated and demoted cells keep the original Excel formula as the cell's "
-           [:code "label"] " (visible in the 🕸 dependency graph and the style row)."]
+           [:code "comment"] " (the corner flag on the cell; hover to read it, or open it in the style row)."]
           (for [{:keys [sname]} sheets]
             [:a {:class "btn" :href (str "/?s=" sname)} "open " sname])]])))
 
@@ -801,6 +864,18 @@
                 ;; primary action button (Save / Apply) — the brand accent
                 ".btn.primary{background:var(--accent);color:#fff;border-color:var(--accent);}"
                 ".btn.primary:hover{filter:brightness(1.06);}"
+                ;; a button and the option that modifies it, welded into one
+                ;; control (⧉ + strict): one border around both, a hairline
+                ;; between, so the option reads as part of the action.
+                ".grp{display:inline-flex;align-items:stretch;border:1px solid var(--line);"
+                "border-radius:var(--radius);background:var(--panel);overflow:hidden;}"
+                ".grp .btn{border:0;border-radius:0;background:transparent;}"
+                ".grp .btn:hover{background:var(--accent-bg);color:var(--accent);}"
+                ".grp .opt{display:flex;align-items:center;gap:.25rem;padding:0 .5rem;"
+                "border-left:1px solid var(--line);font:11px sans-serif;color:var(--muted);"
+                "cursor:pointer;user-select:none;}"
+                ".grp .opt:hover{background:var(--accent-bg);}"
+                ".grp .opt input{margin:0;}"
                 ;; definition name badges (collapsed library cards)
                 ".badge{display:inline-block;font:600 11px/1.5 monospace;color:var(--accent);"
                 "background:var(--accent-bg);border:1px solid var(--accent2);"
@@ -822,6 +897,10 @@
                                "box-sizing:border-box;border:1px solid var(--grid);"
                                "padding:2px 4px;font:13px monospace;overflow:hidden;"
                                "white-space:nowrap;background:var(--bg);}"
+                               ;; commented cell: a small corner flag (the comment
+                               ;; text itself is the cell's hover title).
+                               ".cell.noted::after{content:'';position:absolute;top:0;right:0;"
+                               "border-top:5px solid var(--accent);border-left:5px solid transparent;}"
                                "#editor{position:absolute;width:%dpx;height:%dpx;"
                                "box-sizing:border-box;border:1px solid var(--accent);"
                                "padding:2px 4px;font:13px monospace;outline:none;z-index:6;"
@@ -894,6 +973,10 @@
              :data-signals:grantee "''"
              :data-signals:styleprop "'bg'"
              :data-signals:stylesrc "''"
+             ;; which side(s) a `border` write lands on: the comma-joined prop list
+             ;; of the picked group (see `border-sides`); defaults to all four.
+             :data-signals:borderside (format "'%s'"
+                                              (str/join "," (map name (:all border-sides))))
              ;; collapsible toolbar sections (formula bar stays; others toggle)
              :data-signals:fmtbar "false"
              ;; current multi-selection as space-separated "TL:BR" ranges, kept
@@ -976,7 +1059,7 @@
           [:button {:class "btn" :data-on:click "$importpanel=true"
                     :title (str "Import an Excel workbook (.xlsx) — each tab becomes a new "
                                 "sheet of yours, formulas translated to Clojure where possible "
-                                "(the rest keep their computed values, labeled).")}
+                                "(the rest keep their computed values, commented).")}
            "⬆ xlsx"]
           [:button {:class "btn" :data-on:click "$help=true" :title "help / quick guide"} "?"]))
        ;; who am I + sign out
@@ -1002,12 +1085,13 @@
                 :style "flex:1;"}]
        [:button {:class "btn" :title "big editor" :data-on:click "$big=$v, $bigwhat='v', $bigedit=true"} "⤢"]
        ;; flatten: server computes the inlined+simplified source of the selected
-       ;; formula cell and opens it in the big editor — Apply there posts /cell
-       [:button {:class "btn" :title "flatten formula — inline every referenced formula, then simplify; review in the big editor before applying"
-                 :data-on:click "@post('/flatten')"} "⧉"]
-       [:label {:class "tool" :title "strict: only simplify rules that preserve error behavior exactly (skip e.g. (+ x 0) → x, which turns a blank-ref error into a blank)"
-                :style "display:flex;align-items:center;gap:.25rem;font:11px sans-serif;color:var(--muted);"}
-        [:input {:type "checkbox" :data-bind:flatstrict ""}] "strict"]])
+       ;; formula cell and opens it in the big editor — Apply there posts /cell.
+       ;; `strict` modifies THIS action only, so the two share one .grp frame.
+       [:span {:class "grp"}
+        [:button {:class "btn" :title "flatten formula — inline every referenced formula, then simplify; review in the big editor before applying"
+                  :data-on:click "@post('/flatten')"} "⧉"]
+        [:label {:class "opt" :title "strict: only simplify rules that preserve error behavior exactly (skip e.g. (+ x 0) → x, which turns a blank-ref error into a blank)"}
+         [:input {:type "checkbox" :data-bind:flatstrict ""}] "strict"]]])
       ;; ── toolbar row 3: style of the selected cell (collapsible) ────────
       ;; prop dropdown + a literal-or-=formula source, applied to $sel on Enter
       ;; (like the formula bar — no separate button). $val is the cell's own
@@ -1016,12 +1100,18 @@
       (when-not asof?
        [:div {:class "toolrow" :data-show "$fmtbar"}
        [:select {:id "stylepropbox" :class "tool" :data-bind:styleprop ""
-                 :data-on:change
-                 (str "const c=document.getElementById('c_'+$sel);"
-                      "c && ($v=c.dataset.raw||'',"
-                      "$stylesrc=c.dataset.sty?(JSON.parse(c.dataset.sty)[$styleprop]||''):'')")
+                 :data-on:change (str "const c=document.getElementById('c_'+$sel);"
+                                      "c && ($v=c.dataset.raw||''," style-read-js ")")
                  :title "style / format property of the selected cell"}
-        (for [p (concat (keys style-css) value-props meta-props)] [:option {:value (name p)} (name p)])]
+        (for [p style-bar-props] [:option {:value (name p)} (name p)])]
+       ;; border is one entry in the prop dropdown; THIS picks which side(s) it
+       ;; writes (each side is its own prop). Only shown for border.
+       [:select {:id "bordersidebox" :class "tool" :data-bind:borderside ""
+                 :data-show "$styleprop=='border'"
+                 :data-on:change (str "const c=document.getElementById('c_'+$sel); c && (" style-read-js ")")
+                 :title "which side(s) of the cell the border applies to"}
+        (for [[side props] border-sides]
+          [:option {:value (str/join "," (map name props))} (name side)])]
        [:input {:id "stylesrcbox" :class "tool mono" :data-bind:stylesrc ""
                 :placeholder "prop value or =formula (use $val for current cell value) like =(if (> $val 100) \"tomato\" \"white\")) — Enter to apply"
                 :data-on:keydown "evt.key==='Enter' && ($cell=$sel, @post('/style'))"
@@ -1079,7 +1169,7 @@
              :data-on:sr-select__window
              (str "const c=document.getElementById('c_'+evt.detail.addr);"
                   "$sel=evt.detail.addr; $v=c?(c.dataset.raw||''):'';"
-                  "$stylesrc=c&&c.dataset.sty?(JSON.parse(c.dataset.sty)[$styleprop]||''):'';"
+                  "c ? (" style-read-js ") : ($stylesrc='');"
                   "$edit=false; $celledit=false; @post('/presence')")
              ;; start editing in-cell: load the cell's source into $v, take the edit
              ;; lock, and reveal the floating editor (app.cljs already positioned it)
