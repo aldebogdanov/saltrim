@@ -72,7 +72,7 @@
   [editor-sid room sh affected]
   (doseq [[sid s] @sessions*]
     (when (and (not= sid editor-sid) (= room (:room s)) (:gen s))
-      (let [vis (filter #(in-window? (:view s) %) affected)]
+      (let [vis (filter #(in-window? sh (:view s) %) affected)]
         (when (seq vis)
           (try (d*/lock-sse! (:gen s) (d*/patch-elements! (:gen s) (render-cells sh vis (:view s))))
                (when (:webkit? s) (webkit-flush! sid))
@@ -96,11 +96,11 @@
    and after an axis resize (/size), where every position in the window shifts.
    `room` = [sheet-id branch]."
   [gen sid room sh view]
-  (let [[cis ris] (window (:r0 view) (:c0 view))]
+  (let [[cis ris] (window sh view)]
     (patch-inner! gen "#cells"   (cells-html sh cis ris))
     (patch-inner! gen "#colhead" (colhead-html sh cis))
     (patch-inner! gen "#rowhead" (rowhead-html sh ris))
-    (d*/patch-elements! gen (meta-html sh (:r0 view) (:c0 view)))   ; #meta by id
+    (d*/patch-elements! gen (meta-html sh view))   ; #meta by id
     (patch-inner! gen "#self"  (self-html sid room))
     (patch-inner! gen "#peers" (peers-html sid room))))
 

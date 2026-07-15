@@ -41,6 +41,8 @@
 (defonce ^:private SY (atom 0))
 (defonce ^:private last-c0 (atom 0))     ; last window top-left index posted
 (defonce ^:private last-r0 (atom 0))
+(defonce ^:private last-wc (atom 0))     ; last window SIZE posted (cols/rows we need)
+(defonce ^:private last-wr (atom 0))
 (defonce ^:private view-timer (atom nil))
 (defonce ^:private SEL (atom {:ranges []}))  ; multi-selection (see below)
 (declare render-sel! sel-ranges-str)          ; defined with the selection section
@@ -120,18 +122,35 @@
     (swap! SX #(js/Math.max 0 (js/Math.min % (js/Math.max 0 (- (:tw m) (:w vs))))))
     (swap! SY #(js/Math.max 0 (js/Math.min % (js/Math.max 0 (- (:th m) (:h vs))))))))
 
+(defn- win-need
+  "[wc wr] = how many columns/rows this viewport needs covered, at the sheet's
+   default cell size. Only the browser knows how big it is, so the server renders
+   the window WE ask for: a fixed count would come up short whenever the cells
+   are smaller than the constants assume (empty strip to the right / below) and
+   waste work when they're bigger. +1 covers a partly-scrolled cell at each edge."
+  []
+  (let [m (mta) vs (view-size)]
+    [(inc (js/Math.ceil (/ (:w vs) (js/Math.max 1 (:dcw m)))))
+     (inc (js/Math.ceil (/ (:h vs) (js/Math.max 1 (:drh m)))))]))
+
 (defn- request-view!
-  "Debounced: when the window's top-left index changes, ask the server for a new
-   window (sr-view -> @post '/view'). `force?` posts even if unchanged (jump)."
+  "Debounced: when the window's top-left index — or the size this viewport needs
+   — changes, ask the server for a new window (sr-view -> @post '/view').
+   `force?` posts even if unchanged (jump)."
   [force?]
   (let [m  (mta)
         c0 (pixel->index @SX (:dcw m) (:colw m))
-        r0 (pixel->index @SY (:drh m) (:rowh m))]
-    (when (or force? (not= c0 @last-c0) (not= r0 @last-r0))
+        r0 (pixel->index @SY (:drh m) (:rowh m))
+        [wc wr] (win-need)]
+    (when (or force? (not= c0 @last-c0) (not= r0 @last-r0)
+              (not= wc @last-wc) (not= wr @last-wr))
       (reset! last-c0 c0)
       (reset! last-r0 r0)
+      (reset! last-wc wc)
+      (reset! last-wr wr)
       (js/clearTimeout @view-timer)
-      (reset! view-timer (js/setTimeout #(emit! "sr-view" #js {:r0 r0 :c0 c0}) 70)))))
+      (reset! view-timer
+              (js/setTimeout #(emit! "sr-view" #js {:r0 r0 :c0 c0 :wc wc :wr wr}) 70)))))
 
 (defn- on-wheel [e]
   (.preventDefault e)
@@ -463,7 +482,9 @@
                          (fn [e] (when (= "Enter" (.-key e)) (.preventDefault e) (jump! (cur-sel))))))
     (drag-thumb! "vbar" "vthumb" true)
     (drag-thumb! "hbar" "hthumb" false)
-    (.addEventListener js/window "resize" render!)
+    ;; a resized window needs a different NUMBER of cells, not just a re-transform
+    (.addEventListener js/window "resize"
+                       (fn [] (clamp-scroll!) (render!) (request-view! false)))
     (.addEventListener js/document "keydown" on-key)
     (init-resize!)
     ;; #meta is morphed on every /view AND /size (including a collaborator's
@@ -471,8 +492,17 @@
     ;; stays live for everyone.
     ;; window geometry changed (scroll/resize by anyone) -> re-translate AND
     ;; redraw the selection marquee (its rects are window-relative to cb/rb).
-    (when m (.observe (js/MutationObserver. (fn [] (render!) (render-sel!))) m #js {:attributes true}))
+    ;; request-view! here too: #meta carries dcw/drh, so a default-size change
+    ;; (⚙ properties, by anyone) changes how many cells we need — ask for a window
+    ;; sized to the NEW cells. It only posts when something actually changed, so
+    ;; the /view response's own #meta patch can't loop back.
+    (when m (.observe (js/MutationObserver.
+                       (fn [] (render!) (render-sel!) (request-view! false)))
+                      m #js {:attributes true}))
     (render!) (render-sel!)               ; page already rendered the window at (0,0)
+    ;; the page was rendered against the server's guess at our viewport; report
+    ;; the real measurement (last-wc starts 0, so this always posts once)
+    (request-view! false)
     (open-stream!)))                      ; open the collaboration stream
 
 ;; Register load-time listeners now (they only addEventListener); defer the

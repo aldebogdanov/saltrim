@@ -170,9 +170,9 @@
    scrollbars) and the rendered window's base index cb/rb. /app.js translates the
    layers relative to cb/rb — patched together with #cells, so the transform
    always matches the displayed content (no jump while a fetch is in flight)."
-  [sh r0 c0]
-  (let [[tw th] (total-px sh r0 c0)
-        [cb rb] (view-base {:r0 r0 :c0 c0})]
+  [sh {:keys [r0 c0] :as view}]
+  (let [[tw th] (total-px sh view)
+        [cb rb] (view-base view)]
     (str (h/html [:div {:id "meta" :data-tw tw :data-th th :data-cb cb :data-rb rb
                         ;; per-sheet default axis sizes (client geometry base)
                         :data-dcw (sheet/default-col-w sh) :data-drh (sheet/default-row-h sh)
@@ -182,12 +182,13 @@
                         :style "display:none;"}]))))
 
 (defn- grid-layers
-  "Logical-scroll viewport: fixed-size, overflow hidden. Clipped header strips +
-   a cell area, each holding an absolutely-positioned layer that /app.js
-   translates by the sub-cell offset. Plus the corner, the totals #meta, and two
-   custom scrollbars. No giant spacer -> no row cap, no precision wobble."
-  [sh {:keys [r0 c0] :as view}]
-  (let [[cis ris] (window r0 c0)
+  "Logical-scroll viewport: fills the page below the toolbars, overflow hidden.
+   Clipped header strips + a cell area, each holding an absolutely-positioned
+   layer that /app.js translates by the sub-cell offset. Plus the corner, the
+   totals #meta, and two custom scrollbars. No giant spacer -> no row cap, no
+   precision wobble."
+  [sh view]
+  (let [[cis ris] (window sh view)
         clip "position:absolute;overflow:hidden;"]
     (h/html
      [:div {:id "viewport"
@@ -201,9 +202,12 @@
             ;; user-select:none kills the browser's blue text-highlight while
             ;; drag-selecting cells (mouse events still fire); #editor re-enables it
             ;; so typing/selecting inside a cell still works.
-            :style (str "position:relative;height:78vh;border:1px solid #ccc;overflow:hidden;"
-                        "user-select:none;-webkit-user-select:none;")}
-      (h/raw (meta-html sh r0 c0))
+            ;; flex:1 + min-height:0 = fill whatever the toolbars leave, exactly
+            ;; (a fixed vh left a dead strip under the grid). min-height:0 is what
+            ;; lets a flex child shrink below its content.
+            :style (str "position:relative;flex:1;min-height:0;border:1px solid #ccc;"
+                        "overflow:hidden;user-select:none;-webkit-user-select:none;")}
+      (h/raw (meta-html sh view))
       ;; corner
       [:div {:id "corner"
              :style (format (str "position:absolute;left:0;top:0;z-index:4;width:%dpx;height:%dpx;"
@@ -944,6 +948,11 @@
              :data-signals:celledit "false"
              :data-signals:r0 "0"
              :data-signals:c0 "0"
+             ;; how many columns/rows THIS client's viewport needs covered
+             ;; (app.cljs measures it — only the browser knows). 0 = not measured
+             ;; yet: the server then falls back to its own px-budget guess.
+             :data-signals:wc "0"
+             :data-signals:wr "0"
              :data-signals:sheet (format "'%s'" storage-id)
              ;; the working branch (rides in every POST so the server routes to
              ;; the right (sheet,branch) room); seeded from the resolved &b=.
@@ -1003,7 +1012,12 @@
              :data-signals:propspanel "false"
              :data-signals:pcw (str (sheet/default-col-w sh))
              :data-signals:prh (str (sheet/default-row-h sh))
-             :style "font-family:sans-serif;margin:0;padding:.6rem;min-height:100vh;background:var(--bg);color:var(--fg);"}
+             ;; the page IS the window: a flex column exactly 100vh tall, so the
+             ;; grid (flex:1) takes every pixel the toolbars don't. Modals/toast
+             ;; are position:fixed, so they stay out of this column.
+             :style (str "font-family:sans-serif;margin:0;padding:.6rem;height:100vh;"
+                         "box-sizing:border-box;display:flex;flex-direction:column;"
+                         "background:var(--bg);color:var(--fg);")}
       [:div {:id "toast" :data-show "$err != ''" :data-text "$err"
              :data-on:click "$err=''"
              :style (str "position:fixed;top:1rem;right:1rem;max-width:26rem;background:#c0392b;"
@@ -1141,13 +1155,17 @@
       ;; the server also forces read-only when $at is set (belt and suspenders).
       (when asof?
         [:div {:id "ctl" :data-sid sid :style "display:none;"
-               :data-on:sr-view__window "$r0=evt.detail.r0, $c0=evt.detail.c0, @post('/viewat')"}])
+               :data-on:sr-view__window
+               (str "$r0=evt.detail.r0, $c0=evt.detail.c0, "
+                    "$wc=evt.detail.wc, $wr=evt.detail.wr, @post('/viewat')")}])
       (when-not asof?
        (list
       [:div {:id "streamer" :data-on:sr-open__window "@get('/stream')"
              :style "display:none;"} ""]
       [:div {:id "ctl" :data-sid sid :style "display:none;"
-             :data-on:sr-view__window "$r0=evt.detail.r0, $c0=evt.detail.c0, @post('/view')"
+             :data-on:sr-view__window
+             (str "$r0=evt.detail.r0, $c0=evt.detail.c0, "
+                  "$wc=evt.detail.wc, $wr=evt.detail.wr, @post('/view')")
              :data-on:sr-size__window "$rzcmd=evt.detail.cmd, @post('/size')"
              ;; per-user undo / redo (Ctrl+Z / Ctrl+Shift+Z|Ctrl+Y from app.cljs)
              :data-on:sr-undo__window "@post('/undo')"
@@ -1229,7 +1247,7 @@
     (apply str
            (for [[sid s] @sessions*
                  :when (and (not= sid viewer-sid) (= room (:room s))
-                            (:cursor s) (in-window? view (:cursor s)))]
+                            (:cursor s) (in-window? sh view (:cursor s)))]
              (peer-marker sh view s)))))
 
 (defn self-html
@@ -1241,7 +1259,7 @@
         view (session-view sid)
         a    (:cursor s)
         sh   (:sh (@sheets* room))]
-    (if (and s sh (= room (:room s)) a (in-window? view a))
+    (if (and s sh (= room (:room s)) a (in-window? sh view a))
       (let [{:keys [ci ri]} (addr/parse a)
             [cb rb] (view-base view)]
         (str (h/html

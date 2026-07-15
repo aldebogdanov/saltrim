@@ -3,19 +3,42 @@
   (:require
             [uno.michelada.saltrim.addr :as addr]
             [uno.michelada.saltrim.sheet :as sheet]
-            [uno.michelada.saltrim.constants :refer [MAX-COLS MAX-ROWS WIN-COLS WIN-ROWS MIN-COLS MIN-ROWS BUF-COLS BUF-ROWS OVER]]))
+            [uno.michelada.saltrim.constants :refer [CW MAX-COLS MAX-ROWS MAX-WIN-COLS MAX-WIN-ROWS RH WIN-COLS WIN-ROWS MIN-COLS MIN-ROWS BUF-COLS BUF-ROWS OVER]]))
 
 (defn view-base
   "[col-base row-base] = top-left index of the rendered (overscanned) window."
   [{:keys [r0 c0]}]
   [(max 0 (- (long c0) OVER)) (max 0 (- (long r0) OVER))])
 
+;; The window a view spans is a PX budget, not a cell count: WIN-COLS/WIN-ROWS
+;; are that budget expressed at the DEFAULT cell size, so halving a sheet's
+;; default column width doubles the columns needed to cover the same viewport.
+(def ^:private WIN-PX-W (* WIN-COLS CW))
+(def ^:private WIN-PX-H (* WIN-ROWS RH))
+
+(defn- ceil-div [a b] (long (Math/ceil (/ (double a) (double (max 1 (long b)))))))
+
+;; the client reports 0 until it has measured its viewport -> treat as "unknown"
+(defn- as-count [x] (when (and (number? x) (pos? x)) (long x)))
+
+(defn win-dims
+  "[wc wr] = how many columns/rows `view` covers. The client measures its own
+   viewport against this sheet's cell sizes and reports $wc/$wr; until it has
+   (first paint, as-of pages) we fall back to the px budget the constants
+   describe, scaled to THIS sheet's default cell size. Clamped, so a client can
+   never ask the server to render the whole grid in one window."
+  [sh {:keys [wc wr]}]
+  [(-> (or (as-count wc) (ceil-div WIN-PX-W (sheet/default-col-w sh))) (max 1) (min MAX-WIN-COLS))
+   (-> (or (as-count wr) (ceil-div WIN-PX-H (sheet/default-row-h sh))) (max 1) (min MAX-WIN-ROWS))])
+
 (defn window
-  "Visible cell coords [ci-range ri-range] for first row/col r0 c0 (clamped)."
-  [r0 c0]
-  (let [[cb rb] (view-base {:r0 r0 :c0 c0})]
-    [(range cb (min MAX-COLS (+ cb WIN-COLS)))
-     (range rb (min MAX-ROWS (+ rb WIN-ROWS)))]))
+  "Cell coords [ci-range ri-range] rendered for `view` = {:r0 :c0 :wc :wr}: the
+   columns/rows it covers plus OVER cells of overscan on each side (clamped)."
+  [sh view]
+  (let [[cb rb] (view-base view)
+        [wc wr] (win-dims sh view)]
+    [(range cb (min MAX-COLS (+ cb wc OVER OVER)))
+     (range rb (min MAX-ROWS (+ rb wr OVER OVER)))]))
 
 ;; Axis sizing: columns/rows default to CW/RH but carry sparse per-index px
 ;; overrides (sheet :cols/:rows). Absolute offset of an index = uniform base
@@ -55,18 +78,26 @@
   "Logical scroll extent [w h] px (cells area only, no gutter/header): covers the
    used range and the current view plus a buffer. Just numbers for the custom
    scrollbar — no DOM element is this big."
-  [sh r0 c0]
+  [sh {:keys [r0 c0] :as view}]
   (let [[cm rm] (used-max sh)
-        cols (min MAX-COLS (+ (max MIN-COLS (inc cm) (+ (long c0) WIN-COLS)) BUF-COLS))
-        rows (min MAX-ROWS (+ (max MIN-ROWS (inc rm) (+ (long r0) WIN-ROWS)) BUF-ROWS))]
+        [wc wr] (win-dims sh view)
+        cols (min MAX-COLS (+ (max MIN-COLS (inc cm) (+ (long c0) wc)) BUF-COLS))
+        rows (min MAX-ROWS (+ (max MIN-ROWS (inc rm) (+ (long r0) wr)) BUF-ROWS))]
     ;; total extent = absolute offset of the index just past the buffered range
     ;; (folds in any sparse width/height overrides)
     [(axis-x sh cols) (axis-y sh rows)]))
 
-(defn in-window? [{:keys [r0 c0]} addr]
-  (let [{:keys [ci ri]} (addr/parse addr)]
-    (and (<= (- (long c0) OVER) ci (+ (long c0) WIN-COLS))
-         (<= (- (long r0) OVER) ri (+ (long r0) WIN-ROWS)))))
+(defn in-window?
+  "Is `addr` inside the window `view` renders? Bounds the cells a session gets
+   pushed, so it must span exactly what `window` lays out — hence the same
+   view-base (which CLAMPS at the origin, shifting the span right) and the same
+   dims. Too tight here and a peer's edit patches an element they never got."
+  [sh view addr]
+  (let [{:keys [ci ri]} (addr/parse addr)
+        [cb rb] (view-base view)
+        [wc wr] (win-dims sh view)]
+    (and (<= cb ci (+ cb wc OVER OVER -1))
+         (<= rb ri (+ rb wr OVER OVER -1)))))
 
 ;; --- rendering ----------------------------------------------------------
 
