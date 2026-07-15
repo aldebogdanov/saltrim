@@ -19,6 +19,16 @@
             [uno.michelada.saltrim.web.geom :refer [axis-x axis-y col-w in-window? rgba row-h total-px url-decode url-encode view-base window]]
             [uno.michelada.saltrim.web.state :refer [def-editor-of owner-of session-view sessions* sheets*]]))
 
+(def no-autofill
+  "Attrs telling every browser/password-manager these are spreadsheet cells, not
+   a login form — Safari's Keychain card was popping up over the in-cell editor
+   (any text input can trigger it once the origin has a saved credential, not
+   just fields that look like a username). autocomplete=\"off\" is the one Safari
+   itself honors for non-login fields; the rest are the union of what other
+   password managers look for (LastPass/1Password/Bitwarden don't share one)."
+  {:autocomplete "off" :autocorrect "off" :autocapitalize "off" :spellcheck "false"
+   :data-lpignore "true" :data-1p-ignore "true" :data-bwignore "true"})
+
 (defn- display [sh a]
   (let [v    (sheet/value sh a)
         mask (sheet/style-value sh a :format)]   ; nil / string / {:error}
@@ -255,12 +265,13 @@
         ;; sizes it over the cell) — NOT $edit, which the formula bar also sets for
         ;; presence/peer-lock. Sharing $edit would pop this box, unpositioned and
         ;; at its default size, on every formula-bar focus.
-        [:input {:id "editor" :data-bind:v "" :data-show "$celledit"
+        [:input (merge no-autofill
+                {:id "editor" :data-bind:v "" :data-show "$celledit"
                  :data-on:keydown__stop
                  (str "evt.key==='Enter' ? (evt.preventDefault(),$cell=$sel,@post('/cell'),$edit=false,$celledit=false,@post('/presence'))"
                       " : evt.key==='Escape' ? (evt.preventDefault(),$edit=false,$celledit=false,@post('/presence')) : null")
                  :data-on:blur "$celledit && ($cell=$sel,@post('/cell'),$edit=false,$celledit=false,@post('/presence'))"
-                 :style "display:none;"}]]]
+                 :style "display:none;"})]]]
       ;; custom scrollbars
       [:div {:id "vbar" :style (format (str "position:absolute;right:0;top:%dpx;bottom:%dpx;width:%dpx;"
                                             "background:#f0f0f0;z-index:5;") HDR BAR BAR)}
@@ -695,9 +706,10 @@
           [:label {:style "display:block;font-size:12px;color:var(--muted);margin-bottom:.2rem;"}
            "New branch name"]
           [:div {:style "display:flex;gap:.4rem;"}
-           [:input {:data-bind:bname "" :placeholder "feature-x" :autocomplete "off"
-                    :data-on:keydown "evt.key==='Enter' && ($branchact='fork', @post('/branch'))"
-                    :style (str field "flex:1;")}]
+           [:input (merge no-autofill
+                    {:data-bind:bname "" :placeholder "feature-x"
+                     :data-on:keydown "evt.key==='Enter' && ($branchact='fork', @post('/branch'))"
+                     :style (str field "flex:1;")})]
            [:button {:class "btn primary" :data-on:click "$branchact='fork', @post('/branch')"}
             (str "Fork from " branch)]]
           ;; ── merge another branch INTO this one (3-way) ──────────────────
@@ -1086,17 +1098,19 @@
        [:div {:class "toolrow"}
        ;; address box: $sel via data-bind; Enter jumps (app.cljs scrolls there +
        ;; selects). The keydown listener is attached in app.cljs (a scroll action).
-       [:input {:id "addrbox" :class "tool mono" :data-bind:sel "" :placeholder "A1"
-                :style "width:5rem;text-align:center;"}]
+       [:input (merge no-autofill
+                {:id "addrbox" :class "tool mono" :data-bind:sel "" :placeholder "A1"
+                 :style "width:5rem;text-align:center;"})]
        ;; editing via the formula bar still drives presence on the SELECTED cell
        ;; (so it shows the marching-ants self marker and locks it for peers).
        ;; formula bar shares $v with the floating #editor, so the two stay live-
        ;; synced: typing in either updates $v and the other reflects it.
-       [:input {:id "fbar" :class "tool mono" :data-bind:v "" :placeholder "value or =formula like =(+ $A1 $B2 42) or =(sum $A1:A10) - Enter to apply"
-                :data-on:focus "$edit=true, @post('/presence')"
-                :data-on:keydown "evt.key==='Enter' && ($cell=$sel, @post('/cell'))"
-                :data-on:blur "$cell=$sel, @post('/cell'), $edit=false, @post('/presence')"
-                :style "flex:1;"}]
+       [:input (merge no-autofill
+                {:id "fbar" :class "tool mono" :data-bind:v "" :placeholder "value or =formula like =(+ $A1 $B2 42) or =(sum $A1:A10) - Enter to apply"
+                 :data-on:focus "$edit=true, @post('/presence')"
+                 :data-on:keydown "evt.key==='Enter' && ($cell=$sel, @post('/cell'))"
+                 :data-on:blur "$cell=$sel, @post('/cell'), $edit=false, @post('/presence')"
+                 :style "flex:1;"})]
        [:button {:class "btn" :title "big editor" :data-on:click "$big=$v, $bigwhat='v', $bigedit=true"} "⤢"]
        ;; flatten: server computes the inlined+simplified source of the selected
        ;; formula cell and opens it in the big editor — Apply there posts /cell.
@@ -1126,10 +1140,11 @@
                  :title "which side(s) of the cell the border applies to"}
         (for [[side props] border-sides]
           [:option {:value (str/join "," (map name props))} (name side)])]
-       [:input {:id "stylesrcbox" :class "tool mono" :data-bind:stylesrc ""
-                :placeholder "prop value or =formula (use $val for current cell value) like =(if (> $val 100) \"tomato\" \"white\")) — Enter to apply"
-                :data-on:keydown "evt.key==='Enter' && ($cell=$sel, @post('/style'))"
-                :style "flex:1;"}]
+       [:input (merge no-autofill
+                {:id "stylesrcbox" :class "tool mono" :data-bind:stylesrc ""
+                 :placeholder "prop value or =formula (use $val for current cell value) like =(if (> $val 100) \"tomato\" \"white\")) — Enter to apply"
+                 :data-on:keydown "evt.key==='Enter' && ($cell=$sel, @post('/style'))"
+                 :style "flex:1;"})]
        [:button {:class "btn" :title "big editor" :data-on:click "$big=$stylesrc, $bigwhat='style', $bigedit=true"} "⤢"]
        ;; insert a blank row/column around the selected cell (refs follow; one undo)
        [:span {:style "border-left:1px solid var(--grid);margin:0 .2rem;align-self:stretch;"}]
