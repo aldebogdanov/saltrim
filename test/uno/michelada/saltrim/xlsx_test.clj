@@ -114,10 +114,10 @@
       (is (= "'123" (get-in doc ["A4" :value])) "text-number apostrophe-escaped")
       (is (= "=true" (get-in doc ["A5" :value])))
       (is (= "2024-03-15" (get-in doc ["C1" :value])) "date -> ISO string"))
-    (testing "formulas translate; untranslatable falls back to cached value + label"
+    (testing "formulas translate; untranslatable falls back to cached value + comment"
       (is (= "=(sum $A1:A2)" (get-in doc ["B1" :value])))
       (is (= "10" (get-in doc ["B3" :value])) "Other!A1*2 cached 10")
-      (is (= "XLSX: =Other!A1*2" (get-in doc ["B3" :style :label])))
+      (is (= "XLSX: =Other!A1*2" (get-in doc ["B3" :style :comment])))
       (is (= ["B3"] (mapv :addr (:fallbacks report)))))
     (testing "styles + masks"
       (is (= {:weight "bold" :bg "#ffff00" :align "center" :format "#,##0.00"}
@@ -150,7 +150,7 @@
           (is (= "big" (sheet/value sh "B2")))
           (is (= 10 (sheet/value sh "B3")) "fallback kept Excel's value")
           (is (= 10 (sheet/value sh "B4")) "demoted kept Excel's value")
-          (is (= "XLSX: =A1+C9" (sheet/style-value sh "B4" :label)))
+          (is (= "XLSX: =A1+C9" (sheet/style-value sh "B4" :comment)))
           (is (= "123" (sheet/value sh "A4")) "escaped text stays text")
           (is (= "=(sum $A1:A2)" (sheet/raw sh "B1")) "live formula persisted as source")
           (finally (sheet/close! sh)))))

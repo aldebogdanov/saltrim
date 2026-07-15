@@ -118,6 +118,12 @@ to the data:
 | `weight` | font weight | `bold`, `600` |
 | `slant` | font style | `italic` |
 | `align` | text alignment | `left`, `right`, `center` |
+| `border` | a CSS border | `1px solid black`, `3px double navy` |
+
+Picking `border` reveals a second dropdown for the **side(s)** the value applies
+to: `all`, `vertical`, `horizontal`, `top`, `bottom`, `left`, `right`. Each side
+is its own property, so you can give a cell a heavy bottom rule and a hairline
+left one independently.
 
 Style formulas are reactive too: a style that reads another cell updates when
 that cell changes. A broken style formula is reported in the toast and simply
@@ -125,6 +131,20 @@ isn't applied.
 
 **Styling a whole selection:** select a range (or several), then apply a property
 — it sets that property on every cell in the selection at once.
+
+### Labels & comments
+
+Two properties in the same dropdown describe a cell instead of painting it:
+
+| Property | Purpose |
+|----------|---------|
+| `label` | **names** the cell — a short identifier shown instead of its address in the 🕸 dependency graph |
+| `comment` | a **note about** the cell — free prose for whoever reads the sheet next |
+
+A commented cell is marked with a small flag in its top-right corner and shows
+the comment when you hover it. Comments are also where the `.xlsx` importer
+leaves its audit trail, and they travel into an exported workbook as the Excel
+cell comment.
 
 ### Insert rows & columns
 
@@ -262,7 +282,7 @@ other's cursors and edit locks live.
 The **⬇ xlsx** button (top bar) downloads the sheet as an `.xlsx` file. It is a
 **static snapshot**: every cell exports its current **computed value**, carrying
 its styling (fill, font colour, bold/italic, alignment) and number format — but
-**not** its formula. SaltRim formulas are Clojure expressions, not Excel syntax,
+**not** its borders, and **not** its formula. SaltRim formulas are Clojure expressions, not Excel syntax,
 so the exported file has **no live formulas and no reactivity**: changing a value
 in Excel won't recompute anything. Each formula's original source is attached as
 a **cell comment** so the logic isn't lost. The export respects what you're
@@ -296,10 +316,10 @@ is protected with a leading apostrophe (`'123` — works when typing, too).
 
 **Anything untranslatable** (cross-sheet references, named ranges,
 whole-column ranges, other functions) is imported as its last **computed
-value**, with the original Excel formula kept as the cell's `label`. Every
+value**, with the original Excel formula kept as the cell's `comment`. Every
 translated formula is then **verified against Excel's own cached value** —
 mismatches (e.g. Excel's blank-as-zero arithmetic) are demoted to values the
-same way. An imported sheet is always *correct-or-labeled*; the import report
+same way. An imported sheet is always *correct-or-commented*; the import report
 lists every fallback and demotion.
 
 ## Running & development

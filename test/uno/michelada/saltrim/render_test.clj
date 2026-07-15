@@ -13,6 +13,21 @@
   ;; reaching this point means every web.* namespace compiled
   (is (some? (resolve 'uno.michelada.saltrim.web/-main))))
 
+(deftest border-side-expansion
+  ;; the style bar sends `border` + the side dropdown's comma-joined prop list;
+  ;; every expansion must be a writable style prop
+  (is (= [:bordertop :borderright :borderbottom :borderleft]
+         (render/border-props "bordertop,borderright,borderbottom,borderleft")))
+  (is (= [:borderleft :borderright] (render/border-props "borderleft,borderright")))
+  (is (= [:bordertop] (render/border-props "bordertop")))
+  (is (every? render/prop-allowed? (apply concat (vals render/border-sides))))
+  (is (nil? (render/border-props "")) "no side -> no write")
+  (is (nil? (render/border-props "bg")) "only border props may ride the side list")
+  (is (nil? (render/border-props "bordertop,bg")) "one bad prop rejects the group")
+  ;; the dropdown offers `border` once, never the four sides directly
+  (is (= [:bg :fg :weight :slant :align :border :format :label :comment]
+         (vec render/style-bar-props))))
+
 (deftest help-modal-renders
   (let [h (#'render/help-html)]
     (is (string? h))

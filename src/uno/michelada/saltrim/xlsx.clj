@@ -20,10 +20,10 @@
 
    Anything untranslatable (cross-sheet refs, named ranges, whole-column
    ranges, unknown functions, …) falls back to the cell's CACHED value from
-   the file, with the original formula kept as an audit `:label`. After the
+   the file, with the original formula kept as an audit `:comment`. After the
    sheet is built, a demote-and-verify pass compares every translated cell
    against Excel's cached value and demotes mismatches the same way — imported
-   sheets are 100% correct-or-labeled.
+   sheets are 100% correct-or-commented.
 
    Values: dates become ISO yyyy-MM-dd strings (the stdlib date fns' format);
    integral doubles narrow to longs; text that SaltRim would misread (leading
@@ -330,7 +330,7 @@
                                 (when-not (str/blank? s) s))
                        :fallback {:formula fstr
                                   :reason (or (::unsupported (ex-data e)) (.getMessage e))})
-                (assoc-in [:style :label] (str "XLSX: =" fstr))))))
+                (assoc-in [:style :comment] (str "XLSX: =" fstr))))))
       (assoc base :value nil))))
 
 (defn- read-sizing [^XSSFSheet s used-cols]
@@ -393,7 +393,7 @@
 
 (defn- demote-verify!
   "Force every translated formula cell to agree with Excel's cached value:
-   erroring or mismatching cells become the cached literal + an audit :label.
+   erroring or mismatching cells become the cached literal + an audit :comment.
    Loops until stable (a demotion changes downstream inputs). Returns
    [{:addr :cached :was} …]."
   [sh cached originals]
@@ -407,7 +407,7 @@
         acc
         (do (doseq [{:keys [addr cached]} ds]
               (sheet/set-cell! sh addr (value->src cached))
-              (sheet/set-style! sh addr :label (str "XLSX: =" (originals addr))))
+              (sheet/set-style! sh addr :comment (str "XLSX: =" (originals addr))))
             (sheet/settle! sh)
             (recur (into acc ds)))))))
 
