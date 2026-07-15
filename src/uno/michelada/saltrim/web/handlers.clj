@@ -123,7 +123,7 @@
   [gen sid room sh affected]
   (let [affected (sort (distinct affected))
         view     (session-view sid)
-        visible  (filter #(in-window? view %) affected)
+        visible  (filter #(in-window? sh view %) affected)
         errs (concat
               (keep (fn [a] (when-let [e (:error (sheet/value sh a))]
                               (str a ": " (pretty-err e))))
@@ -443,10 +443,14 @@
 
 (defn handle-view [req]
   (with-access req
-    (fn [uid sheet-id rec {:keys [r0 c0 sid]} gen]
+    (fn [uid sheet-id rec {:keys [r0 c0 wc wr sid]} gen]
       (ensure-session! sid sheet-id (:branch rec) uid (:token rec))   ; lazy re-register + keep alive
       (let [sh   (:sh rec)
-            view {:r0 (max 0 (long (or r0 0))) :c0 (max 0 (long (or c0 0)))}]
+            ;; $wc/$wr = the window this client's viewport needs; kept ON the
+            ;; session view so every later push (cells, presence) is scoped to
+            ;; the same window this render produced. geom/win-dims clamps them.
+            view {:r0 (max 0 (long (or r0 0))) :c0 (max 0 (long (or c0 0)))
+                  :wc wc :wr wr}]
         (set-session-view! sid view)
         ;; logical scroll: always cheap inner patches. The window is positioned
         ;; relative to (c0,r0); /app.js translates + sizes the scrollbars from
@@ -464,18 +468,19 @@
         branch   (sig-branch sig)
         at       (sig-at sig)
         token    (not-empty (str (:link sig)))
-        r0 (max 0 (long (or (:r0 sig) 0)))
-        c0 (max 0 (long (or (:c0 sig) 0)))]
+        view {:r0 (max 0 (long (or (:r0 sig) 0)))
+              :c0 (max 0 (long (or (:c0 sig) 0)))
+              :wc (:wc sig) :wr (:wr sig)}]
     (if-not (and at (can-read? uid sheet-id branch token))
       (deny req "no access")
       (if-let [{:keys [sh]} (store/load-record-asof sheet-id branch at)]
         (sse req (fn [gen]
                    (try
-                     (let [[cis ris] (window r0 c0)]
+                     (let [[cis ris] (window sh view)]
                        (patch-inner! gen "#cells"   (cells-html sh cis ris))
                        (patch-inner! gen "#colhead" (colhead-html sh cis))
                        (patch-inner! gen "#rowhead" (rowhead-html sh ris))
-                       (d*/patch-elements! gen (meta-html sh r0 c0)))   ; #meta by id
+                       (d*/patch-elements! gen (meta-html sh view)))   ; #meta by id
                      (finally (sheet/close! sh)))))
         (deny req "no such revision")))))
 

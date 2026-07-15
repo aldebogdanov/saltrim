@@ -19,6 +19,16 @@
             [uno.michelada.saltrim.web.geom :refer [axis-x axis-y col-w in-window? rgba row-h total-px url-decode url-encode view-base window]]
             [uno.michelada.saltrim.web.state :refer [def-editor-of owner-of session-view sessions* sheets*]]))
 
+(def no-autofill
+  "Attrs telling every browser/password-manager these are spreadsheet cells, not
+   a login form — Safari's Keychain card was popping up over the in-cell editor
+   (any text input can trigger it once the origin has a saved credential, not
+   just fields that look like a username). autocomplete=\"off\" is the one Safari
+   itself honors for non-login fields; the rest are the union of what other
+   password managers look for (LastPass/1Password/Bitwarden don't share one)."
+  {:autocomplete "off" :autocorrect "off" :autocapitalize "off" :spellcheck "false"
+   :data-lpignore "true" :data-1p-ignore "true" :data-bwignore "true"})
+
 (defn- display [sh a]
   (let [v    (sheet/value sh a)
         mask (sheet/style-value sh a :format)]   ; nil / string / {:error}
@@ -170,9 +180,9 @@
    scrollbars) and the rendered window's base index cb/rb. /app.js translates the
    layers relative to cb/rb — patched together with #cells, so the transform
    always matches the displayed content (no jump while a fetch is in flight)."
-  [sh r0 c0]
-  (let [[tw th] (total-px sh r0 c0)
-        [cb rb] (view-base {:r0 r0 :c0 c0})]
+  [sh {:keys [r0 c0] :as view}]
+  (let [[tw th] (total-px sh view)
+        [cb rb] (view-base view)]
     (str (h/html [:div {:id "meta" :data-tw tw :data-th th :data-cb cb :data-rb rb
                         ;; per-sheet default axis sizes (client geometry base)
                         :data-dcw (sheet/default-col-w sh) :data-drh (sheet/default-row-h sh)
@@ -182,12 +192,13 @@
                         :style "display:none;"}]))))
 
 (defn- grid-layers
-  "Logical-scroll viewport: fixed-size, overflow hidden. Clipped header strips +
-   a cell area, each holding an absolutely-positioned layer that /app.js
-   translates by the sub-cell offset. Plus the corner, the totals #meta, and two
-   custom scrollbars. No giant spacer -> no row cap, no precision wobble."
-  [sh {:keys [r0 c0] :as view}]
-  (let [[cis ris] (window r0 c0)
+  "Logical-scroll viewport: fills the page below the toolbars, overflow hidden.
+   Clipped header strips + a cell area, each holding an absolutely-positioned
+   layer that /app.js translates by the sub-cell offset. Plus the corner, the
+   totals #meta, and two custom scrollbars. No giant spacer -> no row cap, no
+   precision wobble."
+  [sh view]
+  (let [[cis ris] (window sh view)
         clip "position:absolute;overflow:hidden;"]
     (h/html
      [:div {:id "viewport"
@@ -201,9 +212,12 @@
             ;; user-select:none kills the browser's blue text-highlight while
             ;; drag-selecting cells (mouse events still fire); #editor re-enables it
             ;; so typing/selecting inside a cell still works.
-            :style (str "position:relative;height:78vh;border:1px solid #ccc;overflow:hidden;"
-                        "user-select:none;-webkit-user-select:none;")}
-      (h/raw (meta-html sh r0 c0))
+            ;; flex:1 + min-height:0 = fill whatever the toolbars leave, exactly
+            ;; (a fixed vh left a dead strip under the grid). min-height:0 is what
+            ;; lets a flex child shrink below its content.
+            :style (str "position:relative;flex:1;min-height:0;border:1px solid #ccc;"
+                        "overflow:hidden;user-select:none;-webkit-user-select:none;")}
+      (h/raw (meta-html sh view))
       ;; corner
       [:div {:id "corner"
              :style (format (str "position:absolute;left:0;top:0;z-index:4;width:%dpx;height:%dpx;"
@@ -251,12 +265,13 @@
         ;; sizes it over the cell) — NOT $edit, which the formula bar also sets for
         ;; presence/peer-lock. Sharing $edit would pop this box, unpositioned and
         ;; at its default size, on every formula-bar focus.
-        [:input {:id "editor" :data-bind:v "" :data-show "$celledit"
+        [:input (merge no-autofill
+                {:id "editor" :data-bind:v "" :data-show "$celledit"
                  :data-on:keydown__stop
                  (str "evt.key==='Enter' ? (evt.preventDefault(),$cell=$sel,@post('/cell'),$edit=false,$celledit=false,@post('/presence'))"
                       " : evt.key==='Escape' ? (evt.preventDefault(),$edit=false,$celledit=false,@post('/presence')) : null")
                  :data-on:blur "$celledit && ($cell=$sel,@post('/cell'),$edit=false,$celledit=false,@post('/presence'))"
-                 :style "display:none;"}]]]
+                 :style "display:none;"})]]]
       ;; custom scrollbars
       [:div {:id "vbar" :style (format (str "position:absolute;right:0;top:%dpx;bottom:%dpx;width:%dpx;"
                                             "background:#f0f0f0;z-index:5;") HDR BAR BAR)}
@@ -691,9 +706,10 @@
           [:label {:style "display:block;font-size:12px;color:var(--muted);margin-bottom:.2rem;"}
            "New branch name"]
           [:div {:style "display:flex;gap:.4rem;"}
-           [:input {:data-bind:bname "" :placeholder "feature-x" :autocomplete "off"
-                    :data-on:keydown "evt.key==='Enter' && ($branchact='fork', @post('/branch'))"
-                    :style (str field "flex:1;")}]
+           [:input (merge no-autofill
+                    {:data-bind:bname "" :placeholder "feature-x"
+                     :data-on:keydown "evt.key==='Enter' && ($branchact='fork', @post('/branch'))"
+                     :style (str field "flex:1;")})]
            [:button {:class "btn primary" :data-on:click "$branchact='fork', @post('/branch')"}
             (str "Fork from " branch)]]
           ;; ── merge another branch INTO this one (3-way) ──────────────────
@@ -944,6 +960,11 @@
              :data-signals:celledit "false"
              :data-signals:r0 "0"
              :data-signals:c0 "0"
+             ;; how many columns/rows THIS client's viewport needs covered
+             ;; (app.cljs measures it — only the browser knows). 0 = not measured
+             ;; yet: the server then falls back to its own px-budget guess.
+             :data-signals:wc "0"
+             :data-signals:wr "0"
              :data-signals:sheet (format "'%s'" storage-id)
              ;; the working branch (rides in every POST so the server routes to
              ;; the right (sheet,branch) room); seeded from the resolved &b=.
@@ -1003,7 +1024,12 @@
              :data-signals:propspanel "false"
              :data-signals:pcw (str (sheet/default-col-w sh))
              :data-signals:prh (str (sheet/default-row-h sh))
-             :style "font-family:sans-serif;margin:0;padding:.6rem;min-height:100vh;background:var(--bg);color:var(--fg);"}
+             ;; the page IS the window: a flex column exactly 100vh tall, so the
+             ;; grid (flex:1) takes every pixel the toolbars don't. Modals/toast
+             ;; are position:fixed, so they stay out of this column.
+             :style (str "font-family:sans-serif;margin:0;padding:.6rem;height:100vh;"
+                         "box-sizing:border-box;display:flex;flex-direction:column;"
+                         "background:var(--bg);color:var(--fg);")}
       [:div {:id "toast" :data-show "$err != ''" :data-text "$err"
              :data-on:click "$err=''"
              :style (str "position:fixed;top:1rem;right:1rem;max-width:26rem;background:#c0392b;"
@@ -1072,17 +1098,19 @@
        [:div {:class "toolrow"}
        ;; address box: $sel via data-bind; Enter jumps (app.cljs scrolls there +
        ;; selects). The keydown listener is attached in app.cljs (a scroll action).
-       [:input {:id "addrbox" :class "tool mono" :data-bind:sel "" :placeholder "A1"
-                :style "width:5rem;text-align:center;"}]
+       [:input (merge no-autofill
+                {:id "addrbox" :class "tool mono" :data-bind:sel "" :placeholder "A1"
+                 :style "width:5rem;text-align:center;"})]
        ;; editing via the formula bar still drives presence on the SELECTED cell
        ;; (so it shows the marching-ants self marker and locks it for peers).
        ;; formula bar shares $v with the floating #editor, so the two stay live-
        ;; synced: typing in either updates $v and the other reflects it.
-       [:input {:id "fbar" :class "tool mono" :data-bind:v "" :placeholder "value or =formula like =(+ $A1 $B2 42) or =(sum $A1:A10) - Enter to apply"
-                :data-on:focus "$edit=true, @post('/presence')"
-                :data-on:keydown "evt.key==='Enter' && ($cell=$sel, @post('/cell'))"
-                :data-on:blur "$cell=$sel, @post('/cell'), $edit=false, @post('/presence')"
-                :style "flex:1;"}]
+       [:input (merge no-autofill
+                {:id "fbar" :class "tool mono" :data-bind:v "" :placeholder "value or =formula like =(+ $A1 $B2 42) or =(sum $A1:A10) - Enter to apply"
+                 :data-on:focus "$edit=true, @post('/presence')"
+                 :data-on:keydown "evt.key==='Enter' && ($cell=$sel, @post('/cell'))"
+                 :data-on:blur "$cell=$sel, @post('/cell'), $edit=false, @post('/presence')"
+                 :style "flex:1;"})]
        [:button {:class "btn" :title "big editor" :data-on:click "$big=$v, $bigwhat='v', $bigedit=true"} "⤢"]
        ;; flatten: server computes the inlined+simplified source of the selected
        ;; formula cell and opens it in the big editor — Apply there posts /cell.
@@ -1112,10 +1140,11 @@
                  :title "which side(s) of the cell the border applies to"}
         (for [[side props] border-sides]
           [:option {:value (str/join "," (map name props))} (name side)])]
-       [:input {:id "stylesrcbox" :class "tool mono" :data-bind:stylesrc ""
-                :placeholder "prop value or =formula (use $val for current cell value) like =(if (> $val 100) \"tomato\" \"white\")) — Enter to apply"
-                :data-on:keydown "evt.key==='Enter' && ($cell=$sel, @post('/style'))"
-                :style "flex:1;"}]
+       [:input (merge no-autofill
+                {:id "stylesrcbox" :class "tool mono" :data-bind:stylesrc ""
+                 :placeholder "prop value or =formula (use $val for current cell value) like =(if (> $val 100) \"tomato\" \"white\")) — Enter to apply"
+                 :data-on:keydown "evt.key==='Enter' && ($cell=$sel, @post('/style'))"
+                 :style "flex:1;"})]
        [:button {:class "btn" :title "big editor" :data-on:click "$big=$stylesrc, $bigwhat='style', $bigedit=true"} "⤢"]
        ;; insert a blank row/column around the selected cell (refs follow; one undo)
        [:span {:style "border-left:1px solid var(--grid);margin:0 .2rem;align-self:stretch;"}]
@@ -1141,13 +1170,17 @@
       ;; the server also forces read-only when $at is set (belt and suspenders).
       (when asof?
         [:div {:id "ctl" :data-sid sid :style "display:none;"
-               :data-on:sr-view__window "$r0=evt.detail.r0, $c0=evt.detail.c0, @post('/viewat')"}])
+               :data-on:sr-view__window
+               (str "$r0=evt.detail.r0, $c0=evt.detail.c0, "
+                    "$wc=evt.detail.wc, $wr=evt.detail.wr, @post('/viewat')")}])
       (when-not asof?
        (list
       [:div {:id "streamer" :data-on:sr-open__window "@get('/stream')"
              :style "display:none;"} ""]
       [:div {:id "ctl" :data-sid sid :style "display:none;"
-             :data-on:sr-view__window "$r0=evt.detail.r0, $c0=evt.detail.c0, @post('/view')"
+             :data-on:sr-view__window
+             (str "$r0=evt.detail.r0, $c0=evt.detail.c0, "
+                  "$wc=evt.detail.wc, $wr=evt.detail.wr, @post('/view')")
              :data-on:sr-size__window "$rzcmd=evt.detail.cmd, @post('/size')"
              ;; per-user undo / redo (Ctrl+Z / Ctrl+Shift+Z|Ctrl+Y from app.cljs)
              :data-on:sr-undo__window "@post('/undo')"
@@ -1229,7 +1262,7 @@
     (apply str
            (for [[sid s] @sessions*
                  :when (and (not= sid viewer-sid) (= room (:room s))
-                            (:cursor s) (in-window? view (:cursor s)))]
+                            (:cursor s) (in-window? sh view (:cursor s)))]
              (peer-marker sh view s)))))
 
 (defn self-html
@@ -1241,7 +1274,7 @@
         view (session-view sid)
         a    (:cursor s)
         sh   (:sh (@sheets* room))]
-    (if (and s sh (= room (:room s)) a (in-window? view a))
+    (if (and s sh (= room (:room s)) a (in-window? sh view a))
       (let [{:keys [ci ri]} (addr/parse a)
             [cb rb] (view-base view)]
         (str (h/html

@@ -3,19 +3,12 @@
   (:require
             [uno.michelada.saltrim.addr :as addr]
             [uno.michelada.saltrim.sheet :as sheet]
-            [uno.michelada.saltrim.constants :refer [MAX-COLS MAX-ROWS WIN-COLS WIN-ROWS MIN-COLS MIN-ROWS BUF-COLS BUF-ROWS OVER]]))
+            [uno.michelada.saltrim.constants :refer [CW MAX-COLS MAX-ROWS MAX-WIN-COLS MAX-WIN-ROWS RH WIN-COLS WIN-ROWS MIN-COLS MIN-ROWS BUF-COLS BUF-ROWS OVER]]))
 
 (defn view-base
   "[col-base row-base] = top-left index of the rendered (overscanned) window."
   [{:keys [r0 c0]}]
   [(max 0 (- (long c0) OVER)) (max 0 (- (long r0) OVER))])
-
-(defn window
-  "Visible cell coords [ci-range ri-range] for first row/col r0 c0 (clamped)."
-  [r0 c0]
-  (let [[cb rb] (view-base {:r0 r0 :c0 c0})]
-    [(range cb (min MAX-COLS (+ cb WIN-COLS)))
-     (range rb (min MAX-ROWS (+ rb WIN-ROWS)))]))
 
 ;; Axis sizing: columns/rows default to CW/RH but carry sparse per-index px
 ;; overrides (sheet :cols/:rows). Absolute offset of an index = uniform base
@@ -34,6 +27,50 @@
 
 (defn axis-x [sh ci] (axis-off (sheet/col-widths sh) (sheet/default-col-w sh) ci))
 (defn axis-y [sh ri] (axis-off (sheet/row-heights sh) (sheet/default-row-h sh) ri))
+
+;; --- the rendered window -------------------------------------------------
+;; A window is a PX BUDGET, not a cell count: WIN-COLS/WIN-ROWS express that
+;; budget at the DEFAULT cell size, and covering it takes as many cells as their
+;; REAL sizes allow — halve a sheet's default width and it takes twice as many;
+;; hand-shrink a run of columns and that run alone takes more still.
+
+(def ^:private WIN-PX-W (* WIN-COLS CW))
+(def ^:private WIN-PX-H (* WIN-ROWS RH))
+
+(defn- span-count
+  "How many consecutive indices from `i0` it takes to cover `px`, walking their
+   ACTUAL sizes (`size-of`) — dividing by the default size instead undercounts a
+   run of narrower-than-default cells and leaves the far edge of the grid empty.
+   Capped at `cap`, which also bounds the walk."
+  [size-of i0 px cap]
+  (loop [i (long i0), covered 0, n 0]
+    (if (or (>= covered (long px)) (>= n (long cap)))
+      (max 1 n)
+      (recur (inc i) (+ covered (long (size-of i))) (inc n)))))
+
+;; the client reports 0 until it has measured its viewport -> treat as "unknown"
+(defn- as-count [x] (when (and (number? x) (pos? x)) (long x)))
+
+(defn win-dims
+  "[wc wr] = how many columns/rows `view` covers, counted from its own top-left
+   (sizes vary per index, so where you start decides how many fit). The client
+   measures its real viewport and reports $wc/$wr; until it has (first paint,
+   as-of pages) we fall back to the constants' px budget over this sheet's own
+   sizes. Clamped: a client can never make us render the whole grid at once."
+  [sh {:keys [r0 c0 wc wr]}]
+  [(-> (or (as-count wc) (span-count #(col-w sh %) (or c0 0) WIN-PX-W MAX-WIN-COLS))
+       (max 1) (min MAX-WIN-COLS))
+   (-> (or (as-count wr) (span-count #(row-h sh %) (or r0 0) WIN-PX-H MAX-WIN-ROWS))
+       (max 1) (min MAX-WIN-ROWS))])
+
+(defn window
+  "Cell coords [ci-range ri-range] rendered for `view` = {:r0 :c0 :wc :wr}: the
+   columns/rows it covers plus OVER cells of overscan on each side (clamped)."
+  [sh view]
+  (let [[cb rb] (view-base view)
+        [wc wr] (win-dims sh view)]
+    [(range cb (min MAX-COLS (+ cb wc OVER OVER)))
+     (range rb (min MAX-ROWS (+ rb wr OVER OVER)))]))
 
 ;; --- colors -------------------------------------------------------------
 
@@ -55,18 +92,26 @@
   "Logical scroll extent [w h] px (cells area only, no gutter/header): covers the
    used range and the current view plus a buffer. Just numbers for the custom
    scrollbar — no DOM element is this big."
-  [sh r0 c0]
+  [sh {:keys [r0 c0] :as view}]
   (let [[cm rm] (used-max sh)
-        cols (min MAX-COLS (+ (max MIN-COLS (inc cm) (+ (long c0) WIN-COLS)) BUF-COLS))
-        rows (min MAX-ROWS (+ (max MIN-ROWS (inc rm) (+ (long r0) WIN-ROWS)) BUF-ROWS))]
+        [wc wr] (win-dims sh view)
+        cols (min MAX-COLS (+ (max MIN-COLS (inc cm) (+ (long c0) wc)) BUF-COLS))
+        rows (min MAX-ROWS (+ (max MIN-ROWS (inc rm) (+ (long r0) wr)) BUF-ROWS))]
     ;; total extent = absolute offset of the index just past the buffered range
     ;; (folds in any sparse width/height overrides)
     [(axis-x sh cols) (axis-y sh rows)]))
 
-(defn in-window? [{:keys [r0 c0]} addr]
-  (let [{:keys [ci ri]} (addr/parse addr)]
-    (and (<= (- (long c0) OVER) ci (+ (long c0) WIN-COLS))
-         (<= (- (long r0) OVER) ri (+ (long r0) WIN-ROWS)))))
+(defn in-window?
+  "Is `addr` inside the window `view` renders? Bounds the cells a session gets
+   pushed, so it must span exactly what `window` lays out — hence the same
+   view-base (which CLAMPS at the origin, shifting the span right) and the same
+   dims. Too tight here and a peer's edit patches an element they never got."
+  [sh view addr]
+  (let [{:keys [ci ri]} (addr/parse addr)
+        [cb rb] (view-base view)
+        [wc wr] (win-dims sh view)]
+    (and (<= cb ci (+ cb wc OVER OVER -1))
+         (<= rb ri (+ rb wr OVER OVER -1)))))
 
 ;; --- rendering ----------------------------------------------------------
 
