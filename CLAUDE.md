@@ -289,5 +289,13 @@ where the .xlsx importer leaves its audit trail — it used to abuse `:label`).
 (all/vertical/horizontal/top/bottom/left/right) whose option value is the
 comma-joined concrete prop list; `render/border-props` expands it server-side, so
 each side stays its own reactive prop (`render/border-sides` is the one map).
+**The rendered window is a PX BUDGET, not a cell count**: `WIN-COLS`/`WIN-ROWS`
+express it at the DEFAULT cell size, `geom/win-dims` scales them by the sheet's
+own `dcw`/`drh`, and the client — the only party that knows its viewport —
+measures and reports `$wc`/`$wr` (0 = not yet measured → server's guess; clamped
+by `MAX-WIN-*`). `window`/`in-window?`/`total-px` all take `[sh view]` and MUST
+agree (`in-window?` derives from the same `view-base`, which clamps at the
+origin; too tight and a peer's pushed edit patches nothing). The grid is
+`flex:1` in a `100vh` flex-column body — never a fixed `vh`.
 Cheap win left: cell assertions (`=(assert …)`). See `TECHDEBT.md` for
 deferred items.
