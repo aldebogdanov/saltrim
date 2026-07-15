@@ -21,11 +21,17 @@
 ;; these by the sheet's own dcw/drh, and the client (which alone knows the real
 ;; viewport) reports what it actually needs as $wc/$wr. Never render a fixed
 ;; count — that is what left the right of the grid empty at a small default
-;; width. MAX-WIN-* caps what a client may ask us to render in one go.
+;; width. Both sides walk the REAL per-index sizes: a run of hand-shrunk columns
+;; fits more of them on screen than dcw alone suggests.
 (def WIN-COLS 16)
 (def WIN-ROWS 34)
-(def MAX-WIN-COLS 96)
-(def MAX-WIN-ROWS 160)
+(def MINSZ 24)          ; smallest column width / row height a resize drag allows
+;; MAX-WIN-* caps what a client may ask us to render in one go. Sized so the cap
+;; can't bind in practice — even a 4K viewport of MINSZ cells (3840/24 = 160
+;; columns, 2160/24 = 90 rows) stays under it, so it only ever stops a buggy or
+;; hostile client from asking for the whole grid.
+(def MAX-WIN-COLS 192)
+(def MAX-WIN-ROWS 128)
 (def OVER 2)            ; overscan cells (each side of the window)
 (def MIN-COLS 26)       ; logical scroll extent never smaller than this
 (def MIN-ROWS 100)

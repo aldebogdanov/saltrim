@@ -3,7 +3,7 @@
    sheet's default cell size and the client's own viewport, or the grid comes up
    short of the viewport (empty strip to the right / below)."
   (:require [clojure.test :refer [deftest is testing use-fixtures]]
-            [uno.michelada.saltrim.constants :refer [CW MAX-WIN-COLS MAX-WIN-ROWS RH WIN-COLS WIN-ROWS OVER]]
+            [uno.michelada.saltrim.constants :refer [CW MAX-WIN-COLS MAX-WIN-ROWS MINSZ RH WIN-COLS WIN-ROWS OVER]]
             [uno.michelada.saltrim.sheet :as sheet]
             [uno.michelada.saltrim.web.geom :as geom]))
 
@@ -33,6 +33,32 @@
     (testing "rows scale off the default row height the same way"
       (sheet/set-default-row-h! *sh* (quot RH 2))
       (is (= (* 2 WIN-ROWS) (second (geom/win-dims *sh* view)))))))
+
+(deftest hand-shrunk-cells-still-cover-the-viewport
+  ;; the default size is only a default: a RUN of manually narrowed columns fits
+  ;; more of them on screen, and dividing the budget by dcw undercounts them
+  (testing "a run of narrow columns from the window start needs more of them"
+    (let [view {:r0 0 :c0 0}
+          wide (first (geom/win-dims *sh* view))]
+      ;; the whole covered run must be narrow, else a default-width column past
+      ;; it soaks up the remaining budget
+      (doseq [ci (range 0 (* 4 WIN-COLS))] (sheet/set-col-width! *sh* ci (quot CW 4)))
+      (let [narrow (first (geom/win-dims *sh* view))]
+        (is (> narrow wide) "shrinking the columns on screen must widen the window")
+        (is (= (* 4 WIN-COLS) narrow) "quarter-width columns -> 4x as many"))))
+  (testing "counted from the window's OWN start, not the grid origin"
+    ;; the narrow run is behind us, so a window past it is back to default cells
+    ;; and must not keep asking for the narrow count
+    (is (= WIN-COLS (first (geom/win-dims *sh* {:r0 0 :c0 200})))))
+  (testing "hand-shrunk rows do the same"
+    (doseq [ri (range 0 120)] (sheet/set-row-height! *sh* ri (quot RH 2)))
+    (is (= (* 2 WIN-ROWS) (second (geom/win-dims *sh* {:r0 0 :c0 0}))))))
+
+(deftest the-cap-cannot-bind-on-a-real-viewport
+  ;; MAX-WIN-* only exists to stop a hostile/buggy client asking for the whole
+  ;; grid — a 4K viewport of smallest-allowed cells must still fit under it
+  (is (<= (long (Math/ceil (/ 3840.0 MINSZ))) MAX-WIN-COLS))
+  (is (<= (long (Math/ceil (/ 2160.0 MINSZ))) MAX-WIN-ROWS)))
 
 (deftest client-measurement-wins-over-the-guess
   ;; only the browser knows its viewport; $wc/$wr override the px-budget fallback

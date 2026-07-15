@@ -15,7 +15,7 @@
    agree on cell sizes. The per-render window base/totals + sparse axis overrides
    ride on #meta's data-* and are read live (they change every /view and /size)."
   (:require [clojure.string :as str]
-            [uno.michelada.saltrim.constants :refer [CW RH]]
+            [uno.michelada.saltrim.constants :refer [CW MAX-WIN-COLS MAX-WIN-ROWS MINSZ RH]]
             [uno.michelada.saltrim.addr :as addr]))
 
 ;; --- tiny DOM + bridge helpers ---------------------------------------------
@@ -122,16 +122,28 @@
     (swap! SX #(js/Math.max 0 (js/Math.min % (js/Math.max 0 (- (:tw m) (:w vs))))))
     (swap! SY #(js/Math.max 0 (js/Math.min % (js/Math.max 0 (- (:th m) (:h vs))))))))
 
+(defn- span-count
+  "How many consecutive indices from `i0` it takes to cover `px`, walking their
+   ACTUAL sizes. Mirrors geom/span-count: dividing by `base` instead undercounts
+   a run of hand-shrunk cells, which is what leaves the far edge of the grid
+   empty. The cap bounds the walk (and matches the server's clamp)."
+  [i0 px base ov cap]
+  (loop [i i0, covered 0, n 0]
+    (if (or (>= covered px) (>= n cap))
+      (js/Math.max 1 n)
+      (recur (inc i) (+ covered (axis-size i base ov)) (inc n)))))
+
 (defn- win-need
-  "[wc wr] = how many columns/rows this viewport needs covered, at the sheet's
-   default cell size. Only the browser knows how big it is, so the server renders
-   the window WE ask for: a fixed count would come up short whenever the cells
-   are smaller than the constants assume (empty strip to the right / below) and
-   waste work when they're bigger. +1 covers a partly-scrolled cell at each edge."
-  []
+  "[wc wr] = how many columns/rows this viewport needs covered, counted from the
+   window's own top-left (c0,r0) over the cells' REAL sizes. Only the browser
+   knows how big it is, so the server renders the window WE ask for: a fixed
+   count comes up short whenever the cells are smaller than assumed (empty strip
+   to the right / below) and wastes work when they're bigger. +1 covers the
+   partly-scrolled cell at each edge."
+  [c0 r0]
   (let [m (mta) vs (view-size)]
-    [(inc (js/Math.ceil (/ (:w vs) (js/Math.max 1 (:dcw m)))))
-     (inc (js/Math.ceil (/ (:h vs) (js/Math.max 1 (:drh m)))))]))
+    [(inc (span-count c0 (:w vs) (:dcw m) (:colw m) MAX-WIN-COLS))
+     (inc (span-count r0 (:h vs) (:drh m) (:rowh m) MAX-WIN-ROWS))]))
 
 (defn- request-view!
   "Debounced: when the window's top-left index — or the size this viewport needs
@@ -141,7 +153,7 @@
   (let [m  (mta)
         c0 (pixel->index @SX (:dcw m) (:colw m))
         r0 (pixel->index @SY (:drh m) (:rowh m))
-        [wc wr] (win-need)]
+        [wc wr] (win-need c0 r0)]
     (when (or force? (not= c0 @last-c0) (not= r0 @last-r0)
               (not= wc @last-wc) (not= wr @last-wr))
       (reset! last-c0 c0)
@@ -366,7 +378,6 @@
 ;; one moves a single guide line; on release we emit one atomic "axis:idx:size"
 ;; command (sr-size -> @post '/size'). The server stores px + re-renders.
 
-(def ^:private MINSZ 24)
 (def ^:private SNAP 10)   ; px: how close to a default-multiple before it sticks
 
 (defn- snap-size

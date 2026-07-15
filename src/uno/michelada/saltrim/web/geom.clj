@@ -10,36 +10,6 @@
   [{:keys [r0 c0]}]
   [(max 0 (- (long c0) OVER)) (max 0 (- (long r0) OVER))])
 
-;; The window a view spans is a PX budget, not a cell count: WIN-COLS/WIN-ROWS
-;; are that budget expressed at the DEFAULT cell size, so halving a sheet's
-;; default column width doubles the columns needed to cover the same viewport.
-(def ^:private WIN-PX-W (* WIN-COLS CW))
-(def ^:private WIN-PX-H (* WIN-ROWS RH))
-
-(defn- ceil-div [a b] (long (Math/ceil (/ (double a) (double (max 1 (long b)))))))
-
-;; the client reports 0 until it has measured its viewport -> treat as "unknown"
-(defn- as-count [x] (when (and (number? x) (pos? x)) (long x)))
-
-(defn win-dims
-  "[wc wr] = how many columns/rows `view` covers. The client measures its own
-   viewport against this sheet's cell sizes and reports $wc/$wr; until it has
-   (first paint, as-of pages) we fall back to the px budget the constants
-   describe, scaled to THIS sheet's default cell size. Clamped, so a client can
-   never ask the server to render the whole grid in one window."
-  [sh {:keys [wc wr]}]
-  [(-> (or (as-count wc) (ceil-div WIN-PX-W (sheet/default-col-w sh))) (max 1) (min MAX-WIN-COLS))
-   (-> (or (as-count wr) (ceil-div WIN-PX-H (sheet/default-row-h sh))) (max 1) (min MAX-WIN-ROWS))])
-
-(defn window
-  "Cell coords [ci-range ri-range] rendered for `view` = {:r0 :c0 :wc :wr}: the
-   columns/rows it covers plus OVER cells of overscan on each side (clamped)."
-  [sh view]
-  (let [[cb rb] (view-base view)
-        [wc wr] (win-dims sh view)]
-    [(range cb (min MAX-COLS (+ cb wc OVER OVER)))
-     (range rb (min MAX-ROWS (+ rb wr OVER OVER)))]))
-
 ;; Axis sizing: columns/rows default to CW/RH but carry sparse per-index px
 ;; overrides (sheet :cols/:rows). Absolute offset of an index = uniform base
 ;; plus the (override-base) deltas of every sized index BEFORE it. The same
@@ -57,6 +27,50 @@
 
 (defn axis-x [sh ci] (axis-off (sheet/col-widths sh) (sheet/default-col-w sh) ci))
 (defn axis-y [sh ri] (axis-off (sheet/row-heights sh) (sheet/default-row-h sh) ri))
+
+;; --- the rendered window -------------------------------------------------
+;; A window is a PX BUDGET, not a cell count: WIN-COLS/WIN-ROWS express that
+;; budget at the DEFAULT cell size, and covering it takes as many cells as their
+;; REAL sizes allow — halve a sheet's default width and it takes twice as many;
+;; hand-shrink a run of columns and that run alone takes more still.
+
+(def ^:private WIN-PX-W (* WIN-COLS CW))
+(def ^:private WIN-PX-H (* WIN-ROWS RH))
+
+(defn- span-count
+  "How many consecutive indices from `i0` it takes to cover `px`, walking their
+   ACTUAL sizes (`size-of`) — dividing by the default size instead undercounts a
+   run of narrower-than-default cells and leaves the far edge of the grid empty.
+   Capped at `cap`, which also bounds the walk."
+  [size-of i0 px cap]
+  (loop [i (long i0), covered 0, n 0]
+    (if (or (>= covered (long px)) (>= n (long cap)))
+      (max 1 n)
+      (recur (inc i) (+ covered (long (size-of i))) (inc n)))))
+
+;; the client reports 0 until it has measured its viewport -> treat as "unknown"
+(defn- as-count [x] (when (and (number? x) (pos? x)) (long x)))
+
+(defn win-dims
+  "[wc wr] = how many columns/rows `view` covers, counted from its own top-left
+   (sizes vary per index, so where you start decides how many fit). The client
+   measures its real viewport and reports $wc/$wr; until it has (first paint,
+   as-of pages) we fall back to the constants' px budget over this sheet's own
+   sizes. Clamped: a client can never make us render the whole grid at once."
+  [sh {:keys [r0 c0 wc wr]}]
+  [(-> (or (as-count wc) (span-count #(col-w sh %) (or c0 0) WIN-PX-W MAX-WIN-COLS))
+       (max 1) (min MAX-WIN-COLS))
+   (-> (or (as-count wr) (span-count #(row-h sh %) (or r0 0) WIN-PX-H MAX-WIN-ROWS))
+       (max 1) (min MAX-WIN-ROWS))])
+
+(defn window
+  "Cell coords [ci-range ri-range] rendered for `view` = {:r0 :c0 :wc :wr}: the
+   columns/rows it covers plus OVER cells of overscan on each side (clamped)."
+  [sh view]
+  (let [[cb rb] (view-base view)
+        [wc wr] (win-dims sh view)]
+    [(range cb (min MAX-COLS (+ cb wc OVER OVER)))
+     (range rb (min MAX-ROWS (+ rb wr OVER OVER)))]))
 
 ;; --- colors -------------------------------------------------------------
 
