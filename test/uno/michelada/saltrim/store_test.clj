@@ -86,6 +86,30 @@
     (is (= "center" (sheet/style-value s2 "A1" :align)))
     (is (= "revenue" (sheet/style-value s2 "A1" :label)) "cell label persists like any prop")))
 
+(deftest style-only-roundtrip
+  ;; regression: a styled BLANK cell used to vanish on save/reload —
+  ;; sheet/document iterated value cells only, so the style of a cell with no
+  ;; value never reached the db (while a styled cell WITH a value survived)
+  (register!)
+  (let [s (sheet/create-sheet)]
+    (sheet/set-style! s "B1" :bg "tomato")            ; style, NO value
+    (sheet/set-style! s "C1" :bg "gold")              ; style...
+    (sheet/set-cell!  s "C1" "123")                   ; ...plus value
+    (sheet/settle! s)
+    (store/save! id s {:author "dev-ann"}))
+  (let [s2 (store/load-sheet id)]
+    (sheet/settle! s2)
+    (is (= "tomato" (sheet/style-value s2 "B1" :bg)) "style-only cell persists")
+    (is (nil? (sheet/value s2 "B1")) "…and stays blank")
+    (is (= "gold" (sheet/style-value s2 "C1" :bg)))
+    (is (= 123 (sheet/value s2 "C1")))
+    (testing "clearing the style-only cell's style retracts it from the db"
+      (sheet/set-style! s2 "B1" :bg "")
+      (store/save! id s2 {:author "dev-ann"})
+      (let [s3 (store/load-sheet id)]
+        (is (nil? (sheet/style-value s3 "B1" :bg)))
+        (is (= "gold" (sheet/style-value s3 "C1" :bg)) "other styles untouched")))))
+
 (deftest defs-roundtrip
   (register!)
   (let [s (sheet/create-sheet)]

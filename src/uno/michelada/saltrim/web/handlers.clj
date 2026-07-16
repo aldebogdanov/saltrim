@@ -14,18 +14,32 @@
             [uno.michelada.saltrim.merge :as mrg]
             [uno.michelada.saltrim.sheet :as sheet]
             [uno.michelada.saltrim.store :as store]
+            [uno.michelada.saltrim.util :as u]
             [uno.michelada.saltrim.xlsx :as xlsx]
             [ring.middleware.multipart-params :as multipart]
             [ring.middleware.multipart-params.byte-array :as mp-bytes]
             [starfederation.datastar.clojure.api :as d*]
             [starfederation.datastar.clojure.adapter.http-kit :as hk]
-            [uno.michelada.saltrim.web.geom :refer [in-window? pretty-err qparam url-decode url-encode window]]
+            [uno.michelada.saltrim.web.geom :refer [in-window? known-formula-error? pretty-err qparam url-decode url-encode window]]
             [uno.michelada.saltrim.web.state :refer [accessible-rec can-read? def-editor-of locked-by-other? now owner-of save-rec! session-view sessions* set-session-view! sheets* sid-re unload-sheet!]]
             [uno.michelada.saltrim.web.sse :refer [patch-inner! read-signals signals! sse sse-opts webkit-ua?]]
             [uno.michelada.saltrim.web.render :refer [border-prop border-props cells-html colhead-html denied-page graph-svg import-error-html import-report-html login-page merge-result-html meta-html page prop-allowed? render-cells rowhead-html self-html share-html]]
             [uno.michelada.saltrim.web.collab :refer [broadcast! broadcast-deflib-except! broadcast-presence! broadcast-window! ensure-session! push-deflib! reap-session! render-window!]]))
 
 (def ^:private edit-lock (Object.))
+
+(defn- log-err!
+  "Server-side CLI visibility for a handler failure — the toast reaches only
+   the ONE requesting browser and then vanishes. A KNOWN user-caused failure
+   (bad formula, cycle, lock, bad address — see `known-formula-error?`) logs
+   at WARN: the sheet did its job, one person hit an expected error. Anything
+   else is unclassified — treated as a possible bug — so it logs at ERR with
+   a stack trace."
+  [where e]
+  (if (known-formula-error? e)
+    (u/log "WARN" where "—" (.getMessage ^Throwable e))
+    (do (u/log "ERR" where "—" (.getMessage ^Throwable e))
+        (.printStackTrace ^Throwable e))))
 
 (defn- def-errs-msg [errors]
   (if (seq errors)
@@ -211,6 +225,7 @@
                                (cons cell (into (sheet/dependents* sh cell)
                                                 (sheet/style-dependents sh cell))))
                 (catch Throwable e
+                  (log-err! "/cell" e)
                   (signals! gen {:err (str cell ": " (pretty-err (.getMessage e)))}))))))))))
 
 (defn handle-flatten
@@ -230,6 +245,7 @@
             (signals! gen {:big     (sheet/flatten-src sh sel (when flatstrict {:strict true}))
                            :bigwhat "v" :bigedit true :err ""})
             (catch Throwable e
+              (log-err! "/flatten" e)
               (signals! gen {:err (str sel ": " (pretty-err (.getMessage e)))}))))))))
 
 (declare selected-cells)
@@ -268,6 +284,7 @@
               (save-rec! (:room rec) uid)
               (push-changes! gen sid (:room rec) sh cells)
               (catch Throwable e
+                (log-err! "/style" e)
                 (signals! gen {:err (str (name prop) " style: "
                                          (pretty-err (.getMessage e)))})))))))))
 
@@ -312,6 +329,7 @@
                     (save-rec! (:room rec) uid)
                     (push-changes! gen sid (:room rec) sh (distinct @affected))))
                 (catch Throwable e
+                  (log-err! "/clear" e)
                   (signals! gen {:err (pretty-err (.getMessage e))}))))))))))
 
 ;; --- clipboard (copy / cut / paste) ---------------------------------------
@@ -416,6 +434,7 @@
                     (sheet/settle! sh) (save-rec! (:room rec) uid)
                     (push-changes! gen sid (:room rec) sh (distinct @affected))))
                 (catch Throwable e
+                  (log-err! "/paste" e)
                   (signals! gen {:err (pretty-err (.getMessage e))}))))))))))
 
 (defn handle-cut [req]
@@ -439,6 +458,7 @@
                     (sheet/settle! sh) (save-rec! (:room rec) uid)
                     (push-changes! gen sid (:room rec) sh (distinct @affected))))
                 (catch Throwable e
+                  (log-err! "/cut" e)
                   (signals! gen {:err (pretty-err (.getMessage e))}))))))))))
 
 (defn handle-view [req]
@@ -510,6 +530,7 @@
               (render-window! gen sid (:room rec) sh (session-view sid))
               (broadcast-window! sid (:room rec) sh)
               (catch Throwable e
+                (log-err! "/size" e)
                 (signals! gen {:err (pretty-err (.getMessage e))})))))))))
 
 (defn handle-insert
@@ -547,6 +568,7 @@
                   (broadcast-window! sid (:room rec) sh)
                   (signals! gen {:err ""})
                   (catch Throwable e
+                    (log-err! "/insert" e)
                     (signals! gen {:err (pretty-err (.getMessage e))})))))))))))
 
 (defn handle-props
@@ -571,6 +593,7 @@
             (render-window! gen sid (:room rec) sh (session-view sid))
             (broadcast-window! sid (:room rec) sh)
             (catch Throwable e
+              (log-err! "/props" e)
               (signals! gen {:err (pretty-err (.getMessage e))}))))))))
 
 ;; The definitions library is edited per chunk with a collaborative lock: a
@@ -642,6 +665,7 @@
                     (push-deflib! gen sid (:room rec))
                     (broadcast-deflib-except! sid (:room rec)))
                   (catch Throwable e
+                    (log-err! "/defsave" e)
                     (signals! gen {:err (str "definition error: " (pretty-err (.getMessage e)))})))))))))))
 
 (defn handle-defadd
@@ -685,6 +709,7 @@
                     (push-deflib! gen sid (:room rec))
                     (broadcast-deflib-except! sid (:room rec)))
                   (catch Throwable e
+                    (log-err! "/defdel" e)
                     (signals! gen {:err (pretty-err (.getMessage e))})))))))))))
 
 (defn- body-json [req]
@@ -1129,5 +1154,6 @@
                  ;; only reach the picker on the next page load (its links do that)
                  (signals! gen {:importing false :imported true}))))
            (catch Throwable e
+             (log-err! "/import" e)
              (import-failed! gen (str (.getMessage e))))))))))
 

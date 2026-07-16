@@ -678,3 +678,27 @@
       (is (= ["C1"] (sh/dyn-cells s)) "dyn formulas are flagged")
       (put s "B1" "2") (v s "C1")
       (is (= #{"A2"} (sh/dyn-deps s "C1")) "edges follow the retarget"))))
+
+(deftest style-only-cells-in-document
+  (testing "a styled BLANK cell serializes ({:style …}, no :value) and reloads"
+    (let [s (mk)]
+      (sh/set-style! s "B1" :bg "tomato")
+      (sh/set-style! s "C1" :bg "gold")
+      (put s "C1" "123")
+      (sh/settle! s)
+      (is (= {"B1" {:style {:bg "tomato"}}
+              "C1" {:value "123" :style {:bg "gold"}}}
+             (sh/document s)))
+      (let [s2 (mk)]
+        (sh/load-document! s2 (sh/document s))
+        (sh/settle! s2)
+        (is (= "tomato" (sh/style-value s2 "B1" :bg)))
+        (is (nil? (sh/value s2 "B1"))))))
+  (testing "reshape (insert/delete line) carries style-only cells"
+    (let [s (mk)]
+      (sh/set-style! s "B1" :bg "tomato")
+      (sh/settle! s)
+      (sh/insert-line! s :row 0) (sh/settle! s)
+      (is (= "tomato" (sh/style-value s "B2" :bg)) "moved down with the insert")
+      (sh/delete-line! s :row 0) (sh/settle! s)
+      (is (= "tomato" (sh/style-value s "B1" :bg)) "and back"))))

@@ -127,6 +127,17 @@
       (re-find #"locked by another" m) "cell is being edited by another collaborator"
       :else m)))
 
+(defn known-formula-error?
+  "True when `msg` is a recognized USER-caused failure — either pretty-err
+   translates it (a raw Java exception from a bad formula: type error,
+   divide-by-zero, unresolved symbol, …) or it's an ex-info from our own
+   domain checks (cycle, bad address, lock, hygiene collision, …). False
+   means the exception is unclassified — treat it as a possible bug, not a
+   routine formula mistake."
+  [e]
+  (or (instance? clojure.lang.ExceptionInfo e)
+      (not= (str (.getMessage ^Throwable e)) (pretty-err (.getMessage ^Throwable e)))))
+
 (defn qparam [req k]
   (some->> (:query-string req)
            (re-find (re-pattern (str "(?:^|&)" k "=([^&]+)")))
