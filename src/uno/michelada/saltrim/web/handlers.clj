@@ -1070,43 +1070,54 @@
             (xlsx-response (export/workbook-bytes (:sh rec) sname) sname)
             {:status 403 :body "no access"}))))))
 
-(defn- html-page [status body]
-  {:status status :headers {"Content-Type" "text/html; charset=utf-8"} :body body})
+(defn- import-failed!
+  "Patch a failed /import into #importreport and leave the form up (so the user
+   can pick another file), plus the usual toast."
+  [gen msg]
+  (d*/patch-elements! gen (import-error-html msg))
+  (signals! gen {:err (str "import failed: " msg) :importing false :imported false}))
 
 (defn handle-import
-  "POST /import — a REAL multipart form submit (not Datastar; file bytes can't
-   ride JSON signals), answered with a full HTML report page. Parses the
+  "POST /import — a multipart upload (file bytes can't ride Datastar's JSON
+   signals, so the form posts with `contentType:'form'` and Datastar sends the
+   FormData verbatim). Answered over SSE: the report patches into #importreport
+   inside the import modal — no navigation, no full-page render. Parses the
    multipart body route-scoped (no global middleware change), checks the
    size/magic caps, and hands the workbook to xlsx/import! under the signed-in
    uid. Nothing persists unless every tab builds."
   [req]
-  (let [uid (auth/req->uid req)]
-    (if-not uid
-      (html-page 403 (import-error-html "not signed in"))
-      (try
-        (let [mp    (:multipart-params
-                     (multipart/multipart-params-request
-                      req {:store (mp-bytes/byte-array-store)}))
-              f     (get mp "file")
-              ^bytes bytes (:bytes f)]
-          (cond
-            (or (nil? bytes) (zero? (alength bytes)))
-            (html-page 400 (import-error-html "no file uploaded"))
+  (sse req
+   (fn [gen]
+     (let [uid (auth/req->uid req)]
+       (if-not uid
+         (import-failed! gen "not signed in")
+         (try
+           (let [mp    (:multipart-params
+                        (multipart/multipart-params-request
+                         req {:store (mp-bytes/byte-array-store)}))
+                 f     (get mp "file")
+                 ^bytes bytes (:bytes f)]
+             (cond
+               (or (nil? bytes) (zero? (alength bytes)))
+               (import-failed! gen "no file uploaded")
 
-            (> (alength bytes) xlsx/max-bytes)
-            (html-page 400 (import-error-html
-                            (str "file too large (max " (quot xlsx/max-bytes (* 1024 1024)) " MB)")))
+               (> (alength bytes) xlsx/max-bytes)
+               (import-failed! gen (str "file too large (max "
+                                        (quot xlsx/max-bytes (* 1024 1024)) " MB)"))
 
-            ;; .xlsx is a zip: PK magic
-            (not (and (<= 2 (alength bytes))
-                      (= 0x50 (bit-and 255 (aget bytes 0)))
-                      (= 0x4B (bit-and 255 (aget bytes 1)))))
-            (html-page 400 (import-error-html "not an .xlsx file"))
+               ;; .xlsx is a zip: PK magic
+               (not (and (<= 2 (alength bytes))
+                         (= 0x50 (bit-and 255 (aget bytes 0)))
+                         (= 0x4B (bit-and 255 (aget bytes 1)))))
+               (import-failed! gen "not an .xlsx file")
 
-            :else
-            (html-page 200 (import-report-html
-                            (xlsx/import! (java.io.ByteArrayInputStream. bytes) uid
-                                          (xlsx/base-name (get mp "name") (:filename f)))))))
-        (catch Throwable e
-          (html-page 400 (import-error-html (.getMessage e))))))))
+               :else
+               (let [report (xlsx/import! (java.io.ByteArrayInputStream. bytes) uid
+                                          (xlsx/base-name (get mp "name") (:filename f)))]
+                 (d*/patch-elements! gen (import-report-html report))
+                 ;; $imported swaps the form out for the report; the new sheets
+                 ;; only reach the picker on the next page load (its links do that)
+                 (signals! gen {:importing false :imported true}))))
+           (catch Throwable e
+             (import-failed! gen (str (.getMessage e))))))))))
 
