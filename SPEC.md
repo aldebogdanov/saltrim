@@ -459,7 +459,7 @@ Clojars. The distributable is a standalone uberjar attached to a GitHub Release.
 - `.github/workflows/release.yml` triggers on a `v*` tag: test → build uberjar
   (VERSION = tag without the `v`) → publish a GitHub Release with the jar.
   Uses the auto `GITHUB_TOKEN`; no Clojars token needed.
-- Coordinate `uno.michelada/saltrim`; repo lives under the `michelada-uno` org.
+- Coordinate `uno.michelada/saltrim`; repo lives at `github.com/aldebogdanov/saltrim`.
 
 To cut a release: `git tag v1.2.3 && git push origin v1.2.3`.
 

@@ -470,7 +470,13 @@
           (help-sections-b)
           [:div {:style (str "margin-top:1rem;padding-top:.6rem;border-top:1px solid var(--line);"
                              "font:11px sans-serif;color:#9aa1a9;text-align:center;")}
-           "SaltRim " (version/current)]]])))
+           "SaltRim " (version/current) " · "
+           [:a {:href "https://github.com/aldebogdanov/saltrim" :target "_blank" :rel "noopener"
+                :style "color:inherit;"} "GitHub"]
+           " · © 2026 "
+           [:a {:href "mailto:sasha_bogdanov_dev@yahoo.com"
+                :style "color:inherit;"} "Aleksandr Bogdanov"]
+           ", MIT License"]]])))
 
 (declare deflib-html bigedit-html)
 
@@ -842,7 +848,9 @@
      [:head
       [:meta {:charset "utf-8"}]
       [:title (str sname " — SaltRim")]
+      [:link {:rel "icon" :type "image/x-icon" :href "/favicon.ico"}]
       [:link {:rel "icon" :type "image/png" :href "/favicon.png"}]
+      [:link {:rel "apple-touch-icon" :href "/apple-touch-icon.png"}]
       [:meta {:property "og:type" :content "website"}]
       [:meta {:property "og:site_name" :content "SaltRim"}]
       [:meta {:property "og:title" :content (str sname " — SaltRim")}]
@@ -1582,7 +1590,9 @@
      (h/html
       [:html
        [:head [:meta {:charset "utf-8"}] [:title "SaltRim — sign in"]
+        [:link {:rel "icon" :type "image/x-icon" :href "/favicon.ico"}]
         [:link {:rel "icon" :type "image/png" :href "/favicon.png"}]
+        [:link {:rel "apple-touch-icon" :href "/apple-touch-icon.png"}]
         [:meta {:property "og:type" :content "website"}]
         [:meta {:property "og:site_name" :content "SaltRim"}]
         [:meta {:property "og:title" :content "SaltRim — sign in"}]
