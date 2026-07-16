@@ -299,8 +299,9 @@
             [:div {:style h3} "Cells & formulas"]
             [:p {:style p} "Type a value, or start with " [:span {:style kbd} "="]
              " for a formula (Clojure s-expressions). Reference cells with "
-             [:span {:style kbd} "#cell A1"] " and ranges with " [:span {:style kbd} "#cells A1:A3"]
-             " — or the short form " [:span {:style kbd} "$A1"] " / " [:span {:style kbd} "$A3:D8"] "."]
+             [:span {:style kbd} "$A1"] " and ranges with " [:span {:style kbd} "$A1:A3"]
+             " — shorthand for the reader tags " [:span {:style kbd} "#cell A1"]
+             " / " [:span {:style kbd} "#cells A1:A3"] "."]
             [:p {:style p} "e.g. " [:span {:style kbd} "=(+ $A1 $B1)"] " · "
              [:span {:style kbd} "=(reduce + $A1:A3)"]]
             [:p {:style p} "Relative refs point by offset from the cell itself: "
@@ -334,15 +335,16 @@
              "definitions library: write your own functions/constants as separate entries and call "
              "them from any cell. e.g. add "
              [:span {:style kbd} "(defn margin [rev cost] (/ (- rev cost) rev))"] " then use "
-             [:span {:style kbd} "=(margin #cell A1 #cell B1)"] ". Each entry collapses to name "
+             [:span {:style kbd} "=(margin $A1 $B1)"] ". Each entry collapses to name "
              "badges; Edit expands it and " [:span {:style kbd} "⤢"] " opens a big editor (also next "
              "to the formula and style bars). While you edit one it's locked for other "
              "collaborators; saving recompiles every cell."]
 
             [:div {:style h3} "Styling a cell"]
             [:p {:style p} "Use the third toolbar row: pick a property, type a value or an "
-             [:span {:style kbd} "="] "-formula, press Apply (or Enter). "
-             [:span {:style kbd} "$val"] " is the selected cell's own value, so styles can react to it."]
+             [:span {:style kbd} "="] "-formula, press Enter. "
+             [:span {:style kbd} "$val"] " is the selected cell's own value, so styles can react to it. "
+             "Dynamic refs " [:span {:style kbd} "$(expr)"] " aren't supported in style formulas yet."]
             [:p {:style p} "Properties: " [:span {:style kbd} "bg"] " (background), "
              [:span {:style kbd} "fg"] " (text color), " [:span {:style kbd} "weight"] " (e.g. bold), "
              [:span {:style kbd} "slant"] " (e.g. italic), " [:span {:style kbd} "align"] " (left/right/center), "
@@ -397,8 +399,8 @@
             [:div {:style h3} "Copy / paste"]
             [:p {:style p} [:span {:style kbd} "Ctrl/⌘+C"] " copy · " [:span {:style kbd} "Ctrl/⌘+X"]
              " cut · " [:span {:style kbd} "Ctrl/⌘+V"] " paste at the selected cell. Pasted formulas "
-             "shift their references relative to the move (copy " [:span {:style kbd} "=(+ #cell A1 1)"]
-             " down a row pastes " [:span {:style kbd} "=(+ #cell A2 1)"] ")."]
+             "shift their references relative to the move (copy " [:span {:style kbd} "=(+ $A1 1)"]
+             " down a row pastes " [:span {:style kbd} "=(+ $A2 1)"] ")."]
             [:p {:style p} "Select a range before pasting to " [:b "fill"] " it: a single copied cell "
              "lands in every selected cell (with relative refs re-resolved), so e.g. one "
              [:span {:style kbd} "=(inc $_-1)"] " pasted down a column is a running counter."]
@@ -521,7 +523,7 @@
              "separate entries. Editing one locks it for other collaborators; they all merge (in order) "
              "into the sheet's program. Same sandbox as formulas — pure, no host interop."]
             [:p {:style p} "e.g. " [:span {:style kbd} "(defn margin [rev cost] (/ (- rev cost) rev))"]
-             " → in a cell " [:span {:style kbd} "=(margin #cell A1 #cell B1)"]]
+             " → in a cell " [:span {:style kbd} "=(margin $A1 $B1)"]]
             ;; dynamic, per-session library fragment (pushed on changes)
             [:div {:id "deflib"} (h/raw (deflib-html nil storage-id))]
             ;; read-only built-ins

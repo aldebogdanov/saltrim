@@ -13,19 +13,19 @@ top toolbar.
 ### Cells & formulas
 
 Type a value into a cell, or start with `=` to write a formula. Formulas are
-restricted **Clojure s-expressions** (not infix). Reference other cells with
-reader tags:
+restricted **Clojure s-expressions** (not infix). Reference other cells with the
+`$` notation:
 
-| Tag | Meaning |
-|-----|---------|
-| `#cell A1` | the value of A1 |
-| `#cells A1:A3` | a vector of a column range `[A1 A2 A3]` |
-| `#cells A1:C1` | a row range `[A1 B1 C1]` |
-| `#cells A1:B2` | a rectangle, row-major `[A1 B1 A2 B2]` |
+| Reference | Meaning |
+|-----------|---------|
+| `$A1` | the value of A1 |
+| `$A1:A3` | a vector of a column range `[A1 A2 A3]` |
+| `$A1:C1` | a row range `[A1 B1 C1]` |
+| `$A1:B2` | a rectangle, row-major `[A1 B1 A2 B2]` |
 
-Or use the shorter `$` form — `$A1` is the same as `#cell A1`, and `$A3:D8` the
-same as `#cells A3:D8` (it's just shorthand; it shifts on paste like any other
-reference).
+References shift on paste (see below). The `$` forms are shorthand for the
+underlying reader tags — `$A1` for `#cell A1`, and `$A1:A3` for `#cells A1:A3` —
+which you can also write out in full if you prefer.
 
 **Relative references** point to a cell by *offset from the cell itself*, written
 `$<col><row>` where each of col/row is `_` (same index), `+N`, or `-N`. They are
@@ -62,10 +62,9 @@ view, currently-resolved dynamic edges draw dashed.
 Examples:
 
 ```clojure
-=(+ #cell A1 #cell B1)        ; sum two cells
-=(+ $A1 $B1)                  ; the same, shorter
-=(reduce + #cells A1:A3)      ; sum a range
-=(sum $A1:A3)                 ; the same, shorter
+=(+ $A1 $B1)                  ; sum two cells
+=(reduce + $A1:A3)            ; sum a range
+=(sum $A1:A3)                 ; the same, with a stdlib helper
 =(if (> $A1 0) "ok" "no")
 ```
 
@@ -105,8 +104,8 @@ the sheet.
 
 ```clojure
 ;; then in cells:
-=(margin #cell A1 #cell B1)
-=(* #cell A1 vat)
+=(margin $A1 $B1)
+=(* $A1 vat)
 ```
 
 Each entry collapses to **badges** of the names it declares plus its last-edit
@@ -122,9 +121,8 @@ composing longer formulas or style expressions in a roomy modal.
 ### Styling a cell
 
 The third toolbar row styles the **selected** cell. Pick a property, type a
-value (or an `=`-formula), and press **Apply** (or Enter). Inside a style
-formula, `$val` is the selected cell's own computed value — so styling can react
-to the data:
+value (or an `=`-formula), and press **Enter**. Inside a style formula, `$val`
+is the selected cell's own computed value — so styling can react to the data:
 
 ```clojure
 =(if (> $val 100) "tomato" "white")   ; bg: red when above 100
@@ -146,7 +144,8 @@ left one independently.
 
 Style formulas are reactive too: a style that reads another cell updates when
 that cell changes. A broken style formula is reported in the toast and simply
-isn't applied.
+isn't applied. Dynamic references (`$(expr)`) aren't supported inside style
+formulas yet — use static `$A1` references there.
 
 **Styling a whole selection:** select a range (or several), then apply a property
 — it sets that property on every cell in the selection at once.
@@ -215,7 +214,7 @@ sheet-wide default column width and row height.
 
 - **Ctrl/⌘+C** copy · **Ctrl/⌘+X** cut · **Ctrl/⌘+V** paste at the selected cell.
 - Pasted **formulas shift their references** relative to the move — copy
-  `=(+ #cell A1 1)` down a row and it pastes `=(+ #cell A2 1)`.
+  `=(+ $A1 1)` down a row and it pastes `=(+ $A2 1)`.
 - **Select a range before pasting to fill it** — a single copied cell lands in
   every selected cell (a copied block tiles across the selection), with relative
   refs re-resolved per cell. So one `=(inc $_-1)` pasted down a column is a
