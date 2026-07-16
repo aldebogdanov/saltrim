@@ -924,9 +924,19 @@
     (fn [uid sheet-id rec {:keys [sid]} gen]
       (ensure-session! sid sheet-id (:branch rec) uid (:token rec))
       (let [sh       (:sh rec)
+            ;; force dyn cells first — spins are lazy, and an unread cell has
+            ;; not resolved (= recorded) its dynamic edges yet
+            _        (doseq [a (sheet/dyn-cells sh)] (sheet/value sh a))
+            ;; static deps plus the CURRENTLY-resolved dynamic targets; a dyn
+            ;; edge not mirrored by a static one renders dashed
             deps-map (into {} (for [a (sheet/cells sh)
-                                    :let [ds (sheet/deps sh a)] :when (seq ds)]
+                                    :let [ds (into (sheet/deps sh a) (sheet/dyn-deps sh a))]
+                                    :when (seq ds)]
                                 [a ds]))
+            dyn-edges (set (for [a (sheet/cells sh)
+                                 d (sheet/dyn-deps sh a)
+                                 :when (not (contains? (sheet/deps sh a) d))]
+                             [d a]))
             {:keys [nodes] :as g} (graph/build deps-map)
             inner (cond
                     (empty? nodes)
@@ -937,7 +947,7 @@
                     (str (h/html [:p {:style "color:var(--muted);"}
                                   (str "This sheet has " (count nodes) " connected cells — too many to "
                                        "draw usefully yet. Filtering / zoom is a future improvement.")]))
-                    :else (graph-svg sh g))]
+                    :else (graph-svg sh g dyn-edges))]
         (patch-inner! gen "#graphview" inner)))))
 
 (defn- redirect [loc & [set-cookie]]

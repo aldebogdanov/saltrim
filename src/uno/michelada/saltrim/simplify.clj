@@ -141,6 +141,7 @@
   [x env strict?]
   (cond
     (formula/ref? x)       x
+    (formula/dynref? x)    x
     (formula/range-ref? x) x
 
     (seq? x)

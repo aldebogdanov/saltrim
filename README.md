@@ -40,6 +40,25 @@ trivial:
 =(+ $-2_ $-1_)               ; "two cols left + one col left, same row"
 ```
 
+**Dynamic references** compute the address *at runtime* — like Excel's
+`INDIRECT`, but reactive. Write `$(expr)`: the expression (ordinary formula
+code) must produce an address string like `"A5"`, or a range like `"A1:B3"`,
+which yields a row-major vector exactly as `$A1:B3` would:
+
+```clojure
+=$(str "A" $B1)              ; B1 picks the row: reads A<B1>
+=(sum $(str "A1:A" $B1))     ; a range whose EXTENT follows B1
+=$(str $C1 $B1)              ; column from C1, row from B1
+```
+
+The formula re-fires both when the address inputs change (it re-points to the
+new target) and when the current target's value changes. Cell refs *inside*
+the expression shift on paste as usual; the computed target itself doesn't —
+it's recomputed, not stored. A result that isn't a valid address, a cycle
+through the computed target, or an oversized range stops evaluation with
+`#ERR` and a toast — a dynamic cycle can't hang the sheet. In the 🕸 graph
+view, currently-resolved dynamic edges draw dashed.
+
 Examples:
 
 ```clojure

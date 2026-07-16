@@ -395,3 +395,37 @@ shorthand rendered straight into the cell's inline style. Deferred:
 - **No adjacent-cell border collapsing**: each cell draws its own edges, so a
   `right` border and its neighbour's `left` border stack (2 lines, not 1).
   Grid lines already sit under them; a range's outline is drawn per cell.
+
+## Dynamic refs (`$(expr)`)
+
+Shipped: runtime-computed cell/range addresses, reactive both ways (address
+inputs + current target), runtime cycle guard, dashed graph edges. Deferred:
+
+- **Dynamic refs in STYLE formulas** — rejected with a clear error for now.
+  The `:dyn` registry keys by owner ADDRESS; a style's dynamic edge would
+  masquerade as a *value* dep of the owner (false "circular" rejections), so
+  styles need a per-`[addr prop]` registry — plus style-layer rebuild
+  machinery that doesn't exist at all (see next item).
+- **Verify suspected pre-existing gap:** style formulas likely go stale when a
+  referenced cell's spin is structurally REPLACED (e.g. literal→formula) —
+  `set-cell!`'s rebuild loop rebuilds value dependents only, and nothing ever
+  re-installs a style spin. If confirmed, a style rebuild hook fixes both this
+  and the item above.
+- **Rebuild-skip optimization** — `set-cell!` structurally rebuilds every
+  dynamic dependent in the reverse closure on ANY upstream edit (the
+  stale-continuation guard, see spike 07). Cheap but over-broad: an edit that
+  provably can't change a parent's *addresses* (reaches it only via its own
+  dynamic edge, no chained dynrefs) could skip the recompile and let the
+  await edge propagate.
+- **xlsx import: `INDIRECT(text)` → `$(…)`** — the importer currently leaves
+  INDIRECT untranslated (demoted to a value); the address-string grammar now
+  exists to target.
+- **Static ranges have no size cap** — dynamic ranges are capped
+  (`rt/MAX-DYN-RANGE`, 10000 cells); a typed `$A1:ZZ99999` still expands
+  unboundedly at read time.
+- **Stale conts hold the abandoned target's spin** until the parent's next
+  rebuild — harmless under the rebuild hook (one edit's worth), noted for
+  engine archaeology.
+- **Pre-existing quirk inherited:** `shift-refs`'s text regexes rewrite
+  `$A1`-shaped tokens inside STRING literals too (`=(str "owe $A1")` shifts
+  on paste) — applies inside `$(…)` bodies the same way.

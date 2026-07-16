@@ -23,3 +23,10 @@
   (let [{:keys [layer]} (graph/build {"B1" #{"A1" "A2" "A3"}})]
     (is (= 0 (layer "A1")) "leaf inputs are layer 0")
     (is (= 1 (layer "B1")) "the formula sits one layer right")))
+
+(deftest cyclic-edge-guard
+  ;; a transiently cyclic DYNAMIC edge (concurrent recompute race) must not
+  ;; hang or overflow the longest-path walk — back edges cut at 0
+  (let [{:keys [nodes layer]} (graph/build {"A1" #{"B1"} "B1" #{"A1"}})]
+    (is (= #{"A1" "B1"} nodes))
+    (is (every? #(contains? layer %) nodes) "every node still gets a layer")))
