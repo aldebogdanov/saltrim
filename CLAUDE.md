@@ -301,5 +301,25 @@ by `MAX-WIN-*`, sized so a 4K viewport of `MINSZ` cells can't reach it).
 (`in-window?` derives from the same `view-base`, which clamps at the origin; too
 tight and a peer's pushed edit patches nothing). The grid is `flex:1` in a
 `100vh` flex-column body — never a fixed `vh`.
+**Dynamic refs `$(expr)`** are DONE: the expression's runtime value names the
+target — `"A5"` (scalar, like `$A5`) or `"A1:B3"` (row-major vector, like the
+static range; the STRING decides the shape, a 1-cell range stays a vector).
+Parse wraps the source in parens (top-level `$(…)` is TWO reader forms) and
+fuses `$`+list into a `(::dynref …)` marker — so parse now REJECTS trailing
+junk after the formula. Inner `$refs` are ordinary static deps (drive
+re-resolution + shift on paste); the computed target is not. Compile emits a
+per-site loop that awaits each resolved cell via `rt/lookup-dyn`, which
+validates (`rt/resolve-dyn`, `MAX-DYN-RANGE` 10k), CYCLE-CHECKS over static ∪
+dynamic edges and records the edge in the sheet's `:dyn` registry in one
+`swap!` (throw = `{:error}` → `#ERR`, never a StackOverflow), and serves a
+double-await collision (dyn target = already-awaited cell) as a fresh
+const-spin. THE TRAP (spike 07, reproduced): Spindel await-chain bodies leak
+the OLD target's reactive continuation on retarget — an edit of the abandoned
+target then writes a WRONG value. Cure: `set-cell!` structurally rebuilds
+every DYNAMIC dependent in the combined reverse closure on ANY edit (even
+value-only). Spins are pull/LAZY: dyn edges are recorded when a body actually
+RUNS (deref) — `handle-graph` forces `sheet/dyn-cells` before reading
+`sheet/dyn-deps` (dashed edges in the 🕸 view). Styles reject dynrefs (own-PR
+plumbing, see TECHDEBT).
 Cheap win left: cell assertions (`=(assert …)`). See `TECHDEBT.md` for
 deferred items.

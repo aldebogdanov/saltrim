@@ -11,18 +11,23 @@
    with no incoming edge is layer 0), so each node sits to the RIGHT of
    everything it depends on. Returns {:nodes #{…} :edges [[from to]…]
    :layer {addr n}}. The graph is a DAG — value cycles are rejected by the engine
-   before they can be stored."
+   before they can be stored. Dynamic-ref edges can transiently disagree (they
+   are recorded by concurrent recomputes), so the longest-path walk carries a
+   path guard: a back edge contributes layer 0 instead of recursing forever."
   [deps-map]
   (let [edges (vec (for [[a ds] deps-map, d ds] [d a]))   ; d -> a
         nodes (set (mapcat identity edges))
         preds (reduce (fn [m [f t]] (update m t (fnil conj #{}) f)) {} edges)
         layer (let [seen (atom {})]
-                (letfn [(d [n]
+                (letfn [(d [n path]
                           (or (@seen n)
-                              (let [v (if-let [ps (seq (preds n))]
-                                        (inc (long (apply max (map d ps))))
-                                        0)]
-                                (swap! seen assoc n v)
-                                v)))]
-                  (into {} (map (juxt identity d)) nodes)))]
+                              (if (contains? path n)
+                                0                          ; back edge: cut, don't recurse
+                                (let [path (conj path n)
+                                      v (if-let [ps (seq (preds n))]
+                                          (inc (long (apply max (map #(d % path) ps))))
+                                          0)]
+                                  (swap! seen assoc n v)
+                                  v))))]
+                  (into {} (map (juxt identity #(d % #{}))) nodes)))]
     {:nodes nodes :edges edges :layer layer}))

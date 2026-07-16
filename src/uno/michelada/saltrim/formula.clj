@@ -61,6 +61,24 @@
   "Is `x` a parsed cell-ref marker?"
   [x] (and (seq? x) (= ::ref (first x))))
 
+(defn dynref-marker
+  "The parsed representation of a DYNAMIC cell/range reference `$(expr)`:
+   (::dynref <expr-form>). The expression computes an address string at
+   runtime (\"A5\" or \"A1:B3\") — resolved and guarded by `rt/resolve-dyn` /
+   `rt/lookup-dyn` inside the compiled spin body."
+  [form] (list ::dynref form))
+
+(defn dynref?
+  "Is `x` a parsed dynamic-ref marker?"
+  [x] (and (seq? x) (= ::dynref (first x))))
+
+(defn dynamic?
+  "Does `form` contain any dynamic ref?"
+  [form]
+  (let [acc (volatile! false)]
+    (walk/postwalk (fn [x] (when (dynref? x) (vreset! acc true)) x) form)
+    @acc))
+
 (def ^:private readers
   {;; #cell A1 -> (::ref "A1")
    'cell  (fn [sym] (ref-marker (str sym)))
@@ -121,11 +139,43 @@
           (throw (ex-info (str "relative reference $" c r " off the grid from " self)
                           {:self self})))))))
 
+;; `$(expr)` is a DYNAMIC ref: the expression's runtime value names the cell
+;; (or range) to read. The reader sees it as TWO forms — the symbol `$`
+;; followed by a list — so a structural pass fuses adjacent `$` + list pairs
+;; into dynref markers bottom-up (inner `$(…)` fuse before the level above,
+;; so nesting works). Runs on parsed forms: `$(` inside a string is untouched.
+(defn- fuse-adjacent
+  "Fuse `$`+list pairs among already-recursed sibling `elems`."
+  [elems]
+  (loop [es (seq elems) out []]
+    (if es
+      (let [e (first es) nxt (second es)]
+        (if (= '$ e)
+          (if (seq? nxt)
+            (recur (nnext es) (conj out (dynref-marker nxt)))
+            (throw (ex-info "dangling $ — write $(expression)" {:next nxt})))
+          (recur (next es) (conj out e))))
+      out)))
+
+(defn- fuse-dynrefs [x]
+  (cond
+    (seq? x)    (apply list (fuse-adjacent (map fuse-dynrefs x)))
+    (vector? x) (vec (fuse-adjacent (map fuse-dynrefs x)))
+    (map? x)    (into {} (map (fn [[k v]] [(fuse-dynrefs k) (fuse-dynrefs v)]) x))
+    (set? x)    (into #{} (map fuse-dynrefs x))
+    :else       x))
+
 (defn parse
   "Formula string (without leading =) -> {:form :deps}.
 
    Bare `$A1` / `$A3:D8` symbols are terse sugar for `#cell A1` / `#cells A3:D8`
-   (see `dollar-ref`) — usable in any formula.
+   (see `dollar-ref`) — usable in any formula. `$(expr)` is a DYNAMIC ref
+   (see `dynref-marker`); refs inside its expression are ordinary static deps
+   (they drive re-resolution), the computed target is not.
+
+   The source is read wrapped in parens (so a top-level `$(…)` — two reader
+   forms — survives), fused, and must then be EXACTLY ONE form. That also
+   rejects trailing junk edn/read-string used to ignore silently.
 
    With `self` (the owner address, e.g. for a STYLE/FORMAT property), the bare
    symbol `$val` rewrites to a ref on the owner's own value — sugar for
@@ -135,13 +185,22 @@
    rejects it at compile."
   ([s] (parse s nil))
   ([s self]
-   (let [form0 (edn/read-string {:readers readers} s)
+   (let [forms (fuse-dynrefs (edn/read-string {:readers readers}
+                                              (str "(" s "\n)")))
+         _     (walk/postwalk
+                (fn [x] (if (= '$ x)
+                          (throw (ex-info "dangling $ — write $(expression)" {}))
+                          x))
+                forms)
+         _     (when (not= 1 (count forms))
+                 (throw (ex-info "malformed formula (expected one expression)"
+                                 {:forms (count forms)})))
          form  (walk/postwalk
                 (fn [x]
                   (cond
                     (and self (= '$val x)) (ref-marker self)
                     :else                  (or (rel-ref x self) (dollar-ref x) x)))
-                form0)]
+                (first forms))]
      {:form form :deps (deps form)})))
 
 ;; --- unparse (inverse of parse) ------------------------------------------
@@ -183,6 +242,7 @@
   [form]
   (cond
     (ref? form)       (str "$" (second form))
+    (dynref? form)    (str "$" (unparse (second form)))
     (range-ref? form) (str "$" (nth form 1) ":" (nth form 2))
     (seq? form)       (if-let [[tl br] (vector-range form)]
                         (str "$" tl ":" br)
@@ -267,6 +327,10 @@
   (when (< max-inline-nodes (vswap! n inc))
     (throw (ex-info "too large to flatten" {:size @n})))
   (cond
+    ;; a dynamic ref is opaque: its target is a runtime value, nothing to
+    ;; inline (its ADDRESS expression rides along verbatim)
+    (dynref? x) x
+
     (ref? x)
     (if-let [body (form-of (second x))]
       (let [clash (set/intersection scope (all-syms body))]
@@ -482,25 +546,99 @@
 
 ;; --- compile ------------------------------------------------------------
 
+(defn- dyn-bindings
+  "Emitted let-binding pairs for ONE dynamic ref site: compute the address
+   string (SCI), resolve/validate it, then a loop awaiting each resolved cell —
+   one iteration per cell, threading `vm` (addr -> value awaited so far) so a
+   collision is served by `rt/lookup-dyn` as a fresh const-spin instead of a
+   second await of a shared node. `d` unwraps to a scalar when the string named
+   a single cell (\"A5\"), stays a row-major vector for a range (\"A1:B3\") —
+   mirroring `$A5` vs `$A5:A5`. Returns [binding-pairs d-sym]; `vmap` (the
+   running addr->value map) is read and re-shadowed by each site in turn."
+  [self k afn-args {:keys [sym]}]
+  (let [vm  (gensym "vm_") a (gensym "a_") res (gensym "res_")
+        raw (gensym "raw_") as (gensym "as_") acc (gensym "acc_")
+        v   (gensym "v_")]
+    [[a    (list* (list 'nth 'afns k) afn-args)
+      res  (list 'uno.michelada.saltrim.runtime/resolve-dyn a)
+      raw  (list 'loop [as (list :addrs res) vm 'vmap acc []]
+                 (list 'if (list 'seq as)
+                       (list 'let [v (list 'await
+                                           (list 'uno.michelada.saltrim.runtime/lookup-dyn
+                                                 self (list 'first as) vm))]
+                             (list 'recur (list 'rest as)
+                                   (list 'assoc vm (list 'first as) v)
+                                   (list 'conj acc v)))
+                       acc))
+      sym  (list 'if (list :single? res) (list 'nth raw 0) raw)
+      'vmap (list 'merge 'vmap (list 'zipmap (list :addrs res) raw))]
+     sym]))
+
 (defn compile
   "Marker form -> Spin, using the sheet's SCI `ctx` (stdlib + user defs). SCI-
    compiles the user body over resolved cell values; the spin awaits each
    distinct referenced cell once (de-dup) and calls the SCI fn. SCI never sees
-   spin/await/track."
-  [ctx form]
-  (let [addrs (vec (deps form))
-        syms  (mapv (fn [_] (gensym "c_")) addrs)
-        a->s  (zipmap addrs syms)
-        body  (walk/postwalk (fn [x] (if (ref? x) (a->s (second x)) x)) form)
-        user-fn (sci-fn ctx syms body)
-        bnds (vec (mapcat (fn [a s]
-                            [s (list 'await (list 'uno.michelada.saltrim.runtime/lookup a))])
-                          addrs syms))
-        ;; eval a factory (fn [uf] (spin (let [<awaits>] (uf <syms>)))) in this
-        ;; ns so spin/await resolve and CPS sees the effects; then close over uf.
-        factory (binding [*ns* (find-ns 'uno.michelada.saltrim.formula)]
-                  (eval (list 'fn ['uf] (list 'spin (list 'let bnds (list* 'uf syms))))))]
-    (factory user-fn)))
+   spin/await/track/lookup.
+
+   `self` (the owner address) is required when the form contains dynamic
+   `$(…)` refs: each site's address expression is SCI-compiled over the static
+   values (plus earlier dynamic results — postwalk order is innermost-first,
+   so nesting works), and the emitted body resolves + awaits its cells via
+   `rt/lookup-dyn`, which cycle-checks and records the dynamic edges under
+   `self`. The 2-arity form (no owner) rejects dynamic refs — style/format
+   formulas compile through it."
+  ([ctx form]
+   (when (dynamic? form)
+     (throw (ex-info "dynamic $(…) refs aren't supported in style/format formulas"
+                     {})))
+   (compile ctx form nil))
+  ([ctx form self]
+   (let [addrs (vec (deps form))
+         syms  (mapv (fn [_] (gensym "c_")) addrs)
+         a->s  (zipmap addrs syms)
+         dyns* (volatile! [])
+         body  (walk/postwalk
+                (fn [x]
+                  (cond
+                    (ref? x)    (a->s (second x))
+                    (dynref? x) (let [ds (gensym "d_")]
+                                  (vswap! dyns* conj {:sym ds :inner (second x)})
+                                  ds)
+                    :else x))
+                form)
+         dyns  @dyns*
+         bnds  (vec (mapcat (fn [a s]
+                              [s (list 'await (list 'uno.michelada.saltrim.runtime/lookup a))])
+                            addrs syms))]
+     (if (empty? dyns)
+       ;; static-only: exactly the pre-dynref shape
+       (let [user-fn (sci-fn ctx syms body)
+             ;; eval a factory (fn [uf] (spin (let [<awaits>] (uf <syms>)))) in
+             ;; this ns so spin/await resolve and CPS sees the effects; then
+             ;; close over uf.
+             factory (binding [*ns* (find-ns 'uno.michelada.saltrim.formula)]
+                       (eval (list 'fn ['uf]
+                                   (list 'spin (list 'let bnds (list* 'uf syms))))))]
+         (factory user-fn))
+       (let [_ (when-not self
+                 (throw (ex-info "dynamic $(…) ref needs an owner cell" {})))
+             ;; afn k computes site k's address string from the static values
+             ;; and the dynamic results of earlier (inner) sites
+             afns  (mapv (fn [k {:keys [inner]}]
+                           (sci-fn ctx (into syms (map :sym (take k dyns))) inner))
+                         (range) dyns)
+             all   (into syms (map :sym dyns))
+             user-fn (sci-fn ctx all body)
+             dbnds (loop [k 0, args (vec syms), out ['vmap (zipmap addrs syms)]]
+                     (if-let [d (nth dyns k nil)]
+                       (let [[pairs dsym] (dyn-bindings self k args d)]
+                         (recur (inc k) (conj args dsym) (into out pairs)))
+                       out))
+             factory (binding [*ns* (find-ns 'uno.michelada.saltrim.formula)]
+                       (eval (list 'fn ['uf 'afns]
+                                   (list 'spin (list 'let (into bnds dbnds)
+                                                     (list* 'uf all))))))]
+         (factory user-fn afns))))))
 
 (defn compile-literal-wrapper
   "Spin exposing a literal cell's editable signal as a public awaitable node:

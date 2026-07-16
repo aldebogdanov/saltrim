@@ -24,6 +24,7 @@
   (let [registry (atom {})
         vals     (atom {})
         meta     (atom {})
+        dyn      (atom {})        ; addr -> #{resolved dynamic-ref targets} (see rt/lookup-dyn)
         styles   (atom {})
         cols     (atom {})        ; ci -> width-px  (sparse; falls back to @dcw)
         rows     (atom {})        ; ri -> height-px (sparse; falls back to @drh)
@@ -32,8 +33,8 @@
         sci      (atom (formula/new-ctx nil))  ; per-sheet SCI ctx: stdlib + user defs
         defs     (atom [])        ; library: ordered vector of chunks {:id :src} (persisted)
         rt       (ctx/create-execution-context
-                  {:metadata {:registry registry :vals vals}})]
-    {:rt rt :registry registry :vals vals :meta meta :styles styles
+                  {:metadata {:registry registry :vals vals :meta meta :dyn dyn}})]
+    {:rt rt :registry registry :vals vals :meta meta :dyn dyn :styles styles
      :cols cols :rows rows :dcw dcw :drh drh :sci sci :defs defs}))
 
 (defn- classify [raw]
@@ -54,17 +55,25 @@
       :else                                     t)))
 
 (defn- rdeps
-  "Addresses whose formula references `addr`."
-  [meta addr]
-  (keep (fn [[a m]] (when (contains? (:deps m) addr) a)) @meta))
+  "Addresses whose formula references `addr` — statically (:deps) or via a
+   currently-resolved dynamic ref (the :dyn registry)."
+  [meta dyn addr]
+  (distinct
+   (concat (keep (fn [[a m]] (when (contains? (:deps m) addr) a)) @meta)
+           (keep (fn [[a ts]] (when (contains? ts addr) a)) @dyn))))
 
 (defn- would-cycle?
   "Would installing `addr` with `new-deps` create a cycle? True if `addr` is
-   reachable from new-deps following the forward dep graph (cell -> :deps).
-   Catches self-ref and indirect cycles. Must run BEFORE compile — a cyclic
-   formula deadlocks await into StackOverflowError."
-  [meta addr new-deps]
-  (let [deps-of (fn [c] (if (= c addr) new-deps (get-in @meta [c :deps])))]
+   reachable from new-deps following the forward dep graph — static :deps plus
+   currently-resolved dynamic edges (so an install that would close a STANDING
+   dynamic cycle is refused up front; a cycle a future recompute creates is the
+   runtime guard's job, see rt/lookup-dyn). Catches self-ref and indirect
+   cycles. Must run BEFORE compile — a cyclic formula deadlocks await into
+   StackOverflowError."
+  [meta dyn addr new-deps]
+  (let [deps-of (fn [c] (if (= c addr)
+                          new-deps            ; installing: OLD dyn edges are void
+                          (into (set (get-in @meta [c :deps])) (get @dyn c))))]
     (loop [stack (vec new-deps) seen #{}]
       (if-let [c (peek stack)]
         (let [stack (pop stack)]
@@ -77,7 +86,7 @@
 (defn- write-cell!
   "Local update of one cell. Returns true if addr's PUBLIC spin object was
    created/replaced/removed (structural change -> dependents must rebuild)."
-  [{:keys [registry vals meta sci]} addr raw]
+  [{:keys [registry vals meta dyn sci]} addr raw]
   (let [prev-kind (get-in @meta [addr :kind])
         old-spin  (get @registry addr)]
     (case (classify raw)
@@ -86,6 +95,7 @@
           (swap! registry dissoc addr)
           (swap! vals dissoc addr)
           (swap! meta dissoc addr)
+          (swap! dyn dissoc addr)
           true)
 
       :literal
@@ -96,6 +106,7 @@
             (sig/ensure-signal-initialized! vs)
             (swap! vals assoc addr vs)))
         (swap! meta assoc addr {:raw raw :kind :literal})
+        (swap! dyn dissoc addr)
         (if (= prev-kind :literal)
           false                                       ; spin unchanged
           (do (when old-spin (spin-core/cleanup-spin! old-spin))
@@ -104,41 +115,66 @@
 
       :formula
       (let [{:keys [form deps]} (formula/parse (subs (str/trim raw) 1) addr)
-            _  (when (would-cycle? meta addr deps)
+            _  (when (would-cycle? meta dyn addr deps)
                  (throw (ex-info "circular reference" {:addr addr :deps deps})))
-            sp (formula/compile @sci form)]
+            sp (formula/compile @sci form addr)]
         (when old-spin (spin-core/cleanup-spin! old-spin))
+        ;; only after parse+cycle-check+compile succeed: a REJECTED install
+        ;; keeps the old spin, whose recorded dynamic edges must survive
+        (swap! dyn dissoc addr)
         (swap! registry assoc addr sp)
-        (swap! meta assoc addr {:raw raw :kind :formula :deps deps})
+        (swap! meta assoc addr (cond-> {:raw raw :kind :formula :deps deps}
+                                 (formula/dynamic? form) (assoc :dyn? true)))
         true))))
+
+(defn- dyn-dependents
+  "Cells with dynamic refs in the combined (static + dynamic) reverse closure
+   of `addr`, excluding `addr` itself. ANY value change of `addr` may retarget
+   them — and a retargeting body leaves the OLD target's await continuation
+   live (a later edit of the old target then resumes a stale body slice and
+   caches a wrong value — reproduced in spike 07). Structural rebuild is the
+   cure, so `set-cell!` rebuilds these even for value-only edits."
+  [meta dyn addr]
+  (loop [seen #{addr} frontier [addr] out #{}]
+    (if-let [a (peek frontier)]
+      (let [frontier (pop frontier)
+            new      (remove seen (rdeps meta dyn a))]
+        (recur (into seen new) (into frontier new)
+               (into out (filter #(get-in @meta [% :dyn?]) new))))
+      out)))
 
 (defn set-cell!
   "Set cell `addr` from raw input. When a cell's public spin is replaced
    (structural change), transitively rebuilds dependents so they re-capture
-   the new node. Value-only edits skip the rebuild (signal propagates). The
-   visited set guards against cycles. Returns the sheet."
-  [{:keys [rt meta] :as sheet} addr raw]
+   the new node. Value-only edits skip that rebuild (the signal propagates) —
+   EXCEPT dependents with dynamic refs, which are always rebuilt (see
+   `dyn-dependents`). The visited set guards against cycles. Returns the sheet."
+  [{:keys [rt meta dyn] :as sheet} addr raw]
   (binding [ec/*execution-context* rt]
     (let [visited (volatile! #{})]
       (letfn [(go [a r]
                 (when-not (contains? @visited a)
                   (vswap! visited conj a)
                   (when (write-cell! sheet a r)
-                    (doseq [d (rdeps meta a)]
+                    (doseq [d (rdeps meta dyn a)]
                       (go d (get-in @meta [d :raw]))))))]
-        (go addr raw))))
+        (go addr raw)
+        (doseq [d (dyn-dependents meta dyn addr)]
+          (go d (get-in @meta [d :raw]))))))
   sheet)
 
 (defn dependents*
   "Transitive set of addresses whose formulas reference `addr` (reverse-dep
-   closure), excluding `addr` itself. These are the cells whose value may
-   change when `addr` changes — the set to re-render."
-  [{:keys [meta]} addr]
-  (let [m @meta]
+   closure — static refs plus currently-resolved dynamic ones), excluding
+   `addr` itself. These are the cells whose value may change when `addr`
+   changes — the set to re-render."
+  [{:keys [meta dyn]} addr]
+  (let [m @meta d @dyn]
     (loop [seen #{} frontier [addr]]
       (if-let [a (first frontier)]
-        (let [ds  (keep (fn [[x mm]] (when (contains? (:deps mm) a) x)) m)
-              new (remove #(or (= % addr) (contains? seen %)) ds)]
+        (let [ds  (concat (keep (fn [[x mm]] (when (contains? (:deps mm) a) x)) m)
+                          (keep (fn [[x ts]] (when (contains? ts a) x)) d))
+              new (remove #(or (= % addr) (contains? seen %)) (distinct ds))]
           (recur (into seen new) (into (subvec (vec frontier) 1) new)))
         seen))))
 
@@ -170,6 +206,15 @@
    #{}. The reverse of `dependents*`; together they are the dependency-graph
    edges."
   [{:keys [meta]} addr] (get-in @meta [addr :deps] #{}))
+(defn dyn-deps
+  "Cell addresses `addr`'s dynamic refs CURRENTLY resolve to (recorded at the
+   last recompute), or #{} — the runtime complement of `deps`. Spins are
+   pull/lazy: a dyn cell that has never been read has no recorded edges yet
+   (force it with `value` first — see `dyn-cells`)."
+  [{:keys [dyn]} addr] (get @dyn addr #{}))
+(defn dyn-cells
+  "Addresses whose formula contains a dynamic `$(…)` ref."
+  [{:keys [meta]}] (keep (fn [[a m]] (when (:dyn? m) a)) @meta))
 
 (defn flatten-src
   "The FLATTENED source of formula cell `addr` (with its leading =): every
@@ -498,6 +543,7 @@
   (reset! (:registry sheet) {})
   (reset! (:vals sheet) {})
   (reset! (:meta sheet) {})
+  (reset! (:dyn sheet) {})
   (reset! (:styles sheet) {}))
 
 (defn- apply-defs!

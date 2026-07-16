@@ -309,6 +309,14 @@
              [:span {:style kbd} "-N"] ". They survive copy/paste, so they fill series. "
              "e.g. " [:span {:style kbd} "=(inc $_-1)"] " copied down counts up; "
              [:span {:style kbd} "=(+ $-2_ $-1_)"] " copied across is Fibonacci."]
+            [:p {:style p} "Dynamic refs compute the ADDRESS at runtime — a reactive INDIRECT: "
+             [:span {:style kbd} "$(expr)"] " where the expression yields "
+             [:span {:style kbd} "\"A5\""] " or a range " [:span {:style kbd} "\"A1:B3\""] ". "
+             "e.g. " [:span {:style kbd} "=$(str \"A\" $B1)"] " reads column A at the row B1 names; "
+             [:span {:style kbd} "=(sum $(str \"A1:A\" $B1))"] " sums a range whose extent follows B1. "
+             "Reacts to the address inputs AND the target's value. The computed target doesn't "
+             "shift on paste (refs inside the expression do); a bad address or a cycle through "
+             "the target shows " [:span {:style kbd} "#ERR"] ". The 🕸 graph draws these edges dashed."]
             [:p {:style p} "Built-in functions: math (" [:span {:style kbd} "sum"] ", "
              [:span {:style kbd} "round"] ", " [:span {:style kbd} "sqrt"] "…), stats ("
              [:span {:style kbd} "mean"] ", " [:span {:style kbd} "median"] ", "
@@ -1583,8 +1591,11 @@
 (defn graph-svg
   "Render the layered DAG (`graph/build` output) as an inline SVG: nodes placed
    left→right by dependency depth, edges arrow from a cell to the cells that read
-   it. A node click selects the cell (and closes the modal)."
-  [sh {:keys [nodes edges layer]}]
+   it. Edges in `dyn-edges` (currently-resolved dynamic `$(…)` targets) render
+   dashed — they can move on the next recompute. A node click selects the cell
+   (and closes the modal)."
+  ([sh g] (graph-svg sh g #{}))
+  ([sh {:keys [nodes edges layer]} dyn-edges]
   (let [COLW 168 ROWH 40 NW 132 NH 26 PAD 16
         by-layer (->> nodes (group-by layer) (into (sorted-map)))
         pos (into {}
@@ -1604,16 +1615,17 @@
             [:marker {:id "arr" :viewBox "0 0 10 10" :refX "9" :refY "5"
                       :markerWidth "7" :markerHeight "7" :orient "auto-start-reverse"}
              [:path {:d "M0,0 L10,5 L0,10 z" :fill "#9ec9ee"}]]]
-           (for [[f t] edges :let [[fx fy] (pos f) [tx ty] (pos t)]]
-             [:line {:x1 (+ fx NW) :y1 (+ fy (quot NH 2)) :x2 tx :y2 (+ ty (quot NH 2))
-                     :stroke "#9ec9ee" :stroke-width "1.5" :marker-end "url(#arr)"}])
+           (for [[f t :as e] edges :let [[fx fy] (pos f) [tx ty] (pos t)]]
+             [:line (cond-> {:x1 (+ fx NW) :y1 (+ fy (quot NH 2)) :x2 tx :y2 (+ ty (quot NH 2))
+                             :stroke "#9ec9ee" :stroke-width "1.5" :marker-end "url(#arr)"}
+                      (contains? dyn-edges e) (assoc :stroke-dasharray "4 3"))])
            (for [a nodes :let [[x y] (pos a) lbl (node-label sh a)]]
              [:g {:data-on:click (str "$sel='" a "', $graphpanel=false") :style "cursor:pointer;"}
               [:title (str a)]
               [:rect {:x x :y y :width NW :height NH :rx 4
                       :fill "#f4f6f8" :stroke "#2f8fd8" :stroke-width "1"}]
               [:text {:x (+ x 8) :y (+ y 17) :fill "#3a4149"}
-               (let [s (str lbl)] (if (> (count s) 19) (str (subs s 0 18) "…") s))]])]))))
+               (let [s (str lbl)] (if (> (count s) 19) (str (subs s 0 18) "…") s))]])])))))
 
 (defn login-page [err]
   (let [field (str "font:13px sans-serif;padding:6px 8px;border:1px solid #c7ccd1;"

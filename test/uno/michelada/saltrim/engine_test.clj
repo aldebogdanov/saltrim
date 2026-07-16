@@ -516,3 +516,165 @@
       (testing "redo re-inserts"
         (sh/undo-step s stacks :redo) (sh/settle! s)
         (is (= 20 (v s "A3")))))))
+
+;; --- dynamic refs: $(expr) computes the address at runtime ------------------
+
+(deftest dynamic-parse
+  (testing "$(expr) fuses into a dynref; inner static refs are the deps"
+    (let [{:keys [form deps]} (formula/parse "$(str \"A\" $B1)")]
+      (is (formula/dynamic? form))
+      (is (= #{"B1"} deps) "the computed target is NOT a static dep"))
+    (is (= #{"A1" "B1"} (:deps (formula/parse "(+ $A1 $(str \"A\" $B1))"))))
+    (is (formula/dynamic? (:form (formula/parse "$(str \"A\" $(str \"B\" 1))"))
+        ) "nested $() parses"))
+  (testing "a $( inside a string literal is untouched"
+    (is (not (formula/dynamic? (:form (formula/parse "(str \"cash $(money)\")"))))))
+  (testing "dangling $ and trailing forms are clear errors"
+    (is (thrown-with-msg? Exception #"dangling"  (formula/parse "(+ 1 $)")))
+    (is (thrown-with-msg? Exception #"dangling"  (formula/parse "(+ $ 1)")))
+    (is (thrown-with-msg? Exception #"one expression" (formula/parse "(+ 1 2) junk"))))
+  (testing "unparse round-trips $()"
+    (doseq [src ["$(str \"A\" $B1)"
+                 "(+ $A1 $(str \"A\" (+ $B1 $B2)))"
+                 "$(str \"A\" $(str \"B\" 1))"]]
+      (is (= (:form (formula/parse src))
+             (:form (formula/parse (formula/unparse (:form (formula/parse src)))))))))
+  (testing "shift-refs shifts $refs INSIDE $(…), never the $( itself"
+    (is (= "=$(str \"A\" $C2)" (formula/shift-refs "=$(str \"A\" $B1)" 1 1)))))
+
+(deftest dynamic-cell-refs
+  (let [s (mk)]
+    (put s "B1" "5") (put s "A5" "42")
+    (put s "C1" "=$(str \"A\" $B1)")
+    (is (= 42 (v s "C1")) "resolves the computed target")
+    (put s "A5" "43")
+    (is (= 43 (v s "C1")) "reacts to the TARGET's value")
+    (put s "A2" "7") (put s "B1" "2")
+    (is (= 7 (v s "C1")) "retargets when the address input changes")
+    (testing "stale-continuation regression: an edit of the ABANDONED target
+              must not leak into the retargeted formula (spike 07)"
+      (put s "A5" "99")
+      (is (= 7 (v s "C1"))))
+    (testing "blank target reads nil, then picks up a later fill"
+      (put s "G1" "=$(str \"Z\" 9)")
+      (is (nil? (v s "G1")))
+      (put s "Z9" "555")
+      (is (= 555 (v s "G1"))))))
+
+(deftest dynamic-range-refs
+  (let [s (mk)]
+    (put s "A1" "1") (put s "A2" "2") (put s "A3" "3") (put s "B2" "3")
+    (put s "D1" "=(sum $(str \"A1:A\" $B2))")
+    (is (= 6 (v s "D1")))
+    (put s "B2" "2")
+    (is (= 3 (v s "D1")) "extent shrinks with the input")
+    (put s "A1" "10")
+    (is (= 12 (v s "D1")) "reacts to a member edit")
+    (put s "B2" "4")
+    (is (= 15 (v s "D1")) "extent grows over a blank (A4 -> nil, filtered)")
+    (testing "a 1-cell RANGE keeps the vector shape ($A1:A1 parity)"
+      (put s "F1" "=(count $(str \"A1:A\" 1))")
+      (is (= 1 (v s "F1"))))))
+
+(deftest dynamic-dedupe
+  (testing "a dynamic target colliding with a static dep of the same body
+            (same node would be awaited twice — the Spindel glitch)"
+    (let [s (mk)]
+      (put s "A1" "10") (put s "A2" "2") (put s "B1" "1")
+      (put s "E1" "=(+ $A1 $(str \"A\" $B1))")     ; dyn target IS A1
+      (is (= 20 (v s "E1")))
+      (put s "A1" "30")
+      (is (= 60 (v s "E1")) "stays consistent across recomputes")
+      (put s "B1" "2")
+      (is (= 32 (v s "E1")) "and across retargets off the collision"))))
+
+(deftest dynamic-cycles
+  (testing "install-time: a recorded dynamic edge closes the loop -> rejected"
+    (let [s (mk)]
+      (put s "G2" "=$(str \"H\" 1)")
+      (v s "G2")                                   ; settle: records G2 -> H1
+      (is (thrown-with-msg? Exception #"circular" (put s "H1" "=$G2")))
+      (is (nil? (v s "H1")) "H1 not installed")))
+  (testing "runtime-only: an input edit flips the target INTO a cycle"
+    (let [s (mk)]
+      (put s "K1" "9")
+      (put s "I1" "=$(str \"J\" $K1)")             ; -> J9, harmless
+      (put s "J5" "=(if $I1 1 2)")                 ; J5 reads I1
+      (is (= 2 (v s "J5")))
+      (put s "K1" "5")                             ; I1 now targets J5 -> cycle
+      (is (:error (v s "I1")))
+      (is (re-find #"circular" (:error (v s "I1"))))
+      (is (true? (sh/settle! s)) "engine still drains — no stuck nodes")
+      (put s "K1" "9")                             ; flip back
+      (is (nil? (v s "I1")) "recovers (J9 blank)")
+      (is (= 2 (v s "J5")) "dependent recovers too")
+      (put s "J9" "77")
+      (is (= 77 (v s "I1")))))
+  (testing "a dynamic range containing its own reader is a cycle"
+    (let [s (mk)]
+      (put s "A1" "1")
+      (put s "A4" "=(sum $(str \"A1:A\" 9))")
+      (is (re-find #"circular" (:error (v s "A4")))))))
+
+(deftest dynamic-bad-addresses
+  (let [s (mk)]
+    (put s "L1" "=$(str \"nope\")")
+    (is (re-find #"bad dynamic address" (:error (v s "L1"))))
+    (put s "L2" "=$(+ 1 2)")
+    (is (re-find #"bad dynamic address" (:error (v s "L2"))) "a number is not an address")
+    (put s "L3" "=$(str \"A\" nil)")
+    (is (re-find #"bad dynamic address" (:error (v s "L3"))))
+    (put s "L4" "=(count $(str \"A1:ZZ\" 99999))")
+    (is (re-find #"too large" (:error (v s "L4"))) "range cap")))
+
+(deftest dynamic-nested
+  (let [s (mk)]
+    (put s "M1" "3") (put s "N3" "A") (put s "A1" "20")
+    (put s "M2" "=$(str $(str \"N\" $M1) 1)")      ; inner -> N3 = "A"; outer -> A1
+    (is (= 20 (v s "M2")))
+    (put s "N3" "B") (put s "B1" "9")
+    (is (= 9 (v s "M2")) "inner target's VALUE steers the outer address")))
+
+(deftest dynamic-style-rejected
+  (let [s (mk)]
+    (put s "A1" "10")
+    (is (thrown-with-msg? Exception #"style/format"
+                          (sh/set-style! s "A1" :bg "=$(str \"B\" 1)")))))
+
+(deftest dynamic-undo
+  (testing "undoing the edit that retargeted a dynamic formula retargets it back"
+    (let [s (mk)]
+      (put s "B1" "5") (put s "A5" "42") (put s "A2" "7")
+      (put s "C1" "=$(str \"A\" $B1)")
+      (is (= 42 (v s "C1")))
+      (put s "B1" "2") (sh/settle! s)
+      (is (= 7 (v s "C1")))
+      (sh/undo-step s {:undo [{:addr "B1" :prop :value :before "5" :after "2"}]
+                       :redo []} :undo)
+      (is (= 42 (v s "C1")) "back on A5 — and A5 edits reach it again")
+      (put s "A5" "1")
+      (is (= 1 (v s "C1"))))))
+
+(deftest dynamic-flatten
+  (testing "flatten carries $(…) along verbatim (the target is a runtime value)"
+    (let [s (mk)]
+      (put s "B1" "5")
+      (put s "P1" "=$(str \"A\" $B1)")
+      (put s "Q1" "=(+ $P1 1)")
+      (sh/settle! s)
+      ;; (+ x 1) simplifies to (inc x); the $(…) rides along opaque
+      (is (= "=(inc $(str \"A\" $B1))" (sh/flatten-src s "Q1" nil))))))
+
+(deftest dynamic-deps-exposed
+  (testing "sheet/dyn-deps reports the currently-resolved targets (graph view).
+            Spins are pull/lazy: edges are recorded when the body RUNS, so a
+            read (deref) must happen first — sh/value here, rendering in prod"
+    (let [s (mk)]
+      (put s "B1" "5") (put s "A5" "1")
+      (put s "C1" "=$(str \"A\" $B1)")
+      (v s "C1")
+      (is (= #{"A5"} (sh/dyn-deps s "C1")))
+      (is (= #{"B1"} (sh/deps s "C1")) "static deps stay the address inputs")
+      (is (= ["C1"] (sh/dyn-cells s)) "dyn formulas are flagged")
+      (put s "B1" "2") (v s "C1")
+      (is (= #{"A2"} (sh/dyn-deps s "C1")) "edges follow the retarget"))))
