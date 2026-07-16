@@ -872,6 +872,25 @@
               (signals! gen {:err "" :branchpanel false :goto base})))
           (signals! gen {:err ""}))))))
 
+(defn handle-delete-sheet
+  "Owner-only: delete the whole sheet (every branch, share and cell). Discards
+   ALL in-memory rooms for this sheet WITHOUT autosaving (else an unload would
+   resurrect the just-deleted cells — same trap as branch delete), then removes
+   it from the db, and $goto navigates the owner to another of their sheets (or
+   the root, which materialises a fresh default) since this one is gone."
+  [req]
+  (with-owner req
+    (fn [uid sheet-id _rec {:keys [sid]} gen]
+      ;; drop every loaded (sheet, branch) engine so none can re-persist on unload
+      (doseq [[room {:keys [sh]}] @sheets*
+              :when (= (first room) sheet-id)]
+        (sheet/close! sh)
+        (swap! sheets* dissoc room))
+      (db/delete-sheet! sheet-id)
+      (let [remaining (remove #{(second (store/split-id sheet-id))} (store/list-names uid))
+            goto      (if (seq remaining) (str "/?s=" (first remaining)) "/")]
+        (signals! gen {:err "" :propspanel false :goto goto})))))
+
 ;; --- merge (PR B): 3-way against the recorded fork point -------------------
 
 (defn- split-keys [s] (remove str/blank? (str/split (str s) #"\s+")))

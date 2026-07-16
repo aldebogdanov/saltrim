@@ -571,6 +571,30 @@
       (when (seq tx) (d/transact conn tx))
       (count eids))))
 
+(defn delete-sheet!
+  "Delete a sheet OUTRIGHT: retract every cellprop (all branches), every
+   `:branch` entity, every `:share` grant, and the `:sheet` entity itself.
+   Unlike `delete-branch!` this is the whole sheet across all branches — the id
+   stops being registered (`sheet-registered?` → false), so a later visit to it
+   404s / falls back like an unknown sheet. History retains the retracted datoms
+   under `:keep-history?` (no hard scrub). Returns the count of cellprops removed.
+   Refuses (returns nil) when the sheet isn't registered."
+  [sheet-id]
+  (when-let [sheid (d/q '[:find ?e . :in $ ?id :where [?e :sheet/id ?id]] @conn sheet-id)]
+    (let [cell-eids  (d/q '[:find [?c ...] :in $ ?sid
+                            :where [?sh :sheet/id ?sid] [?c :cellprop/sheet ?sh]]
+                          @conn sheet-id)
+          branch-eids (d/q '[:find [?b ...] :in $ ?sid
+                             :where [?sh :sheet/id ?sid] [?b :branch/sheet ?sh]]
+                           @conn sheet-id)
+          share-eids  (d/q '[:find [?s ...] :in $ ?sid
+                             :where [?sh :sheet/id ?sid] [?s :share/sheet ?sh]]
+                           @conn sheet-id)
+          tx (mapv (fn [e] [:db/retractEntity e])
+                   (concat cell-eids branch-eids share-eids [sheid]))]
+      (d/transact conn tx)
+      (count cell-eids))))
+
 (defn fork-branch!
   "Copy every cellprop + the branch scalars of (sheet-id, from) under branch
    `to`, recording the fork lineage (`:branch/parent` = from, `:branch/base-tx` =

@@ -54,6 +54,13 @@
   [id]
   (and (valid-id? id) (db/sheet-registered? id)))
 
+(defn delete!
+  "Delete a sheet outright (all branches, shares, content). Thin seam over
+   `db/delete-sheet!`. Returns the count of cellprops removed, or nil if it
+   wasn't registered."
+  [id]
+  (when (valid-id? id) (db/delete-sheet! id)))
+
 (defn- ne
   "A non-empty map as an edn string (for a :branch scalar blob), else nil so the
    diff-upsert skips it."
