@@ -24,7 +24,7 @@
             [uno.michelada.saltrim.web.state :refer [accessible-rec can-read? def-editor-of locked-by-other? now owner-of save-rec! session-view sessions* set-session-view! sheets* sid-re unload-sheet!]]
             [uno.michelada.saltrim.web.sse :refer [patch-inner! read-signals signals! sse sse-opts webkit-ua?]]
             [uno.michelada.saltrim.web.render :refer [border-prop border-props cells-html colhead-html denied-page graph-svg import-error-html import-report-html login-page merge-result-html meta-html page prop-allowed? render-cells rowhead-html self-html share-html]]
-            [uno.michelada.saltrim.web.collab :refer [broadcast! broadcast-deflib-except! broadcast-presence! broadcast-window! ensure-session! push-deflib! reap-session! render-window!]]))
+            [uno.michelada.saltrim.web.collab :refer [broadcast! broadcast-deflib-except! broadcast-presence! broadcast-window! ensure-session! evict-deleted! push-deflib! reap-session! render-window!]]))
 
 (def ^:private edit-lock (Object.))
 
@@ -875,9 +875,11 @@
 (defn handle-delete-sheet
   "Owner-only: delete the whole sheet (every branch, share and cell). Discards
    ALL in-memory rooms for this sheet WITHOUT autosaving (else an unload would
-   resurrect the just-deleted cells — same trap as branch delete), then removes
-   it from the db, and $goto navigates the owner to another of their sheets (or
-   the root, which materialises a fresh default) since this one is gone."
+   resurrect the just-deleted cells — same trap as branch delete), removes it
+   from the db, then EVICTS active collaborators (any branch): a toast + a $goto
+   to the root pushed on their streams before they're reaped, so they land on
+   their own root instead of a ghost sheet. The owner's own $goto (this one-shot
+   response) sends them to another of their sheets, or the root if none remain."
   [req]
   (with-owner req
     (fn [uid sheet-id _rec {:keys [sid]} gen]
@@ -887,6 +889,7 @@
         (sheet/close! sh)
         (swap! sheets* dissoc room))
       (db/delete-sheet! sheet-id)
+      (evict-deleted! sheet-id sid)      ; kick collaborators to their own root
       (let [remaining (remove #{(second (store/split-id sheet-id))} (store/list-names uid))
             goto      (if (seq remaining) (str "/?s=" (first remaining)) "/")]
         (signals! gen {:err "" :propspanel false :goto goto})))))
