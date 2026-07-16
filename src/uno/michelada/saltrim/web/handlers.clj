@@ -20,7 +20,7 @@
             [ring.middleware.multipart-params.byte-array :as mp-bytes]
             [starfederation.datastar.clojure.api :as d*]
             [starfederation.datastar.clojure.adapter.http-kit :as hk]
-            [uno.michelada.saltrim.web.geom :refer [in-window? pretty-err qparam url-decode url-encode window]]
+            [uno.michelada.saltrim.web.geom :refer [in-window? known-formula-error? pretty-err qparam url-decode url-encode window]]
             [uno.michelada.saltrim.web.state :refer [accessible-rec can-read? def-editor-of locked-by-other? now owner-of save-rec! session-view sessions* set-session-view! sheets* sid-re unload-sheet!]]
             [uno.michelada.saltrim.web.sse :refer [patch-inner! read-signals signals! sse sse-opts webkit-ua?]]
             [uno.michelada.saltrim.web.render :refer [border-prop border-props cells-html colhead-html denied-page graph-svg import-error-html import-report-html login-page merge-result-html meta-html page prop-allowed? render-cells rowhead-html self-html share-html]]
@@ -30,13 +30,16 @@
 
 (defn- log-err!
   "Server-side CLI visibility for a handler failure — the toast reaches only
-   the ONE requesting browser and then vanishes. Expected, user-level errors
-   (ex-info: bad input, locks, cycles) log a single line; any other class is a
-   bug, so its stack goes to the CLI too."
+   the ONE requesting browser and then vanishes. A KNOWN user-caused failure
+   (bad formula, cycle, lock, bad address — see `known-formula-error?`) logs
+   at WARN: the sheet did its job, one person hit an expected error. Anything
+   else is unclassified — treated as a possible bug — so it logs at ERR with
+   a stack trace."
   [where e]
-  (u/log "ERR" where "—" (.getMessage ^Throwable e))
-  (when-not (instance? clojure.lang.ExceptionInfo e)
-    (.printStackTrace ^Throwable e)))
+  (if (known-formula-error? e)
+    (u/log "WARN" where "—" (.getMessage ^Throwable e))
+    (do (u/log "ERR" where "—" (.getMessage ^Throwable e))
+        (.printStackTrace ^Throwable e))))
 
 (defn- def-errs-msg [errors]
   (if (seq errors)
