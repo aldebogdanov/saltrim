@@ -360,3 +360,32 @@ on every save; before a bare `clojure -M:web` on a fresh checkout, run
 Architecture and engine internals are documented in
 [`SPEC.md`](SPEC.md); contributor conventions and gotchas live in
 [`CLAUDE.md`](CLAUDE.md).
+
+## Acknowledgments
+
+SaltRim stands on the work of many open-source authors and communities. Thank you.
+
+**Language & runtime**
+
+- [Clojure](https://clojure.org) — Rich Hickey and the Clojure core team
+- [ClojureScript](https://clojurescript.org) — the compiler that builds the browser client
+
+**Reactive engine & persistence**
+
+- [Spindel](https://github.com/replikativ/spindel) (reactive signal engine), [Datahike](https://github.com/replikativ/datahike) (durable Datalog store), and [konserve-jdbc](https://github.com/replikativ/konserve-jdbc) (JDBC storage layer) — by [replikativ](https://github.com/replikativ)
+- [SCI](https://github.com/babashka/sci) — the sandboxed Clojure interpreter behind formulas, by [Michiel Borkent (@borkdude)](https://github.com/borkdude)
+- [next.jdbc](https://github.com/seancorfield/next-jdbc) — JDBC access, by [Sean Corfield](https://github.com/seancorfield)
+- [H2](https://h2database.com) and [YugabyteDB](https://www.yugabyte.com) — the SQL backends
+
+**Web stack**
+
+- [Datastar](https://data-star.dev) — the hypermedia/SSE UI framework, by Delaney Gillilan and the Datastar team (including the official Clojure SDK)
+- [http-kit](https://github.com/http-kit/http-kit) — async HTTP server
+- [Ring](https://github.com/ring-clojure/ring) and [Hiccup](https://github.com/weavejester/hiccup) — by [James Reeves (@weavejester)](https://github.com/weavejester)
+- [jsonista](https://github.com/metosin/jsonista) — JSON, by [Metosin](https://github.com/metosin)
+- [mount](https://github.com/tolitius/mount) — component lifecycle, by [Anatoly Polinsky (@tolitius)](https://github.com/tolitius)
+
+**Interop & tooling**
+
+- [Apache POI](https://poi.apache.org) and [Apache Log4j](https://logging.apache.org/log4j/) — the Apache Software Foundation
+- [tools.build](https://github.com/clojure/tools.build), [test-runner](https://github.com/cognitect-labs/test-runner), [nREPL](https://github.com/nrepl/nrepl), and [tools.namespace](https://github.com/clojure/tools.namespace) — build, test, and REPL tooling
