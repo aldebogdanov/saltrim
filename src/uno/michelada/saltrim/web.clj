@@ -43,14 +43,25 @@
                                                               "Cache-Control" "max-age=86400"}
                                         :body (io/input-stream r)}
                                        {:status 404 :body "no opengraph image"})
-    ;; both the explicit link (/favicon.png) and the browser's automatic
-    ;; /favicon.ico request (covers pages without the <link>, e.g. login)
-    ([:get "/favicon.png"] [:get "/favicon.ico"])
-    (if-let [r (io/resource "favicon.png")]
-      {:status 200 :headers {"Content-Type" "image/png"
-                             "Cache-Control" "max-age=86400"}
-       :body (io/input-stream r)}                         ; binary — not slurp
-      {:status 404 :body "no favicon"})
+    ;; explicit <link rel="icon" type="image/png">
+    [:get "/favicon.png"] (if-let [r (io/resource "favicon.png")]
+                            {:status 200 :headers {"Content-Type" "image/png"
+                                                   "Cache-Control" "max-age=86400"}
+                             :body (io/input-stream r)}    ; binary — not slurp
+                            {:status 404 :body "no favicon"})
+    ;; multi-res .ico: the browser's automatic /favicon.ico request (covers
+    ;; pages without the <link>, e.g. login) plus the explicit <link> below
+    [:get "/favicon.ico"] (if-let [r (io/resource "favicon.ico")]
+                            {:status 200 :headers {"Content-Type" "image/x-icon"
+                                                   "Cache-Control" "max-age=86400"}
+                             :body (io/input-stream r)}
+                            {:status 404 :body "no favicon"})
+    ;; iOS/iPadOS home-screen + bookmark icon
+    [:get "/apple-touch-icon.png"] (if-let [r (io/resource "apple-touch-icon.png")]
+                                     {:status 200 :headers {"Content-Type" "image/png"
+                                                            "Cache-Control" "max-age=86400"}
+                                      :body (io/input-stream r)}
+                                     {:status 404 :body "no icon"})
     [:get "/stream"]         (handle-stream req)
     [:get "/export.xlsx"]    (handle-export req)
     [:post "/import"]        (handle-import req)

@@ -126,8 +126,8 @@ connects konserve stores generically). **Spindel stays pinned at
 0.1.15** — 0.1.23 breaks structural rebuild (see TECHDEBT.md).
 
 Namespaces are rooted at `uno.michelada.saltrim.*` under
-`src/uno/michelada/saltrim/`. Coordinate `uno.michelada/saltrim`; repo lives in
-the `michelada-uno` GitHub org. **Releases are GitHub-only (no Clojars)**: push a
+`src/uno/michelada/saltrim/`. Coordinate `uno.michelada/saltrim`; repo lives at
+`github.com/aldebogdanov/saltrim`. **Releases are GitHub-only (no Clojars)**: push a
 `v*` tag and `.github/workflows/release.yml` tests, builds the uberjar, and
 attaches it to a GitHub Release. See SPEC.md "Build & release".
 
