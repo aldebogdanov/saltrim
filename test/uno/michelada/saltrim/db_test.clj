@@ -311,3 +311,22 @@
   (testing "main can't be deleted"
     (is (nil? (db/delete-branch! S "main")))
     (is (db/branch-exists? S "main"))))
+
+(deftest delete-sheet-removes-everything
+  (db/upsert-user! {:uid "dev-ann" :name "Ann"})
+  (db/ensure-sheet! S "dev-ann" "s")
+  (db/ensure-sheet! "dev-ann__other" "dev-ann" "other")
+  (db/save-doc! S {"A1" {:value "1"} "B1" {:value "2"}} "dev-ann")
+  (db/fork-branch! S "main" "exp")
+  (db/save-doc! S "exp" {"A1" {:value "x"}} "dev-ann")
+  (db/set-share! S "dev-bob" :user :read-write)
+  (testing "delete drops all branches, shares and the registration"
+    (let [removed (db/delete-sheet! S)]
+      (is (= 3 removed) "all cellprops across branches removed (2 main + 1 exp)")
+      (is (not (db/sheet-registered? S)))
+      (is (empty? (db/sheet-doc S "main")))
+      (is (empty? (db/sheet-doc S "exp")))
+      (is (empty? (db/sheet-grants S)) "shares gone")
+      (is (= ["dev-ann__other"] (db/sheets-of-owner "dev-ann")) "only the other sheet remains")))
+  (testing "deleting an unregistered sheet is a no-op returning nil"
+    (is (nil? (db/delete-sheet! "dev-ann__ghost")))))

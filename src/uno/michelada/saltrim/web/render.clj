@@ -536,8 +536,10 @@
   "Owner-only Sheet properties modal, toggled by $propspanel. Today: the sheet's
    DEFAULT column width / row height (px) — the size of any unsized column/row.
    Built as a labelled grid so more sheet-wide settings slot in as new rows.
-   $pcw/$prh are server-seeded with the current values; Apply posts /props."
-  []
+   $pcw/$prh are server-seeded with the current values; Apply posts /props.
+   Also carries an owner-only danger zone: a two-step delete of the whole sheet
+   ($delconfirm arms it) that posts /delete-sheet."
+  [sname]
   (let [p     "margin:.2rem 0 .7rem;font:13px sans-serif;color:var(--muted);"
         lbl   "font:13px sans-serif;color:var(--fg);align-self:center;"
         num   "font:13px monospace;padding:5px 6px;border:1px solid var(--line);border-radius:var(--radius);background:var(--panel);width:6rem;"]
@@ -564,7 +566,23 @@
                       :data-bind:prh "" :style num
                       :data-on:keydown "evt.key==='Enter' && @post('/props')"}]]
             [:div {:style "margin-top:1rem;text-align:right;"}
-             [:button {:class "btn primary" :data-on:click "@post('/props'), $propspanel=false"} "Apply"]]]]))))
+             [:button {:class "btn primary" :data-on:click "@post('/props'), $propspanel=false"} "Apply"]]
+            ;; danger zone: delete the whole sheet (all branches/cells/shares).
+            ;; Two-step — $delconfirm arms an explicit confirm before /delete-sheet.
+            [:div {:style (str "margin-top:1.4rem;border-top:1px solid var(--line);padding-top:.9rem;")}
+             [:div {:style "font:600 13px sans-serif;color:#c0392b;margin-bottom:.35rem;"} "Danger zone"]
+             [:div {:data-show "!$delconfirm"}
+              [:p {:style p} "Delete this sheet and everything in it — all branches, cells and shares. This can't be undone."]
+              [:button {:class "btn" :style "border-color:#c0392b;color:#c0392b;"
+                        :data-on:click "$delconfirm=true"} "Delete sheet…"]]
+             [:div {:data-show "$delconfirm"}
+              [:p {:style p} "Permanently delete " [:b (str "“" sname "”")]
+               "? Every branch, cell and share is removed for good."]
+              [:div {:style "display:flex;gap:.5rem;justify-content:flex-end;"}
+               [:button {:class "btn" :data-on:click "$delconfirm=false"} "Cancel"]
+               [:button {:class "btn" :style "background:#c0392b;border-color:#c0392b;color:#fff;"
+                         :data-on:click "@post('/delete-sheet'), $delconfirm=false, $propspanel=false"}
+                "Delete permanently"]]]]]]))))
 
 (defn- import-html
   "Import-.xlsx modal, toggled by $importpanel. The file can't ride Datastar's
@@ -1070,6 +1088,7 @@
              :data-signals:graphpanel "false"
              ;; sheet properties (⚙ modal, owner-only) — seeded with current defaults
              :data-signals:propspanel "false"
+             :data-signals:delconfirm "false"    ; delete-sheet danger zone armed?
              :data-signals:pcw (str (sheet/default-col-w sh))
              :data-signals:prh (str (sheet/default-row-h sh))
              ;; the page IS the window: a flex column exactly 100vh tall, so the
@@ -1086,7 +1105,7 @@
       (h/raw (help-html))
       (when-not asof? (h/raw (defs-html storage-id)))
       (when-not asof? (h/raw (bigedit-html)))
-      (when (and owner? (not asof?)) (h/raw (props-html)))
+      (when (and owner? (not asof?)) (h/raw (props-html sname)))
       (when-not asof? (h/raw (import-html)))
       (when-not asof? (history-modal storage-id sname branch revisions link-token owner?))
       (when-not asof? (graph-modal-html))

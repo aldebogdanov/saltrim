@@ -9,7 +9,7 @@
             [starfederation.datastar.clojure.api :as d*]
             [uno.michelada.saltrim.web.geom :refer [in-window? window]]
             [uno.michelada.saltrim.web.state :refer [SESSION-TTL-MS color-for now sessions* sessions-on sheet-rec sid-re touch! unload-sheet!]]
-            [uno.michelada.saltrim.web.sse :refer [patch-inner! webkit-flush!]]
+            [uno.michelada.saltrim.web.sse :refer [patch-inner! signals! webkit-flush!]]
             [uno.michelada.saltrim.web.render :refer [cells-html colhead-html deflib-html meta-html peers-html render-cells rowhead-html self-html]]))
 
 (defn- register-session! [sid sheet-id branch uid token]
@@ -77,6 +77,23 @@
           (try (d*/lock-sse! (:gen s) (d*/patch-elements! (:gen s) (render-cells sh vis (:view s))))
                (when (:webkit? s) (webkit-flush! sid))
                (catch Throwable _ (reap-session! sid))))))))
+
+(defn evict-deleted!
+  "The owner just deleted `sheet-id` outright: push a toast + a `$goto` to the
+   root onto every OTHER session viewing it (any branch), then reap them — so
+   collaborators land on their own root instead of stranded on a ghost sheet
+   whose next write would 403. `except-sid` (the acting owner) is skipped; it
+   navigates via its own one-shot response. The `$goto` write goes out before the
+   stream is closed, so the client still receives it and navigates. Call AFTER
+   the room is dropped from `sheets*` so a reaped last session can't re-save it."
+  [sheet-id except-sid]
+  (doseq [[sid s] @sessions*]
+    (when (and (not= sid except-sid) (= sheet-id (:sheet s)) (:gen s))
+      (try (d*/lock-sse! (:gen s)
+             (signals! (:gen s) {:err "this sheet was deleted by its owner" :goto "/"}))
+           (when (:webkit? s) (webkit-flush! sid))
+           (catch Throwable _ nil))
+      (reap-session! sid))))
 
 ;; --- presence (collaborator cursors + edit locks) ----------------------
 
