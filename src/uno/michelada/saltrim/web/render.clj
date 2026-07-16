@@ -474,7 +474,7 @@
            [:a {:href "https://github.com/aldebogdanov/saltrim" :target "_blank" :rel "noopener"
                 :style "color:inherit;"} "GitHub"]
            " · © 2026 "
-           [:a {:href "https://github.com/aldebogdanov/saltrim" :target "_blank" :rel "noopener"
+           [:a {:href "mailto:sasha_bogdanov_dev@yahoo.com"
                 :style "color:inherit;"} "Aleksandr Bogdanov"]
            ", MIT License"]]])))
 
