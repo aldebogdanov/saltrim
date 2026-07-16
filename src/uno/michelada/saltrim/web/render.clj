@@ -559,9 +559,12 @@
              [:button {:class "btn primary" :data-on:click "@post('/props'), $propspanel=false"} "Apply"]]]]))))
 
 (defn- import-html
-  "Import-.xlsx modal, toggled by $importpanel. A REAL multipart form (file
-   bytes can't ride Datastar JSON signals): submitting navigates to /import's
-   HTML report page. Each workbook tab becomes a new sheet owned by the user."
+  "Import-.xlsx modal, toggled by $importpanel. The file can't ride Datastar's
+   JSON signals, so the form posts with `contentType:'form'` — Datastar sends the
+   multipart FormData verbatim (and pre-empts the native submit) and /import
+   answers over SSE, so the report lands in #importreport instead of navigating
+   away. $imported swaps the form out for that report; re-opening resets it.
+   Each workbook tab becomes a new sheet owned by the user."
   []
   (let [p "margin:.2rem 0 .7rem;font:13px sans-serif;color:var(--muted);"
         inp "font:13px monospace;padding:5px 6px;border:1px solid var(--line);border-radius:var(--radius);background:var(--panel);"]
@@ -577,71 +580,97 @@
             [:div {:style "display:flex;align-items:center;margin-bottom:.3rem;"}
              [:h2 {:style "margin:0;font:600 18px sans-serif;flex:1;"} "Import Excel workbook"]
              [:button {:class "btn" :data-on:click "$importpanel=false" :title "close"} "✕"]]
-            [:p {:style p} "Each workbook tab becomes a " [:b "new sheet"] " of yours. Formulas are "
-             [:b "translated"] " to Clojure where possible; anything untranslatable keeps its "
-             "computed value with the original formula as a comment. You'll get a full report."]
-            [:form {:method "post" :action "/import" :enctype "multipart/form-data"
-                    :style "display:flex;flex-direction:column;gap:.6rem;"}
-             [:input {:type "file" :name "file" :accept ".xlsx" :required true :style inp}]
-             [:input {:type "text" :name "name" :placeholder "sheet name (optional — defaults to the file name)"
-                      :maxlength "32" :pattern "[A-Za-z0-9-]*" :style inp}]
-             [:div {:style "text-align:right;"}
-              [:button {:type "submit" :class "btn primary"} "import"]]]]]))))
+            [:div {:data-show "!$imported"}
+             [:p {:style p} "Each workbook tab becomes a " [:b "new sheet"] " of yours. Formulas are "
+              [:b "translated"] " to Clojure where possible; anything untranslatable keeps its "
+              "computed value with the original formula as a comment. You'll get a full report."]
+             ;; data-on:submit on a <form> is preventDefault-ed by Datastar, so the
+             ;; native navigation never happens. datastar-fetch is dispatched on
+             ;; document for EVERY @post, hence the evt.detail.el===el filter; driving
+             ;; $importing off the lifecycle (not the submit) means a failed
+             ;; checkValidity — which returns before any fetch — can't wedge it true.
+             [:form {:method "post" :action "/import" :enctype "multipart/form-data"
+                     :data-on:submit "@post('/import', {contentType:'form'})"
+                     :data-on:datastar-fetch
+                     "evt.detail.el===el && ($importing = evt.detail.type==='started')"
+                     :style "display:flex;flex-direction:column;gap:.6rem;"}
+              [:input {:type "file" :name "file" :accept ".xlsx" :required true :style inp}]
+              [:input {:type "text" :name "name" :placeholder "sheet name (optional — defaults to the file name)"
+                       :maxlength "32" :pattern "[A-Za-z0-9-]*" :style inp}]
+              [:div {:style "text-align:right;"}
+               [:button {:type "submit" :class "btn primary" :data-attr:disabled "$importing"}
+                [:span {:data-text "$importing ? 'importing…' : 'import'"} "import"]]]]]
+            [:div {:id "importreport"}]]]))))
 
-(def ^:private report-page-css
-  (str "body{font:14px sans-serif;margin:2rem auto;max-width:44rem;padding:0 1rem;"
-       "background:var(--bg,#fff);color:var(--fg,#222);}"
-       "table{border-collapse:collapse;width:100%;margin:.4rem 0 1rem;}"
-       "th,td{border:1px solid #ccc;padding:.3rem .5rem;font-size:13px;text-align:left;}"
-       "th{background:#f2f2f2;}code{font-family:monospace;background:#f6f6f6;padding:0 .2rem;}"
-       "a.btn{display:inline-block;border:1px solid #888;border-radius:6px;padding:.3rem .7rem;"
-       "text-decoration:none;color:inherit;margin:.2rem .4rem 0 0;}"))
+;; The report's tables live inside the import modal, so they inherit the app's
+;; theme vars — only the table/code chrome needs styling, scoped to #importreport
+;; so it can't leak into the grid.
+(def ^:private report-css
+  (str "#importreport table{border-collapse:collapse;width:100%;margin:.4rem 0 .8rem;}"
+       "#importreport th,#importreport td{border:1px solid var(--grid);padding:.3rem .5rem;"
+       "font:12px sans-serif;text-align:left;}"
+       "#importreport th{background:var(--panel);}"
+       "#importreport code{font-family:monospace;background:var(--panel);padding:0 .2rem;}"
+       "#importreport h3{margin:.7rem 0 .2rem;font:600 13px sans-serif;}"
+       "#importreport p{margin:.2rem 0 .5rem;font:13px sans-serif;}"))
 
 (defn import-error-html
-  "Standalone error page for a failed /import."
+  "Inner #importreport fragment for a failed /import."
   [msg]
   (str (h/html
-        [:html [:head [:title "Import failed — SaltRim"] [:style (h/raw report-page-css)]]
-         [:body
-          [:h1 "Import failed"]
-          [:p [:code (str msg)]]
-          [:a {:class "btn" :href "/"} "← back"]]])))
+        [:div {:id "importreport"}
+         [:style (h/raw report-css)]
+         [:p {:style "color:#c0392b;font:600 13px sans-serif;margin:.2rem 0 .4rem;"} "Import failed"]
+         [:p [:code (str msg)]]])))
 
 (defn import-report-html
-  "Standalone report page for a successful /import: per sheet a link + counts +
-   the audit lists (untranslated fallbacks, verify-demotions, dropped masks)."
+  "Inner #importreport fragment for a successful /import: per sheet a link +
+   counts + the audit lists (untranslated fallbacks, verify-demotions, dropped
+   masks). Shown in the import modal — $imported swaps out the upload form."
   [{:keys [sheets]}]
   (str (h/html
-        [:html
-         [:head [:title "Import report — SaltRim"] [:style (h/raw report-page-css)]]
-         [:body
-          [:h1 "Imported " (count sheets) (if (= 1 (count sheets)) " sheet" " sheets")]
-          (for [{:keys [sname tab cells formulas fallbacks demoted masks-dropped]} sheets]
-            [:div
-             [:h2 [:a {:href (str "/?s=" sname)} sname]
-              [:span {:style "font:13px sans-serif;color:#888;"} "  (tab “" tab "”)"]]
-             [:p cells " cells · " formulas " formulas ("
-              (- formulas (count fallbacks) (count demoted)) " translated live, "
-              (count fallbacks) " untranslated, " (count demoted) " demoted to values)"]
-             (when (seq fallbacks)
-               (list [:h3 "Untranslated — imported as their computed value"]
-                     [:table
-                      [:tr [:th "cell"] [:th "Excel formula"] [:th "why"]]
-                      (for [{:keys [addr formula reason]} fallbacks]
-                        [:tr [:td addr] [:td [:code "=" formula]] [:td reason]])]))
-             (when (seq demoted)
-               (list [:h3 "Demoted — translated but disagreed with Excel's value"]
-                     [:table
-                      [:tr [:th "cell"] [:th "Excel formula"] [:th "kept value"]]
-                      (for [{:keys [addr formula cached]} demoted]
-                        [:tr [:td addr] [:td [:code "=" formula]] [:td (str cached)]])]))
-             (when (seq masks-dropped)
-               [:p "Number formats not carried over: "
-                (interpose ", " (map (fn [m] [:code m]) masks-dropped))])])
-          [:p "Untranslated and demoted cells keep the original Excel formula as the cell's "
-           [:code "comment"] " (the corner flag on the cell; hover to read it, or open it in the style row)."]
+        [:div {:id "importreport"}
+         [:style (h/raw report-css)]
+         [:h3 {:style "margin-top:0;"}
+          "Imported " (count sheets) (if (= 1 (count sheets)) " sheet" " sheets")]
+         (for [{:keys [sname tab cells formulas fallbacks demoted masks-dropped]} sheets]
+           ;; xlsx's :formulas counts only the SUCCESSFULLY translated ones (the
+           ;; fallback path never sets :original), so the whole-sheet total is
+           ;; :formulas + fallbacks, and only the demotions come back out of the
+           ;; live count. Subtracting fallbacks here too double-counted them —
+           ;; it under-reported "translated live", and went negative once the
+           ;; demotions overlapped.
+           [:div
+            [:h3 [:a {:href (str "/?s=" sname)} sname]
+             [:span {:style "font:12px sans-serif;color:var(--muted);font-weight:400;"}
+              "  (tab “" tab "”)"]]
+            [:p cells " cells · " (+ formulas (count fallbacks)) " formulas ("
+             (- formulas (count demoted)) " translated live, "
+             (count fallbacks) " untranslated, " (count demoted) " demoted to values)"]
+            (when (seq fallbacks)
+              (list [:h3 "Untranslated — imported as their computed value"]
+                    [:table
+                     [:tr [:th "cell"] [:th "Excel formula"] [:th "why"]]
+                     (for [{:keys [addr formula reason]} fallbacks]
+                       [:tr [:td addr] [:td [:code "=" formula]] [:td reason]])]))
+            (when (seq demoted)
+              (list [:h3 "Demoted — translated but disagreed with Excel's value"]
+                    [:table
+                     [:tr [:th "cell"] [:th "Excel formula"] [:th "kept value"]]
+                     (for [{:keys [addr formula cached]} demoted]
+                       [:tr [:td addr] [:td [:code "=" formula]] [:td (str cached)]])]))
+            (when (seq masks-dropped)
+              [:p "Number formats not carried over: "
+               (interpose ", " (map (fn [m] [:code m]) masks-dropped))])])
+         [:p {:style "color:var(--muted);"}
+          "Untranslated and demoted cells keep the original Excel formula as the cell's "
+          [:code "comment"] " (the corner flag on the cell; hover to read it, or open it in the style row)."]
+         [:div {:style "text-align:right;"}
+          [:button {:class "btn" :data-on:click "$imported=false"
+                    :style "margin:.2rem .4rem 0 0;"} "import another"]
           (for [{:keys [sname]} sheets]
-            [:a {:class "btn" :href (str "/?s=" sname)} "open " sname])]])))
+            [:a {:class "btn primary" :href (str "/?s=" sname)
+                 :style "margin:.2rem 0 0 .4rem;text-decoration:none;"} "open " sname])]])))
 
 (defn- sheet-picker
   "Dropdown for switching sheets, grouped into 'your sheets' (👤) and 'shared
@@ -1023,8 +1052,11 @@
              :data-signals:big "''"
              ;; flatten (⧉): strict = only error-behavior-preserving simplify rules
              :data-signals:flatstrict "false"
-             ;; import-.xlsx modal
+             ;; import-.xlsx modal: $importing = upload in flight (disables the
+             ;; button), $imported = report replaces the form until re-opened
              :data-signals:importpanel "false"
+             :data-signals:importing "false"
+             :data-signals:imported "false"
              :data-signals:help "false"
              ;; dependency-graph view (🕸 modal) — server renders #graphview on open
              :data-signals:graphpanel "false"
@@ -1089,8 +1121,9 @@
                              "styling only. No live formulas or reactivity (each formula's "
                              "source is kept as a cell comment).")}
              "⬇ xlsx"])
-          ;; import: opens the multipart-form modal — each tab becomes a NEW sheet
-          [:button {:class "btn" :data-on:click "$importpanel=true"
+          ;; import: opens the multipart-form modal — each tab becomes a NEW sheet.
+          ;; Re-opening clears any previous run's report (back to the form).
+          [:button {:class "btn" :data-on:click "$imported=false, $importpanel=true"
                     :title (str "Import an Excel workbook (.xlsx) — each tab becomes a new "
                                 "sheet of yours, formulas translated to Clojure where possible "
                                 "(the rest keep their computed values, commented).")}
