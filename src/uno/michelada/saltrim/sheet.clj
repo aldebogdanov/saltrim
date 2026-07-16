@@ -409,13 +409,21 @@
   "Serializable source of the sheet: {addr {:value raw :style {prop raw}}}.
    Per-cell PROPERTY map; :style holds presentational source (each a reactive
    property compiled from its source). :format slots in the same way later.
-   Runtime spins are rebuilt from this; we never serialize the graph."
+   The UNION of value cells and styled cells — a styled BLANK cell serializes
+   as {:style {…}} with no :value (each prop is independent in the db, and
+   `load-document!` loads styles regardless of value), so styling an empty
+   cell survives save/reload/reshape. Runtime spins are rebuilt from this; we
+   never serialize the graph."
   [{:keys [meta] :as sheet}]
-  (let [st (document-styles sheet)]
-    (into {} (map (fn [[a m]]
-                    [a (cond-> {:value (:raw m)}
-                         (seq (get st a)) (assoc :style (get st a)))]))
-          @meta)))
+  (let [st (document-styles sheet)
+        m  @meta]
+    (into {} (map (fn [a]
+                    (let [raw (get-in m [a :raw])
+                          sty (get st a)]
+                      [a (cond-> {}
+                           raw       (assoc :value raw)
+                           (seq sty) (assoc :style sty))])))
+          (into (set (keys m)) (keys st)))))
 
 (defn load-document!
   "Rebuild a sheet's cells (and their style props) from a document map.

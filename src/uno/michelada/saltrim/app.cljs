@@ -524,6 +524,11 @@
  js/document "datastar-fetch"
  (fn [e]
    (let [d (.-detail e)]
+     ;; surface exhausted-retry failures in the console for ANY element —
+     ;; Datastar retries silently, so without this a dead request is invisible
+     ;; outside the network tab (the server can't log what never reached it)
+     (when (and d (= (.-type d) "retries-failed") (not @unloading?))
+       (.error js/console "saltrim: request kept failing (retries exhausted)" d))
      (when (and d (.-el d) (= (.. d -el -id) "streamer"))
        (case (.-type d)
          "started"        (reset! stream-attempt 0)

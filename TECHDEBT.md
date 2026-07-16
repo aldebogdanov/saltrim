@@ -374,8 +374,11 @@ Deferred (all land as commented values today, so sheets stay correct):
   demotes any cell where this changes the result.
 - **`.xls` (BIFF8 legacy)** — XSSF only; HSSF would need the same walk over
   `HSSFWorkbook`.
-- **Styles-only blank cells are dropped** (`load-document!` skips cells with
-  no value — matches how SaltRim itself persists today).
+- **Styles-only blank cells are dropped at IMPORT** (`read-tab`'s
+  `:when (:value m)` skips them when reading the workbook). NOTE: SaltRim's own
+  persistence now keeps styled blank cells (`sheet/document` serializes the
+  union of value + styled cells — fixed after they silently vanished on
+  reload), so lifting this is purely an importer change now.
 - **Trailing spaces in text cells** are lost to `parse-literal`'s trim (the
   apostrophe escape preserves leading ones).
 
