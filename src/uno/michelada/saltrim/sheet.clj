@@ -313,6 +313,39 @@
                      [a (into {} (map (fn [[p e]] [p (:raw e)])) props)])))
         @styles))
 
+;; --- merged cells -------------------------------------------------------
+;;
+;; A cell can "swallow" its neighbours into ONE big cell keeping the top-left
+;; (anchor) address. It rides the style/meta plumbing: a `:merge` prop on the
+;; anchor holding an "<rows>x<cols>" span (so persistence, branching, 3-way
+;; merge, as-of history and per-user undo all come for free — see the meta-prop
+;; note in web.render). Purely PRESENTATIONAL: the covered cells keep their
+;; values/formulas (nothing is destroyed), they are just not rendered — the
+;; anchor is drawn spanning the whole rectangle. Unmerge (or undo) removes the
+;; prop and the cells reappear unchanged.
+
+(def merge-prop
+  "The style/meta prop naming a merge span on the anchor cell (\"<rows>x<cols>\")."
+  :merge)
+
+(defn parse-span
+  "\"<rows>x<cols>\" -> [rows cols] (both positive), or nil for a blank/garbage/
+   1×1 span (a 1×1 merge is a no-op, so it never counts as a merge)."
+  [s]
+  (when-let [[_ r c] (re-matches #"(\d+)x(\d+)" (str s))]
+    (let [r (parse-long r) c (parse-long c)]
+      (when (and r c (pos? r) (pos? c) (< 1 (* r c))) [r c]))))
+
+(defn merge-spans
+  "{anchor-addr [rows cols]} for every cell carrying a valid `:merge` span. The
+   source of truth for which cells are merged (a covered cell has no span of its
+   own — only the anchor does)."
+  [{:keys [styles]}]
+  (into {} (keep (fn [[a props]]
+                   (when-let [rc (parse-span (get-in props [merge-prop :raw]))]
+                     [a rc])))
+        @styles))
+
 ;; --- undo / redo (selective; the per-session stack lives in web) ---------
 ;;
 ;; An undo ENTRY = {:addr :prop :before :after} where `prop` is :value or a style
@@ -345,7 +378,9 @@
    A STRUCTURAL entry `{:op :insert|:delete :axis :at}` (a whole row/col
    insert/delete) is always applied — never superseded — by running the inverse
    op on undo / the op itself on redo; it reports `:affected :all` so the caller
-   re-renders the whole window."
+   re-renders the whole window. A `:merge`-prop entry (merge/unmerge) also reports
+   `:affected :all` — the covered set + the anchor's footprint change, which a
+   cell-level patch can't express."
   [sheet stacks dir]
   (let [[from to pick chk] (if (= dir :undo) [:undo :redo :before :after]
                                [:redo :undo :after :before])]
@@ -363,8 +398,10 @@
               {:stacks (assoc stacks from fs' to (conj ts entry)) :affected :all})
 
             (= (src-of sheet (:addr entry) (:prop entry)) (chk entry))
-            {:stacks (assoc stacks from fs' to (conj ts entry))
-             :affected (apply-prop! sheet (:addr entry) (:prop entry) (pick entry))}
+            (let [aff (apply-prop! sheet (:addr entry) (:prop entry) (pick entry))]
+              {:stacks (assoc stacks from fs' to (conj ts entry))
+               ;; a merge/unmerge re-renders the whole window (coverage changes)
+               :affected (if (= (:prop entry) merge-prop) :all aff)})
 
             :else (recur fs' ts)))))))
 

@@ -432,3 +432,13 @@ inputs + current target), runtime cycle guard, dashed graph edges. Deferred:
 - **Pre-existing quirk inherited:** `shift-refs`'s text regexes rewrite
   `$A1`-shaped tokens inside STRING literals too (`=(str "owe $A1")` shifts
   on paste) — applies inside `$(…)` bodies the same way.
+- **Merged cells — partial overlap not rejected.** `/mergecells` clears any
+  `:merge` span whose anchor sits INSIDE the new rectangle, but a pre-existing
+  merge anchored OUTSIDE the rectangle that only partially overlaps it is left
+  as-is (both spans coexist; `geom/covered` just unions them). Rare — a merge is
+  usually drawn over free cells — but a "reject / auto-expand to whole blocks"
+  policy would be cleaner. Also: `copy`/`paste` carries the `:merge` prop like
+  any style, so pasting a merged anchor stamps its span at the target (usually
+  what you want) but doesn't clear whatever it now overlaps; and a merge doesn't
+  shift on row/col `insert` (the span is a plain "RxC" string, not ref-rewritten)
+  so a line inserted THROUGH a block doesn't grow it.

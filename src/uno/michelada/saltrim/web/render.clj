@@ -16,7 +16,7 @@
             [uno.michelada.saltrim.store :as store]
             [uno.michelada.saltrim.version :as version]
             [uno.michelada.saltrim.constants :refer [CW RH GUT HDR OVER BAR]]
-            [uno.michelada.saltrim.web.geom :refer [axis-x axis-y col-w in-window? rgba row-h total-px url-decode url-encode view-base window]]
+            [uno.michelada.saltrim.web.geom :refer [axis-x axis-y col-w covered in-window? rgba row-h span-px total-px url-decode url-encode view-base window]]
             [uno.michelada.saltrim.web.state :refer [def-editor-of owner-of session-view sessions* sheets*]]))
 
 (def no-autofill
@@ -129,28 +129,39 @@
   "Minimal per-cell HTML: a DISPLAY div (not an input), positioned WINDOW-RELATIVE
    to (cbase,rbase). data-raw carries the source for the floating editor. A single
    click selects; Enter/double-click opens the editor (handled in /app.js). No
-   per-cell input -> no 500 live <input>s."
-  [sh a ci ri cbase rbase]
+   per-cell input -> no 500 live <input>s. `span` = [rows cols] when this cell is
+   a merge ANCHOR — it is then drawn spanning the whole rectangle (its covered
+   neighbours are simply not rendered)."
+  [sh a ci ri cbase rbase span]
   (let [disp (display sh a)
         raw  (or (sheet/raw sh a) disp)
         srcs (sheet/style-srcs sh a)       ; {prop raw} -> echoed into the style bar
-        note (let [c (sheet/style-value sh a :comment)] (when (string? c) (not-empty c)))]
-    ;; width/height always emitted (override OR the sheet default) so geometry is
-    ;; fully data-driven: a default-size change re-renders the window and applies
-    ;; live for everyone — no stale CSS, no reload.
-    [:div {:id (cell-id a) :class (str "cell" (when note " noted")) :data-raw raw
+        note (let [c (sheet/style-value sh a :comment)] (when (string? c) (not-empty c)))
+        ;; a merge anchor spans its rectangle; otherwise one cell (override OR the
+        ;; sheet default). width/height always emitted so geometry is fully
+        ;; data-driven: a default-size change re-renders and applies live.
+        [w h] (if span
+                (span-px sh ci ri (first span) (second span))
+                [(col-w sh ci) (row-h sh ri)])]
+    [:div {:id (cell-id a) :class (str "cell" (when note " noted") (when span " merged"))
+           :data-raw raw
            :title note                     ; the comment itself, on hover
            :data-sty (when (seq srcs) (json/write-value-as-string srcs))
            :style (str (format "left:%dpx;top:%dpx;width:%dpx;height:%dpx"
                                (- (axis-x sh ci) (axis-x sh cbase))
                                (- (axis-y sh ri) (axis-y sh rbase))
-                               (dec (col-w sh ci)) (dec (row-h sh ri)))
+                               (dec (long w)) (dec (long h)))
                        (cell-style-decls sh a))}
      disp]))
 
 (defn cells-html [sh cis ris]
-  (let [cb (first cis) rb (first ris)]
-    (str (h/html (for [ri ris ci cis] (cell-input sh (addr/make ci ri) ci ri cb rb))))))
+  (let [anchors (sheet/merge-spans sh)
+        hidden  (covered anchors)          ; cells swallowed by a merge -> not drawn
+        cb (first cis) rb (first ris)]
+    (str (h/html (for [ri ris ci cis
+                       :let  [a (addr/make ci ri)]
+                       :when (not (contains? hidden a))]
+                   (cell-input sh a ci ri cb rb (get anchors a)))))))
 
 (defn colhead-html [sh cis]
   (let [xb (axis-x sh (first cis))]
@@ -189,6 +200,9 @@
                         ;; sparse axis-size overrides so /app.js computes offsets
                         :data-colw (json/write-value-as-string (sheet/col-widths sh))
                         :data-rowh (json/write-value-as-string (sheet/row-heights sh))
+                        ;; merge spans {anchor-addr [rows cols]} so /app.js can
+                        ;; step selection/nav over a merged block as one cell
+                        :data-merges (json/write-value-as-string (sheet/merge-spans sh))
                         :style "display:none;"}]))))
 
 (defn- grid-layers
@@ -365,6 +379,14 @@
             [:p {:style p} "The " [:span {:style kbd} "insert"] " buttons (format row) add a blank row/column "
              "next to the selected cell. Cells shift and formula references follow the shift; it's one "
              [:span {:style kbd} "Ctrl/⌘+Z"] " to undo."]
+
+            [:div {:style h3} "Merge cells"]
+            [:p {:style p} "Select a range and press " [:span {:style kbd} "⛶ merge"] " (format row): the "
+             "top-left cell swallows the rest of the rectangle into one big cell, keeping its own address. "
+             "The swallowed cells are only " [:b "hidden"] " — their values and formulas are kept, so a "
+             "formula that references one still works, and " [:span {:style kbd} "unmerge"] " (or "
+             [:span {:style kbd} "Ctrl/⌘+Z"] ") brings them back unchanged. A merged cell navigates and "
+             "edits as a single cell."]
 
             [:div {:style h3} "Dependency graph"]
             [:p {:style p} "The " [:span {:style kbd} "🕸"] " button draws how cells feed each other "
@@ -1222,7 +1244,14 @@
        [:button {:class "btn" :title "insert row above" :data-on:click "$insertdir='top', @post('/insert')"} "⤒ row"]
        [:button {:class "btn" :title "insert row below" :data-on:click "$insertdir='bottom', @post('/insert')"} "⤓ row"]
        [:button {:class "btn" :title "insert column left" :data-on:click "$insertdir='left', @post('/insert')"} "⇤ col"]
-       [:button {:class "btn" :title "insert column right" :data-on:click "$insertdir='right', @post('/insert')"} "⇥ col"]])
+       [:button {:class "btn" :title "insert column right" :data-on:click "$insertdir='right', @post('/insert')"} "⇥ col"]
+       ;; merge / unmerge the selection into one big cell (top-left keeps its
+       ;; address; the swallowed cells are hidden but keep their data)
+       [:span {:style "border-left:1px solid var(--grid);margin:0 .2rem;align-self:stretch;"}]
+       [:button {:class "btn" :title "merge the selected range into one cell (top-left keeps its address; the rest are hidden but kept — reversible)"
+                 :data-on:click "@post('/mergecells')"} "⛶ merge"]
+       [:button {:class "btn" :title "unmerge the selected cell back into individual cells"
+                 :data-on:click "@post('/unmergecells')"} "unmerge"]])
       ;; logical-scroll viewport (custom wheel + scrollbars in /app.js)
       (grid-layers sh {:r0 0 :c0 0})
 
@@ -1290,12 +1319,18 @@
 ;; persistent /stream. (The raw WebKit flush comment bypasses the SDK, so
 ;; `flush-tick!` logs itself.) Off by default = zero overhead.
 (defn render-cells
-  "Cell-input HTML for addrs, positioned window-relative to view (cbase,rbase)."
+  "Cell-input HTML for addrs, positioned window-relative to view (cbase,rbase).
+   Skips cells hidden under a merge and draws a merge anchor spanning its block —
+   so a pushed edit patches the right shape (a full window re-render, not this, is
+   what runs when a merge itself changes)."
   [sh addrs view]
-  (let [[cb rb] (view-base view)]
-    (apply str (map #(let [{:keys [ci ri]} (addr/parse %)]
-                       (str (h/html (cell-input sh % ci ri cb rb))))
-                    addrs))))
+  (let [[cb rb] (view-base view)
+        anchors (sheet/merge-spans sh)
+        hidden  (covered anchors)]
+    (apply str (keep #(when-not (contains? hidden %)
+                        (let [{:keys [ci ri]} (addr/parse %)]
+                          (str (h/html (cell-input sh % ci ri cb rb (get anchors %))))))
+                     addrs))))
 
 (defn- peer-marker
   "Overlay div for one peer's cursor, positioned window-relative to `view`. An
@@ -1305,14 +1340,17 @@
         [cb rb] (view-base view)
         editing? (= editing cursor)
         tag (or uname "•")
+        span (get (sheet/merge-spans sh) cursor)      ; anchor -> cover the block
+        [w h] (if span (span-px sh ci ri (first span) (second span))
+                  [(col-w sh ci) (row-h sh ri)])
         ;; the tag normally floats above the cell (CSS top:-15px); on the top
         ;; rendered row that's clipped by #cellclip's overflow, so flip it below.
         top-row? (zero? (- ri rb))
         tag-style (str "background:" color
-                       (when top-row? (str ";top:" (dec (row-h sh ri)) "px;border-radius:0 3px 3px 3px")))
+                       (when top-row? (str ";top:" (dec (long h)) "px;border-radius:0 3px 3px 3px")))
         base (format (str "left:%dpx;top:%dpx;width:%dpx;height:%dpx;border-color:%s;")
                      (- (axis-x sh ci) (axis-x sh cb)) (- (axis-y sh ri) (axis-y sh rb))
-                     (dec (col-w sh ci)) (dec (row-h sh ri)) color)]
+                     (dec (long w)) (dec (long h)) color)]
     (str (h/html
           [:div {:class (str "peer" (when editing? " editing"))
                  :style (if editing?
@@ -1346,12 +1384,15 @@
         sh   (:sh (@sheets* room))]
     (if (and s sh (= room (:room s)) a (in-window? sh view a))
       (let [{:keys [ci ri]} (addr/parse a)
-            [cb rb] (view-base view)]
+            [cb rb] (view-base view)
+            span (get (sheet/merge-spans sh) a)       ; anchor -> cover the block
+            [w h] (if span (span-px sh ci ri (first span) (second span))
+                      [(col-w sh ci) (row-h sh ri)])]
         (str (h/html
               [:div {:class (str "selfcell" (when (= (:editing s) a) " editing"))
                      :style (format "left:%dpx;top:%dpx;width:%dpx;height:%dpx;"
                                     (- (axis-x sh ci) (axis-x sh cb)) (- (axis-y sh ri) (axis-y sh rb))
-                                    (dec (col-w sh ci)) (dec (row-h sh ri)))}])))
+                                    (dec (long w)) (dec (long h)))}])))
       "")))
 
 (defn- def-names

@@ -172,6 +172,16 @@ right. Existing cells shift out of the way and **formula references follow the
 shift** (a range that the new line falls inside grows to include it). An insert
 is a single **Undo** step (Ctrl/⌘+Z puts everything back).
 
+### Merge cells
+
+Select a range and press **⛶ merge** (format row): the top-left cell "swallows"
+the rest of the rectangle into one big cell, keeping its own address (e.g. merging
+`B2:D3` leaves a 3×2 cell still addressed `B2`). Merging is **presentational and
+non-destructive** — the swallowed cells are only **hidden**, not cleared, so their
+values and formulas are kept (a formula that references a hidden cell keeps
+working). **unmerge** (or Ctrl/⌘+Z) brings them back exactly as they were. A merged
+cell selects, navigates and edits as a single cell — arrows step over it.
+
 ### Number format
 
 The `format` property applies a display **mask** to a cell's numeric value

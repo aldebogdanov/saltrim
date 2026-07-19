@@ -7,6 +7,7 @@
             [jsonista.core :as json]
             [uno.michelada.saltrim.addr :as addr]
             [uno.michelada.saltrim.auth :as auth]
+            [uno.michelada.saltrim.constants :as c]
             [uno.michelada.saltrim.db :as db]
             [uno.michelada.saltrim.export :as export]
             [uno.michelada.saltrim.formula :as formula]
@@ -20,7 +21,7 @@
             [ring.middleware.multipart-params.byte-array :as mp-bytes]
             [starfederation.datastar.clojure.api :as d*]
             [starfederation.datastar.clojure.adapter.http-kit :as hk]
-            [uno.michelada.saltrim.web.geom :refer [in-window? known-formula-error? pretty-err qparam url-decode url-encode window]]
+            [uno.michelada.saltrim.web.geom :refer [block-of in-window? known-formula-error? pretty-err qparam url-decode url-encode window]]
             [uno.michelada.saltrim.web.state :refer [accessible-rec can-read? def-editor-of locked-by-other? now owner-of save-rec! session-view sessions* set-session-view! sheets* sid-re unload-sheet!]]
             [uno.michelada.saltrim.web.sse :refer [patch-inner! read-signals signals! sse sse-opts webkit-ua?]]
             [uno.michelada.saltrim.web.render :refer [border-prop border-props cells-html colhead-html denied-page graph-svg import-error-html import-report-html login-page merge-result-html meta-html page prop-allowed? render-cells rowhead-html self-html share-html]]
@@ -570,6 +571,100 @@
                   (catch Throwable e
                     (log-err! "/insert" e)
                     (signals! gen {:err (pretty-err (.getMessage e))})))))))))))
+
+;; --- merged cells ----------------------------------------------------------
+;; "Swallow neighbours": the top-left ANCHOR of the selection becomes one big
+;; cell keeping its address; the rest of the bounding rectangle is hidden but
+;; keeps its data (a `:merge` "<rows>x<cols>" span prop on the anchor — see
+;; sheet/merge-spans). Presentational + reversible: unmerge / undo restores it.
+;; Both re-render the whole window (coverage + the anchor's footprint change).
+
+(defn handle-mergecells
+  "Merge the current selection into one cell. The anchor is the bounding box's
+   top-left; any nested `:merge` inside the rectangle is cleared first (so a
+   re-merge doesn't leave orphan spans). Records per-cell undo."
+  [req]
+  (with-access req
+    (fn [uid sheet-id rec {:keys [sid selcells sel]} gen]
+      (ensure-session! sid sheet-id (:branch rec) uid (:token rec))
+      (let [sh    (:sh rec)
+            cells (let [cs (selected-cells selcells)]
+                    (if (seq cs) cs (when (addr/valid? sel) [sel])))
+            crs   (map (fn [a] (let [{:keys [ci ri]} (addr/parse a)] [ci ri])) cells)]
+        (cond
+          (not= :read-write (:level rec))
+          (signals! gen {:err "read-only access — you can't edit this sheet"})
+          (empty? crs)
+          (signals! gen {:err "select a range of cells to merge"})
+          :else
+          (let [c0 (apply min (map first crs))  r0 (apply min (map second crs))
+                c1 (apply max (map first crs))  r1 (apply max (map second crs))
+                rows (inc (- r1 r0)) cols (inc (- c1 c0))
+                anchor (addr/make c0 r0)]
+            (cond
+              (< (* rows cols) 2)
+              (signals! gen {:err "select more than one cell to merge"})
+              (> (* rows cols) c/MAX-MERGE-CELLS)
+              (signals! gen {:err (str "that range is too large to merge (max "
+                                       c/MAX-MERGE-CELLS " cells)")})
+              :else
+              (locking edit-lock
+                (try
+                  ;; drop any existing merge span inside the new rectangle
+                  (doseq [a (addr/range-cells anchor (addr/make c1 r1))
+                          :let [before (get (sheet/style-srcs sh a) sheet/merge-prop)]
+                          :when before]
+                    (sheet/set-style! sh a sheet/merge-prop "")
+                    (record-edit! sid a sheet/merge-prop before nil))
+                  ;; set the anchor's span
+                  (let [before (get (sheet/style-srcs sh anchor) sheet/merge-prop)
+                        span   (str rows "x" cols)]
+                    (sheet/set-style! sh anchor sheet/merge-prop span)
+                    (record-edit! sid anchor sheet/merge-prop before span))
+                  (sheet/settle! sh)
+                  (save-rec! (:room rec) uid)
+                  (render-window! gen sid (:room rec) sh (session-view sid))
+                  (broadcast-window! sid (:room rec) sh)
+                  (signals! gen {:err ""})
+                  (catch Throwable e
+                    (log-err! "/mergecells" e)
+                    (signals! gen {:err (pretty-err (.getMessage e))})))))))))))
+
+(defn handle-unmergecells
+  "Unmerge: clear the `:merge` span of every merge block the selection touches
+   (an anchor OR any covered cell resolves to its anchor). The hidden cells
+   reappear with their data intact. Records per-anchor undo."
+  [req]
+  (with-access req
+    (fn [uid sheet-id rec {:keys [sid selcells sel]} gen]
+      (ensure-session! sid sheet-id (:branch rec) uid (:token rec))
+      (let [sh      (:sh rec)
+            anchors (sheet/merge-spans sh)
+            cells   (let [cs (selected-cells selcells)]
+                      (if (seq cs) cs (when (addr/valid? sel) [sel])))
+            targets (distinct (keep (fn [a] (let [{:keys [ci ri]} (addr/parse a)]
+                                              (first (block-of anchors ci ri))))
+                                    cells))]
+        (cond
+          (not= :read-write (:level rec))
+          (signals! gen {:err "read-only access — you can't edit this sheet"})
+          (empty? targets)
+          (signals! gen {:err ""})               ; nothing merged in the selection
+          :else
+          (locking edit-lock
+            (try
+              (doseq [anchor targets
+                      :let [before (get (sheet/style-srcs sh anchor) sheet/merge-prop)]]
+                (sheet/set-style! sh anchor sheet/merge-prop "")
+                (record-edit! sid anchor sheet/merge-prop before nil))
+              (sheet/settle! sh)
+              (save-rec! (:room rec) uid)
+              (render-window! gen sid (:room rec) sh (session-view sid))
+              (broadcast-window! sid (:room rec) sh)
+              (signals! gen {:err ""})
+              (catch Throwable e
+                (log-err! "/unmergecells" e)
+                (signals! gen {:err (pretty-err (.getMessage e))})))))))))
 
 (defn handle-props
   "Owner-only sheet properties: set the default column width / row height from

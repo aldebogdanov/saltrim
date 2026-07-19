@@ -60,7 +60,9 @@
      :dcw  (js/Number (or (dset m "dcw") CW))
      :drh  (js/Number (or (dset m "drh") RH))
      :colw (pj (dset m "colw"))
-     :rowh (pj (dset m "rowh"))}))
+     :rowh (pj (dset m "rowh"))
+     ;; merge spans {anchor-addr [rows cols]} — a merged block navigates as one
+     :merges (pj (dset m "merges"))}))
 
 ;; --- variable axis geometry (mirrors web.clj axis-off) ---------------------
 ;; Each axis defaults to base px but carries sparse overrides (index -> size).
@@ -89,6 +91,25 @@
 (defn- view-size []
   (let [c ($ "cellclip")]
     {:w (if c (.-clientWidth c) 0) :h (if c (.-clientHeight c) 0)}))
+
+;; --- merged cells (mirror of geom/block-of) --------------------------------
+;; `merges` is a JS object anchor-addr -> [rows cols]. A merged block navigates
+;; and edits as ONE cell: selection snaps to the anchor and arrows step over it.
+
+(defn- mblk
+  "The merge block covering (ci,ri): #js [ac ar cols rows], or nil. Includes the
+   anchor itself. `merges` is the JS object off #meta's data-merges."
+  [merges ci ri]
+  (loop [ks (js/Object.keys merges)]
+    (when-let [k (first ks)]
+      (let [p  (addr/parse k) rc (aget merges k)
+            ac (:ci p) ar (:ri p) rows (aget rc 0) cols (aget rc 1)]
+        (if (and (<= ac ci (+ ac cols -1)) (<= ar ri (+ ar rows -1)))
+          #js [ac ar cols rows]
+          (recur (rest ks)))))))
+
+(defn- span-w [ci cols base ov] (- (axis-pos (+ ci cols) base ov) (axis-pos ci base ov)))
+(defn- span-h [ri rows base ov] (- (axis-pos (+ ri rows) base ov) (axis-pos ri base ov)))
 
 (defn- set-transform! [id x y]
   (when-let [e ($ id)]
@@ -211,8 +232,10 @@
 (defn- ensure-visible! [a]
   (when-let [p (addr/parse a)]
     (let [m  (mta) vs (view-size)
+          b  (mblk (:merges m) (:ci p) (:ri p))
+          cols (if b (aget b 2) 1) rows (if b (aget b 3) 1)
           x  (axis-pos (:ci p) (:dcw m) (:colw m)) y (axis-pos (:ri p) (:drh m) (:rowh m))
-          w  (axis-size (:ci p) (:dcw m) (:colw m)) h (axis-size (:ri p) (:drh m) (:rowh m))]
+          w  (span-w (:ci p) cols (:dcw m) (:colw m)) h (span-h (:ri p) rows (:drh m) (:rowh m))]
       (cond (< x @SX)                   (reset! SX x)
             (< (+ @SX (:w vs)) (+ x w)) (reset! SX (- (+ x w) (:w vs))))
       (cond (< y @SY)                   (reset! SY y)
@@ -223,11 +246,14 @@
 
 (defn- jump! [a]
   (when-let [p (addr/parse a)]
-    (let [m (mta)]
-      (reset! SX (axis-pos (:ci p) (:dcw m) (:colw m)))   ; park at top-left; /view extends totals
-      (reset! SY (axis-pos (:ri p) (:drh m) (:rowh m))))
-    (reset! SEL {:ranges [{:a [(:ci p) (:ri p)] :f [(:ci p) (:ri p)]}]})
-    (select! (addr/make (:ci p) (:ri p)))
+    (let [m (mta)
+          ;; a typed covered cell resolves to its merge anchor
+          b (mblk (:merges m) (:ci p) (:ri p))
+          c (if b (aget b 0) (:ci p)) r (if b (aget b 1) (:ri p))]
+      (reset! SX (axis-pos c (:dcw m) (:colw m)))   ; park at top-left; /view extends totals
+      (reset! SY (axis-pos r (:drh m) (:rowh m)))
+      (reset! SEL {:ranges [{:a [c r] :f [c r]}]})
+      (select! (addr/make c r)))
     (render!) (render-sel!) (request-view! true)))
 
 ;; --- multi-selection --------------------------------------------------------
@@ -294,6 +320,25 @@
       (sel-set! (vec (remove #(in-range? c r %) rs)))
       (sel-set! (conj rs {:a [c r] :f [c r]})))))
 
+(defn- snap-sel!
+  "Collapse any selection range that fell ENTIRELY inside one merged block onto
+   that block's anchor — so right after merging B2:D3 the active cell is B2, not
+   the now-hidden D3. A range that spans BEYOND a block is left untouched, so it
+   never shrinks a deliberately larger selection (and it's a no-op on scroll)."
+  []
+  (let [merges (:merges (mta))
+        collapse (fn [rng]
+                   (let [[c0 r0 c1 r1] (rng-norm rng)
+                         b (mblk merges c0 r0)]
+                     (if (and b (= c0 (aget b 0)) (= r0 (aget b 1))
+                              (<= c1 (+ (aget b 0) (aget b 2) -1))
+                              (<= r1 (+ (aget b 1) (aget b 3) -1)))
+                       {:a [(aget b 0) (aget b 1)] :f [(aget b 0) (aget b 1)]}
+                       rng)))
+        rs  (:ranges @SEL)
+        rs' (mapv collapse rs)]
+    (when (not= rs' rs) (sel-set! rs'))))
+
 (defn- sel-ranges-str []
   (str/join " " (for [rng (:ranges @SEL) :let [[c0 r0 c1 r1] (rng-norm rng)]]
                   (str (addr/make c0 r0) ":" (addr/make c1 r1)))))
@@ -304,6 +349,20 @@
 (defn- cell-cr [t]
   (when (.contains (.-classList t) "cell")
     (let [p (addr/parse (subs (.-id t) 2))] [(:ci p) (:ri p)])))
+
+(defn- nav-step
+  "From active cell (ci,ri) move by (dc,dr), treating a merged block as ONE cell:
+   step from the block's far edge (so a single arrow leaves it), then snap into
+   any block the landing falls inside. `merges` is #meta's data-merges object."
+  [merges ci ri dc dr]
+  (let [b  (mblk merges ci ri)
+        ac (if b (aget b 0) ci) ar (if b (aget b 1) ri)
+        cols (if b (aget b 2) 1) rows (if b (aget b 3) 1)
+        c1 (+ ac cols -1) r1 (+ ar rows -1)
+        nc (js/Math.max 0 (cond (pos? dc) (+ c1 dc) (neg? dc) (+ ac dc) :else ac))
+        nr (js/Math.max 0 (cond (pos? dr) (+ r1 dr) (neg? dr) (+ ar dr) :else ar))
+        b2 (mblk merges nc nr)]
+    [(if b2 (aget b2 0) nc) (if b2 (aget b2 1) nr)]))
 
 (defn- on-cell-click [e]
   (when-let [[c r] (cell-cr (.-target e))]
@@ -321,12 +380,14 @@
 (defn- start-edit! [a]
   (when-let [p (addr/parse a)]
     (let [a  (addr/make (:ci p) (:ri p))
-          m  (mta) ed ($ "editor")]
+          m  (mta) ed ($ "editor")
+          b  (mblk (:merges m) (:ci p) (:ri p))            ; merged anchor -> big editor
+          cols (if b (aget b 2) 1) rows (if b (aget b 3) 1)]
       (ensure-visible! a)
       (set! (.. ed -style -left)   (str (- (axis-pos (:ci p) (:dcw m) (:colw m)) (axis-pos (:cb m) (:dcw m) (:colw m))) "px"))
       (set! (.. ed -style -top)    (str (- (axis-pos (:ri p) (:drh m) (:rowh m)) (axis-pos (:rb m) (:drh m) (:rowh m))) "px"))
-      (set! (.. ed -style -width)  (str (- (axis-size (:ci p) (:dcw m) (:colw m)) 1) "px"))
-      (set! (.. ed -style -height) (str (- (axis-size (:ri p) (:drh m) (:rowh m)) 1) "px"))
+      (set! (.. ed -style -width)  (str (- (span-w (:ci p) cols (:dcw m) (:colw m)) 1) "px"))
+      (set! (.. ed -style -height) (str (- (span-h (:ri p) rows (:drh m) (:rowh m)) 1) "px"))
       (emit! "sr-edit" #js {:addr a})        ; sets $sel,$v,$edit=true,@post('/presence')
       ;; defer focus until Datastar has flipped $edit (data-show) + filled $v
       (js/setTimeout (fn [] (.focus ed) (.select ed)) 0))))
@@ -360,18 +421,20 @@
             (let [[ci ri] act]
               (if (= k "Enter")
                 (do (.preventDefault e) (start-edit! (addr/make ci ri)))
-                (let [[nc nr] (case k
-                                "ArrowRight" [(inc ci) ri]
-                                "ArrowLeft"  [(js/Math.max 0 (dec ci)) ri]
-                                "ArrowDown"  [ci (inc ri)]
-                                "ArrowUp"    [ci (js/Math.max 0 (dec ri))]
-                                "Tab"        [(if (.-shiftKey e) (js/Math.max 0 (dec ci)) (inc ci)) ri]
+                (let [[dc dr] (case k
+                                "ArrowRight" [1 0]
+                                "ArrowLeft"  [-1 0]
+                                "ArrowDown"  [0 1]
+                                "ArrowUp"    [0 -1]
+                                "Tab"        [(if (.-shiftKey e) -1 1) 0]
                                 nil)]
-                  (when nc
+                  (when dc
                     (.preventDefault e)
-                    ;; Shift+arrows extend the range; plain arrows / Tab move single
-                    (if (and (.-shiftKey e) (not= k "Tab")) (sel-extend! nc nr) (sel-single! nc nr))
-                    (ensure-visible! (addr/make nc nr))))))))))))
+                    ;; step over a merged block (nav-step snaps to its anchor)
+                    (let [[nc nr] (nav-step (:merges (mta)) ci ri dc dr)]
+                      ;; Shift+arrows extend the range; plain arrows / Tab move single
+                      (if (and (.-shiftKey e) (not= k "Tab")) (sel-extend! nc nr) (sel-single! nc nr))
+                      (ensure-visible! (addr/make nc nr)))))))))))))
 
 ;; --- column / row resize ----------------------------------------------------
 ;; Header strips render a thin .colgrip/.rowgrip on each trailing edge. Dragging
@@ -508,7 +571,7 @@
     ;; sized to the NEW cells. It only posts when something actually changed, so
     ;; the /view response's own #meta patch can't loop back.
     (when m (.observe (js/MutationObserver.
-                       (fn [] (render!) (render-sel!) (request-view! false)))
+                       (fn [] (snap-sel!) (render!) (render-sel!) (request-view! false)))
                       m #js {:attributes true}))
     (render!) (render-sel!)               ; page already rendered the window at (0,0)
     ;; the page was rendered against the server's guess at our viewport; report
