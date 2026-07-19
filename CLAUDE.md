@@ -321,5 +321,18 @@ value-only). Spins are pull/LAZY: dyn edges are recorded when a body actually
 RUNS (deref) — `handle-graph` forces `sheet/dyn-cells` before reading
 `sheet/dyn-deps` (dashed edges in the 🕸 view). Styles reject dynrefs (own-PR
 plumbing, see TECHDEBT).
+**Merged cells** are DONE: a cell "swallows" its neighbours into one big cell
+keeping the top-left (anchor) address. Presentational + non-destructive — a
+`:merge` `"<rows>x<cols>"` span prop on the anchor (`sheet/merge-spans`,
+`sheet/merge-prop`), so it rides the ordinary cellprop plumbing (persist /
+branch / 3-way-merge / as-of / undo for free). Covered cells are HIDDEN, not
+cleared (their values/formulas survive; a ref to one keeps working). `geom`
+turns the span into geometry (`covered`, `block-of`, `span-px`); `cells-html`/
+`render-cells`/`self-html`/`peer-marker` skip covered cells and draw the anchor
+spanning its block; `#meta`'s `data-merges` flows the spans to `app.cljs`, which
+navigates/edits a block as one cell (`mblk`/`nav-step`, selection snaps to the
+anchor). `/mergecells` + `/unmergecells` (owner-or-editor) full-window re-render
+like `/insert`; a `:merge` undo entry reports `:affected :all` (undo-step) for
+the same reason. NOT via the style bar (kept out of `meta-props`/`style-bar-props`).
 Cheap win left: cell assertions (`=(assert …)`). See `TECHDEBT.md` for
 deferred items.

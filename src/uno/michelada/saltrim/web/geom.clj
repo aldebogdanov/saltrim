@@ -72,6 +72,42 @@
     [(range cb (min MAX-COLS (+ cb wc OVER OVER)))
      (range rb (min MAX-ROWS (+ rb wr OVER OVER)))]))
 
+;; --- merged cells --------------------------------------------------------
+;; A merge is a `:merge` "<rows>x<cols>" span on the top-left ANCHOR cell (see
+;; sheet/merge-spans). These helpers turn that into geometry the renderer needs:
+;; which cells are hidden under a block, which block a coordinate falls in, and
+;; a block's pixel footprint. Purely presentational — the covered cells keep
+;; their data.
+
+(defn covered
+  "#{addr} of every cell hidden under a merge — each block's rectangle minus its
+   own anchor. `anchors` = sheet/merge-spans."
+  [anchors]
+  (into #{} (for [[a [rows cols]] anchors
+                  :let [{:keys [ci ri]} (addr/parse a)]
+                  r (range ri (+ (long ri) (long rows)))
+                  c (range ci (+ (long ci) (long cols)))
+                  :when (not (and (= c ci) (= r ri)))]
+              (addr/make c r))))
+
+(defn block-of
+  "The merge block whose rectangle contains (ci,ri) — [anchor rows cols], or nil.
+   Includes the anchor itself. `anchors` = sheet/merge-spans."
+  [anchors ci ri]
+  (some (fn [[a [rows cols]]]
+          (let [{ac :ci ar :ri} (addr/parse a)]
+            (when (and (<= ac (long ci) (+ ac (long cols) -1))
+                       (<= ar (long ri) (+ ar (long rows) -1)))
+              [a rows cols])))
+        anchors))
+
+(defn span-px
+  "[w h] pixels a merge anchored at (ci,ri) spanning `rows`×`cols` cells covers —
+   the sum of the real per-index widths/heights, so it tracks resized columns."
+  [sh ci ri rows cols]
+  [(- (axis-x sh (+ (long ci) (long cols))) (axis-x sh ci))
+   (- (axis-y sh (+ (long ri) (long rows))) (axis-y sh ri))])
+
 ;; --- colors -------------------------------------------------------------
 
 (defn rgba [hex a]

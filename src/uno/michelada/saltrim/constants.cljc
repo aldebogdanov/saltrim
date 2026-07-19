@@ -38,3 +38,7 @@
 (def BUF-COLS 6)        ; extra scrollable buffer past the used/visible range
 (def BUF-ROWS 30)
 (def BAR 12)            ; custom scrollbar thickness px
+;; Largest rectangle a single merge may swallow (rows*cols). A sanity clamp: a
+;; merge is presentational, but the covered set is materialized, so cap it well
+;; below anything a user would want to merge in one gesture.
+(def MAX-MERGE-CELLS 4096)
