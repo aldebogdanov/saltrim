@@ -666,6 +666,39 @@
                 (log-err! "/unmergecells" e)
                 (signals! gen {:err (pretty-err (.getMessage e))})))))))))
 
+(defn handle-agentkey
+  "Mint/rotate or revoke the signed-in user's ACCOUNT agent key (the MCP
+   credential that reaches every sheet they can, so adding a sheet needs no
+   config change). Dispatched on `$agentact`:
+   - mint:   mint or ROTATE. Minting replaces any previous key, so this is also
+             how you revoke a leaked one. The secret is returned ONCE (only its
+             hash is stored) and shown in the panel; it can never be read back.
+   - revoke: drop the key entirely.
+   Not `with-access`: this is account-level, tied to no sheet — it only needs a
+   signed-in user."
+  [req]
+  (let [uid (auth/req->uid req)]
+    (if-not uid
+      (deny req "not signed in")
+      (sse req
+        (fn [gen]
+          (try
+            (case (str (:agentact (read-signals req)))
+              "mint"
+              (let [secret (auth/mint-agent-key! uid)]
+                (u/log "INFO" "agent key minted for" uid)
+                (signals! gen {:agentkey secret :agentkeyhas true :err ""}))
+
+              "revoke"
+              (do (auth/revoke-agent-key! uid)
+                  (u/log "INFO" "agent key revoked for" uid)
+                  (signals! gen {:agentkey "" :agentkeyhas false :err ""}))
+
+              (signals! gen {:err ""}))
+            (catch Throwable e
+              (log-err! "/agentkey" e)
+              (signals! gen {:err (pretty-err (.getMessage e))}))))))))
+
 (defn handle-props
   "Owner-only sheet properties: set the default column width / row height from
    $pcw/$prh. Every position + the default cell box change, so re-render the

@@ -38,6 +38,17 @@
    {:db/ident :token/created-at :db/valueType :db.type/long   :db/cardinality :db.cardinality/one}
    {:db/ident :token/last-seen  :db/valueType :db.type/long   :db/cardinality :db.cardinality/one}
 
+   ;; AGENT KEY — an account-level MCP credential (see the `mcp` ns). Unlike a
+   ;; capability link (one sheet, plaintext token in a URL) this authenticates
+   ;; the USER, so every sheet they own or are granted is reachable with one
+   ;; credential and no per-sheet config. It is a real secret, so — like the
+   ;; browser auth token above — only its SHA-256 hash is stored; the secret is
+   ;; shown once at mint time and can never be read back, only rotated.
+   {:db/ident :agentkey/hash       :db/valueType :db.type/string :db/unique :db.unique/identity :db/cardinality :db.cardinality/one}
+   {:db/ident :agentkey/user       :db/valueType :db.type/ref    :db/cardinality :db.cardinality/one}
+   {:db/ident :agentkey/created-at :db/valueType :db.type/long   :db/cardinality :db.cardinality/one}
+   {:db/ident :agentkey/last-used  :db/valueType :db.type/long   :db/cardinality :db.cardinality/one}
+
    ;; sheets + shares
    {:db/ident :sheet/id         :db/valueType :db.type/string :db/unique :db.unique/identity :db/cardinality :db.cardinality/one}
    {:db/ident :sheet/owner      :db/valueType :db.type/ref    :db/cardinality :db.cardinality/one}
@@ -203,6 +214,57 @@
 (defn delete-token! [token-hash]
   (when-let [eid (d/q '[:find ?t . :in $ ?h :where [?t :token/hash ?h]] @conn token-hash)]
     (d/transact conn [[:db/retractEntity eid]])))
+
+;; --- agent keys (account-level MCP credential) ----------------------------
+;; ONE active key per user: minting replaces any existing one, which is exactly
+;; what "rotate" means — the previous key stops authenticating the moment the
+;; new one is stored, so a leaked key is revoked by rotating. Only the hash is
+;; kept (see the schema note).
+
+(defn- agentkey-eids-of [uid]
+  (d/q '[:find [?k ...] :in $ ?uid
+         :where [?u :user/uid ?uid] [?k :agentkey/user ?u]]
+       @conn uid))
+
+(defn revoke-agent-keys!
+  "Drop every agent key belonging to `uid`. Returns how many were removed."
+  [uid]
+  (let [eids (agentkey-eids-of uid)]
+    (when (seq eids)
+      (d/transact conn (mapv (fn [e] [:db/retractEntity e]) eids)))
+    (count eids)))
+
+(defn put-agent-key!
+  "Store agent-key HASH for `uid`, replacing any previous key (rotation).
+   Returns the hash."
+  [key-hash uid]
+  (revoke-agent-keys! uid)
+  (d/transact conn [{:agentkey/hash key-hash
+                     :agentkey/user [:user/uid uid]
+                     :agentkey/created-at (now)}])
+  key-hash)
+
+(defn agent-key-uid
+  "The uid an agent-key hash authenticates, or nil."
+  [key-hash]
+  (d/q '[:find ?uid .
+         :in $ ?h
+         :where [?k :agentkey/hash ?h] [?k :agentkey/user ?u] [?u :user/uid ?uid]]
+       @conn key-hash))
+
+(defn touch-agent-key!
+  "Stamp an agent key as used (so the UI can show 'last used'). Best effort."
+  [key-hash]
+  (when-let [eid (d/q '[:find ?k . :in $ ?h :where [?k :agentkey/hash ?h]] @conn key-hash)]
+    (d/transact conn [{:db/id eid :agentkey/last-used (now)}])))
+
+(defn agent-key-info
+  "{:created-at :last-used} for `uid`'s agent key, or nil when they have none.
+   Never returns the secret (it isn't stored) — this only says a key EXISTS."
+  [uid]
+  (when-let [eid (first (agentkey-eids-of uid))]
+    (let [m (d/pull @conn [:agentkey/created-at :agentkey/last-used] eid)]
+      {:created-at (:agentkey/created-at m) :last-used (:agentkey/last-used m)})))
 
 ;; --- sheets + shares ------------------------------------------------------
 ;; Sheet metadata + an ACL of share grants live here (cell content lives here

@@ -485,11 +485,12 @@
   (let [h3 help-h3 p help-p kbd help-kbd]
     (list
             [:div {:style h3} "AI agents (MCP)"]
-            [:p {:style p} "SaltRim speaks the Model Context Protocol, so an AI agent can work in this "
-             "sheet as a collaborator (served at " [:span {:style kbd} "POST /mcp"] "). Give it access "
-             "the same way you'd share with a person: enable the capability " [:span {:style kbd} "link"]
-             " (top bar) at edit level and hand the agent that token as its " [:span {:style kbd} "Authorization: Bearer"]
-             " credential."]
+            [:p {:style p} "SaltRim speaks the Model Context Protocol, so an AI agent can work in your "
+             "sheets as a collaborator (served at " [:span {:style kbd} "POST /mcp"] "). Press "
+             [:span {:style kbd} "🔑"] " (top bar) to mint an " [:b "agent key"] " — one credential that "
+             "reaches every sheet you can, so a new sheet needs no reconfiguring. It carries "
+             [:b "your"] " access and nothing more. The secret is shown once; rotate or revoke it from "
+             "the same panel at any time."]
             [:p {:style p} "Agent writes never touch " [:span {:style kbd} "main"] " — the first write "
              "auto-forks it into the agent's own branch, which you review and merge (or delete) from the "
              [:span {:style kbd} "🌿"] " branches panel, the same as any human's fork. Because the sheet "
@@ -623,6 +624,89 @@
                [:button {:class "btn" :style "background:#c0392b;border-color:#c0392b;color:#fff;"
                          :data-on:click "@post('/delete-sheet'), $delconfirm=false, $propspanel=false"}
                 "Delete permanently"]]]]]]))))
+
+(declare fmt-edited)
+
+(defn- agentkey-html
+  "The 🔑 account panel: mint / rotate / revoke the ACCOUNT agent key — the MCP
+   credential that reaches every sheet you can, so pointing an agent at a new
+   sheet needs no config change (a capability link is per-sheet and would).
+
+   The secret only exists in the response that mints it (the DB keeps a hash),
+   so it is shown once in $agentkey with a copy button and a warning; reopening
+   the panel later can only say a key EXISTS, never what it is. `info` =
+   {:created-at :last-used} or nil."
+  [info]
+  (let [p    "margin:.2rem 0 .7rem;font:13px sans-serif;color:var(--muted);"
+        kbd  "font:12px monospace;background:var(--panel);border:1px solid var(--grid);border-radius:3px;padding:0 4px;"
+        code (str "width:100%;box-sizing:border-box;font:12px monospace;padding:.5rem .6rem;"
+                  "border:1px solid var(--accent);border-radius:var(--radius);"
+                  "background:var(--accent-bg);color:var(--fg);word-break:break-all;")]
+    (str (h/html
+          [:div {:id "agentwrap" :data-show "$agentpanel"
+                 :data-on:click "$agentpanel=false, $agentkey=''"
+                 :style (str "position:fixed;inset:0;z-index:50;background:rgba(0,0,0,.35);"
+                             "display:flex;align-items:flex-start;justify-content:center;padding:6vh 1rem;")}
+           [:div {:data-on:click "evt.stopPropagation()"
+                  :style (str "background:var(--bg);border:1px solid var(--line);border-radius:8px;"
+                              "box-shadow:0 8px 32px rgba(0,0,0,.25);max-width:34rem;width:100%;"
+                              "max-height:88vh;overflow:auto;padding:1.1rem 1.3rem;")}
+            [:div {:style "display:flex;align-items:center;margin-bottom:.3rem;"}
+             [:h2 {:style "margin:0;font:600 18px sans-serif;flex:1;"} "🔑 Agent key (MCP)"]
+             [:button {:class "btn" :data-on:click "$agentpanel=false, $agentkey=''" :title "close"} "✕"]]
+            [:p {:style p} "One key that lets an AI agent reach " [:b "every sheet you can"]
+             " over the Model Context Protocol — unlike a per-sheet share link, you don't "
+             "reconfigure anything when you make a new sheet."]
+            [:p {:style p} "It carries " [:b "your"] " access and nothing more: an agent can only "
+             "touch sheets you own or were granted, and its writes still auto-fork onto their own "
+             "branch for you to review in " [:span {:style kbd} "🌿"] "."]
+
+            ;; the freshly minted secret — the only time it is ever readable
+            [:div {:data-show "$agentkey != ''"}
+             [:p {:style "margin:.2rem 0 .3rem;font:600 13px sans-serif;color:var(--fg);"}
+              "Copy it now — it won't be shown again:"]
+             [:div {:style code :data-text "$agentkey"}]
+             [:div {:style "display:flex;gap:.4rem;justify-content:flex-end;margin:.4rem 0 .2rem;"}
+              [:button {:class "btn"
+                        :data-on:click "navigator.clipboard.writeText($agentkey)"} "copy key"]]
+             [:p {:style p} "Add it to your MCP client config as the "
+              [:span {:style kbd} "Authorization: Bearer"] " header, e.g."]
+             [:pre {:style (str code "white-space:pre-wrap;border-color:var(--grid);"
+                                "background:var(--panel);")}
+              (str "\"saltrim\": {\n"
+                   "  \"command\": \"npx\",\n"
+                   "  \"args\": [\"-y\", \"mcp-remote@latest\",\n"
+                   "           \"" (auth/base-url) "/mcp\",\n"
+                   "           \"--transport\", \"http-only\",\n"
+                   "           \"--header\", \"Authorization:${AUTH_TOKEN}\"],\n"
+                   "  \"env\": { \"AUTH_TOKEN\": \"Bearer <the key above>\" }\n"
+                   "}")]]
+
+            ;; status + actions
+            [:div {:data-show "$agentkey == ''"}
+             (if info
+               [:p {:style p} "A key is active"
+                (when-let [c (fmt-edited (:created-at info))] (str " (created " c ")"))
+                (if-let [u (fmt-edited (:last-used info))]
+                  (str ", last used " u ".")
+                  ", never used yet.")
+                " The secret can't be shown again — rotate to get a new one, which "
+                [:b "immediately stops the old key from working"] "."]
+               [:p {:style p} "No key yet."])]
+
+            [:div {:style "display:flex;gap:.5rem;justify-content:flex-end;margin-top:.9rem;"}
+             (when info
+               [:span {:data-show "$agentkey == ''"}
+                [:span {:data-show "!$agentrevoke"}
+                 [:button {:class "btn" :style "border-color:var(--danger);color:var(--danger);"
+                           :data-on:click "$agentrevoke=true"} "Revoke"]]
+                [:span {:data-show "$agentrevoke" :style "display:inline-flex;gap:.4rem;"}
+                 [:button {:class "btn" :data-on:click "$agentrevoke=false"} "Cancel"]
+                 [:button {:class "btn" :style "background:var(--danger);border-color:var(--danger);color:#fff;"
+                           :data-on:click "$agentact='revoke', @post('/agentkey'), $agentrevoke=false"}
+                  "Revoke for good"]]])
+             [:button {:class "btn primary" :data-on:click "$agentact='mint', @post('/agentkey')"}
+              (if info "Rotate key" "Create key")]]]]))))
 
 (defn- import-html
   "Import-.xlsx modal, toggled by $importpanel. The file can't ride Datastar's
@@ -1124,6 +1208,14 @@
              :data-signals:importing "false"
              :data-signals:imported "false"
              :data-signals:help "false"
+             ;; account agent key (🔑 panel): the MCP credential for ALL your
+             ;; sheets. $agentkey holds the freshly minted secret — shown once,
+             ;; never persisted client-side; $agentkeyhas only says one exists.
+             :data-signals:agentpanel "false"
+             :data-signals:agentact "''"
+             :data-signals:agentkey "''"
+             :data-signals:agentkeyhas (str (boolean (auth/agent-key-info uid)))
+             :data-signals:agentrevoke "false"   ; revoke confirmation armed?
              ;; dependency-graph view (🕸 modal) — server renders #graphview on open
              :data-signals:graphpanel "false"
              ;; sheet properties (⚙ modal, owner-only) — seeded with current defaults
@@ -1147,6 +1239,7 @@
       (when-not asof? (h/raw (bigedit-html)))
       (when (and owner? (not asof?)) (h/raw (props-html sname)))
       (when-not asof? (h/raw (import-html)))
+      (when-not asof? (h/raw (agentkey-html (auth/agent-key-info uid))))
       (when-not asof? (history-modal storage-id sname branch revisions link-token owner?))
       (when-not asof? (graph-modal-html))
       ;; ── toolbar row 1: sheet management + sharing + identity ───────────
@@ -1199,6 +1292,11 @@
        ;; who am I + sign out
        [:span {:style "font:12px sans-serif;color:var(--muted);white-space:nowrap;"}
         (or (:name (auth/user-info uid)) uid)]
+       ;; account-level (not per-sheet), so it lives by the identity, not in the
+       ;; share panel: the MCP key that reaches every sheet this user can.
+       (when-not asof?
+         [:button {:class "btn" :data-on:click "$agentpanel=true"
+                   :title "agent key — let an AI agent (MCP) work in your sheets"} "🔑"])
        [:form {:method "post" :action "/logout" :style "margin:0;"}
         [:button {:class "btn"} "sign out"]]]
       ;; ── toolbar row 2: cell reference + formula bar (live only) ─────────

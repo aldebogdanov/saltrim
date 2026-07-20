@@ -118,6 +118,37 @@
 (defn revoke-token! [secret]
   (when secret (db/delete-token! (sha256 secret))))
 
+;; --- agent keys (account-level MCP credential) ------------------------------
+;; Same secret discipline as the browser token above: the DB holds only a
+;; SHA-256 hash, so a key is shown ONCE at mint time and can never be read back
+;; — losing it means rotating, not recovering. `mint-agent-key!` replaces any
+;; previous key for that user, which is what makes rotation a revocation too.
+
+(def ^:private agent-key-prefix
+  "Marks a secret as a SaltRim agent key. Purely cosmetic (it is hashed like the
+   rest), but it makes a leaked key obvious in a config file or a log."
+  "srk_")
+
+(defn mint-agent-key!
+  "Mint (or rotate) `uid`'s agent key. Persists the HASH and returns the SECRET
+   — the only time it exists in readable form."
+  [uid]
+  (let [secret (str agent-key-prefix (rand-hex 32))]
+    (db/put-agent-key! (sha256 secret) uid)
+    secret))
+
+(defn agent-key->uid
+  "The uid an agent-key SECRET authenticates, or nil. Stamps last-used on a hit."
+  [secret]
+  (when-not (str/blank? (str secret))
+    (let [h (sha256 secret)]
+      (when-let [uid (db/agent-key-uid h)]
+        (try (db/touch-agent-key! h) (catch Throwable _))
+        uid))))
+
+(defn revoke-agent-key! [uid] (db/revoke-agent-keys! uid))
+(defn agent-key-info [uid] (db/agent-key-info uid))
+
 ;; --- cookies ----------------------------------------------------------------
 
 (def ^:private cookie-name "saltrim_auth")

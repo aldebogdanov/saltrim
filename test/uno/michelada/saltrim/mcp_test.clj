@@ -5,6 +5,7 @@
             [clojure.string :as str]
             [jsonista.core :as json]
             [mount.core :as mount]
+            [uno.michelada.saltrim.auth :as auth]
             [uno.michelada.saltrim.db :as db]
             [uno.michelada.saltrim.mcp :as mcp]
             [uno.michelada.saltrim.sheet :as sheet]
@@ -59,7 +60,8 @@
                           [:error :code]))))
   (testing "tools are advertised with schemas"
     (let [ts (get-in (:body (call {:jsonrpc "2.0" :id 3 :method "tools/list"} *tok*)) [:result :tools])]
-      (is (= #{"saltrim_describe_sheet" "saltrim_read_range" "saltrim_write_cells"}
+      (is (= #{"saltrim_list_sheets" "saltrim_describe_sheet"
+               "saltrim_read_range" "saltrim_write_cells"}
              (set (map :name ts))))
       (is (every? #(and (:description %) (:inputSchema %)) ts)))))
 
@@ -92,7 +94,7 @@
   (let [r (:structuredContent (tool "saltrim_write_cells"
                                     {:cells [{:addr "A1" :src "10"}
                                              {:addr "A2" :src "=(* $A1 4)"}]}))
-        branch (mcp/agent-branch *tok*)]
+        branch (mcp/agent-branch (mcp/credential *tok*) *tok*)]
     (testing "the write landed on the agent's own forked branch"
       (is (= branch (:branch r)))
       (is (not= db/MAIN (:branch r)))
@@ -110,11 +112,11 @@
     (tool "saltrim_write_cells" {:cells [{:addr "A2" :src "2"}]})
     (is (= n (count (db/branch-names *sid*))) "second write reuses the same branch"))
   (testing "a different token would work on its own branch"
-    (is (not= (mcp/agent-branch *tok*) (mcp/agent-branch "ffffffffffffffff")))))
+    (is (not= (mcp/agent-branch (mcp/credential *tok*) *tok*) (mcp/agent-branch {:kind :link} "ffffffffffffffff")))))
 
 (deftest reads-see-the-agent-branch-and-default-to-main
   (tool "saltrim_write_cells" {:cells [{:addr "A1" :src "7"}]})
-  (let [branch (mcp/agent-branch *tok*)]
+  (let [branch (mcp/agent-branch (mcp/credential *tok*) *tok*)]
     (is (= [] (:cells (:structuredContent (tool "saltrim_read_range" {:range "A1:A1"}))))
         "main is empty — the agent's write isn't there")
     (is (= [{:addr "A1" :value 7}]
@@ -149,5 +151,115 @@
   (let [d (:structuredContent (tool "saltrim_describe_sheet" {}))]
     (is (= *sid* (:sheet d)))
     (is (= "read-write" (:level d)))
-    (is (= (mcp/agent-branch *tok*) (:writes_go_to d)))
+    (is (= (mcp/agent-branch (mcp/credential *tok*) *tok*) (:writes_go_to d)))
     (is (str/includes? (:note d) "main is never edited"))))
+
+;; --- account-level agent key ------------------------------------------------
+;; A per-USER credential: one key reaches every sheet its owner can, so adding a
+;; sheet needs no config change. Reach widens; AUTHORITY does not — every call is
+;; still checked against that user's real ACL.
+
+(defn- account-fixture
+  "Two real users, each owning a sheet, plus an agent key for the first. Returns
+   {:key :mine :theirs :uid}."
+  []
+  (db/upsert-user! {:uid "alice" :name "Alice"})
+  (db/upsert-user! {:uid "bob" :name "Bob"})
+  (let [mine   (store/storage-id "alice" "budget")
+        theirs (store/storage-id "bob" "secret")]
+    (db/ensure-sheet! mine "alice" "budget")
+    (db/ensure-sheet! theirs "bob" "secret")
+    {:key (auth/mint-agent-key! "alice") :mine mine :theirs theirs :uid "alice"}))
+
+(deftest account-key-authenticates-a-user
+  (let [{:keys [key uid]} (account-fixture)
+        c (mcp/credential key)]
+    (is (= :account (:kind c)))
+    (is (= uid (:uid c)) "writes are authored by the real user, not a synthetic id")
+    (is (str/starts-with? key "srk_") "the secret is self-identifying in configs")
+    (testing "a bogus key authenticates nothing"
+      (is (nil? (mcp/credential "srk_deadbeef"))))))
+
+(deftest account-key-lists-every-reachable-sheet
+  (let [{:keys [key mine theirs]} (account-fixture)
+        r (:structuredContent (tool "saltrim_list_sheets" {} key))
+        ids (set (map :sheet (:sheets r)))]
+    (is (contains? ids mine) "own sheet is listed")
+    (is (not (contains? ids theirs)) "someone else's sheet is NOT listed")
+    (testing "a sheet shared with me shows up too"
+      (db/set-share! theirs "alice" :user :read)
+      (let [r2 (:structuredContent (tool "saltrim_list_sheets" {} key))]
+        (is (contains? (set (map :sheet (:sheets r2))) theirs))))))
+
+(deftest account-key-reaches-many-sheets-without-reconfiguration
+  (let [{:keys [key mine]} (account-fixture)
+        other (store/storage-id "alice" "forecast")]
+    (db/ensure-sheet! other "alice" "forecast")
+    (doseq [s [mine other]]
+      (let [r (:structuredContent (tool "saltrim_write_cells"
+                                        {:sheet s :cells [{:addr "A1" :src "7"}]} key))]
+        (is (= s (:sheet r)) "the same key wrote to a different sheet")
+        (is (= 7 (:value (first (:cells r)))))
+        (is (not= db/MAIN (:branch r)) "still auto-forks — main is never touched")))))
+
+(deftest account-key-cannot-reach-what-its-owner-cannot
+  ;; the whole safety argument for a broader token: reach follows the ACL
+  (let [{:keys [key theirs]} (account-fixture)]
+    (doseq [[nm args] [["saltrim_read_range"  {:sheet theirs :range "A1:A1"}]
+                       ["saltrim_write_cells" {:sheet theirs :cells [{:addr "A1" :src "x"}]}]
+                       ["saltrim_describe_sheet" {:sheet theirs}]]]
+      (let [r (tool nm args key)]
+        (is (:isError r) (str nm " must refuse a sheet the user has no grant on"))
+        (is (str/includes? (get-in r [:content 0 :text]) "no access"))))
+    (testing "a read-only grant still refuses writes"
+      (db/set-share! theirs "alice" :user :read)
+      (is (not (:isError (tool "saltrim_read_range" {:sheet theirs :range "A1:A1"} key))))
+      (let [w (tool "saltrim_write_cells" {:sheet theirs :cells [{:addr "A1" :src "x"}]} key)]
+        (is (:isError w))
+        (is (str/includes? (get-in w [:content 0 :text]) "read-only"))))))
+
+(deftest account-key-asks-which-sheet-when-omitted
+  (let [{:keys [key]} (account-fixture)
+        r (tool "saltrim_read_range" {:range "A1:A1"} key)]
+    (is (:isError r))
+    (is (str/includes? (get-in r [:content 0 :text]) "saltrim_list_sheets")
+        "the error points the agent at the tool that fixes it")))
+
+(deftest rotating-a-key-revokes-the-old-one
+  (let [{:keys [key uid]} (account-fixture)
+        key2 (auth/mint-agent-key! uid)]
+    (is (not= key key2))
+    (is (nil? (mcp/credential key)) "the old key stops working the moment a new one is minted")
+    (is (= uid (:uid (mcp/credential key2))))
+    (testing "revoking leaves no key at all"
+      (auth/revoke-agent-key! uid)
+      (is (nil? (mcp/credential key2)))
+      (is (nil? (auth/agent-key-info uid))))))
+
+(deftest rotating-a-key-keeps-the-agent-branch
+  ;; the branch must follow the USER, not the key: deriving it from the token
+  ;; meant rotating stranded whatever the agent had been building (and put four
+  ;; characters of the secret into a branch name).
+  (let [{:keys [key uid mine]} (account-fixture)
+        b1 (mcp/agent-branch (mcp/credential key) key)]
+    (tool "saltrim_write_cells" {:sheet mine :cells [{:addr "A1" :src "1"}]} key)
+    (let [key2 (auth/mint-agent-key! uid)
+          b2   (mcp/agent-branch (mcp/credential key2) key2)]
+      (is (= b1 b2) "same branch after rotation — the agent resumes its work")
+      (is (not (str/includes? b1 (subs key 4 12))) "no secret material in the branch name")
+      (tool "saltrim_write_cells" {:sheet mine :cells [{:addr "A2" :src "2"}]} key2)
+      (is (= #{db/MAIN b1} (set (db/branch-names mine)))
+          "the rotated key wrote to the SAME branch, not a new orphan"))))
+
+(deftest key-info-never-exposes-the-secret
+  (let [{:keys [key uid]} (account-fixture)
+        info (auth/agent-key-info uid)]
+    (is (some? (:created-at info)))
+    (is (not (str/includes? (pr-str info) key)) "the secret is not recoverable from the DB")))
+
+(deftest a-link-credential-stays-confined-to-its-sheet
+  ;; the account key widens reach; the OLD per-sheet link must not inherit that
+  (let [{:keys [mine]} (account-fixture)
+        r (tool "saltrim_read_range" {:sheet mine :range "A1:A1"})]  ; *tok* = link for *sid*
+    (is (:isError r))
+    (is (str/includes? (get-in r [:content 0 :text]) "scoped to the sheet"))))
