@@ -13,6 +13,7 @@
             [uno.michelada.saltrim.auth :as auth]
             [uno.michelada.saltrim.util :as util :refer [timed]]
             [mount.core :refer [defstate]]
+            [uno.michelada.saltrim.mcp :refer [handle-mcp]]
             [uno.michelada.saltrim.web.state :refer [SWEEP-MS sessions* sheets*]]
             [uno.michelada.saltrim.web.collab :refer [sweep!]]
             [uno.michelada.saltrim.web.handlers :refer [auth-routes handle-branch handle-cell handle-clear handle-copy handle-cut handle-defadd handle-defdel handle-deflock handle-defsave handle-defunlock handle-delete-sheet handle-export handle-flatten handle-graph handle-import handle-insert handle-merge handle-mergecells handle-paste handle-presence handle-props handle-redo handle-root handle-session-end handle-share handle-size handle-stream handle-style handle-undo handle-unmergecells handle-view handle-viewat]])
@@ -66,6 +67,9 @@
     [:get "/export.xlsx"]    (handle-export req)
     [:post "/import"]        (handle-import req)
     [:post "/session/end"]   (handle-session-end req)
+    ;; MCP (agents): JSON-RPC in, JSON out, authorized by a sheet link token.
+    ;; Stateless — no session, no SSE; see the mcp ns.
+    [:post "/mcp"]           (handle-mcp req)
     ;; dev-only diagnostics: exposed only under the name-only dev provider
     [:get "/debug"]       (if-not (auth/dev-auth?)
                             {:status 404 :body "not found"}

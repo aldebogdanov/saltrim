@@ -334,5 +334,20 @@ navigates/edits a block as one cell (`mblk`/`nav-step`, selection snaps to the
 anchor). `/mergecells` + `/unmergecells` (owner-or-editor) full-window re-render
 like `/insert`; a `:merge` undo entry reports `:affected :all` (undo-step) for
 the same reason. NOT via the style bar (kept out of `meta-props`/`style-bar-props`).
+**MCP server** (agents) is DONE (phase 1): `POST /mcp` in the SAME process
+(`mcp` ns, one route in `web.clj`) — a side-process would be a SECOND WRITER
+bypassing the room/autosave/broadcast. Stateless JSON-RPC (no Mcp-Session-Id,
+no second SSE beside the browser stream); notifications (no `:id`) → 202 no
+body; tool failures are `isError` RESULTS, not protocol errors. Auth = the
+existing **capability link**: `Authorization: Bearer <link-token>` → exactly one
+sheet at `:read`/`:read-write` (`mcp/credential`); the TOKEN picks the sheet, a
+tool arg never can. **Agent writes AUTO-FORK**: first write forks `main` into
+`agent-<tok8>` (`mcp/agent-branch`, idempotent), so the human reviews via the
+owner-only 3-way merge — main is never written by an agent. Tools go through the
+handler seam (`sheet-rec`→`set-cell!`→`settle!`→`save-rec!`→`broadcast!` with a
+nil editor-sid = every session sees it live) and return COMPUTED values so the
+agent gets the reactive feedback loop. Tool descriptions push FORMULAS over
+pasted numbers. Caps: `MAX-READ-CELLS` 2000 (truncates, not errors),
+`MAX-WRITE-CELLS` 1000. Spike: `spikes/08-mcp-transport.clj`.
 Cheap win left: cell assertions (`=(assert …)`). See `TECHDEBT.md` for
 deferred items.
