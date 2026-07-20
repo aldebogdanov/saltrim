@@ -33,7 +33,8 @@
     (is (string? h))
     (is (str/includes? h "quick guide"))
     (is (str/includes? h "Cells &amp; formulas") "first section half present")
-    (is (str/includes? h "Export to Excel") "second section half present")))
+    (is (str/includes? h "Export to Excel") "second section half present")
+    (is (str/includes? h "AI agents (MCP)") "third section half present")))
 
 (deftest import-report-is-a-modal-fragment
   ;; The report lands in the import modal over SSE (#importreport), so it must be
