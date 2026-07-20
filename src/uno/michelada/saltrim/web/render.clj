@@ -481,6 +481,21 @@
              "verified against Excel's own cached value — mismatches are demoted to values the same "
              "way, so an imported sheet is always correct. The import report lists all of it."])))
 
+(defn- help-sections-c []
+  (let [h3 help-h3 p help-p kbd help-kbd]
+    (list
+            [:div {:style h3} "AI agents (MCP)"]
+            [:p {:style p} "SaltRim speaks the Model Context Protocol, so an AI agent can work in this "
+             "sheet as a collaborator (served at " [:span {:style kbd} "POST /mcp"] "). Give it access "
+             "the same way you'd share with a person: enable the capability " [:span {:style kbd} "link"]
+             " (top bar) at edit level and hand the agent that token as its " [:span {:style kbd} "Authorization: Bearer"]
+             " credential."]
+            [:p {:style p} "Agent writes never touch " [:span {:style kbd} "main"] " — the first write "
+             "auto-forks it into the agent's own branch, which you review and merge (or delete) from the "
+             [:span {:style kbd} "🌿"] " branches panel, the same as any human's fork. Because the sheet "
+             "is reactive, agents write " [:b "formulas"] ", not pasted numbers, so the model keeps "
+             "recalculating after the agent is done."])))
+
 (defn- help-html
   "In-app end-user reference, toggled by $help. Mirrors README's user guide.
    Pure server-rendered HTML shown/hidden by Datastar data-show — no app.js.
@@ -500,6 +515,7 @@
            [:button {:class "btn" :data-on:click "$help=false" :title "close"} "✕"]]
           (help-sections-a)
           (help-sections-b)
+          (help-sections-c)
           [:div {:style (str "margin-top:1rem;padding-top:.6rem;border-top:1px solid var(--line);"
                              "font:11px sans-serif;color:#9aa1a9;text-align:center;")}
            "SaltRim " (version/current) " · "
