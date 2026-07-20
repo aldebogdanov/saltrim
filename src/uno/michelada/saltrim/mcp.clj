@@ -11,15 +11,21 @@
    which makes an agent a first-class collaborator the human WATCHES live.
 
    AGENT WRITES AUTO-FORK. A tool call never edits `main`. The first write on a
-   credential forks main into that credential's own branch (`agent-<tok8>`, see
-   `agent-branch`) and every later write lands there, so the human reviews the
-   agent's work through the existing owner-only 3-way merge (🌿 modal) instead of
-   waking up to rewritten cells. Every result reports the branch it wrote to.
+   credential forks main into that credential's own branch (see `agent-branch`)
+   and every later write lands there, so the human reviews the agent's work
+   through the existing owner-only 3-way merge (🌿 modal) instead of waking up to
+   rewritten cells. Every result reports the branch it wrote to.
 
-   AUTH is the capability link that already exists: `Authorization: Bearer
-   <link-token>` resolves to exactly one sheet at :read or :read-write
-   (rotatable, revocable). The token — never a tool argument — decides which
-   sheet is reachable.
+   AUTH: `Authorization: Bearer <token>` accepts two credentials (`credential`):
+
+   - an ACCOUNT AGENT KEY (`srk_…`) authenticating a USER. One key reaches every
+     sheet that user owns or was granted, so pointing an agent at a new sheet
+     needs no config change. The sheet then comes from a tool argument — but
+     `resolve-sheet` authorizes it against that user's real ACL on EVERY call,
+     so the key widens reach without widening authority. Minted/rotated/revoked
+     from the 🔑 panel; only its hash is stored.
+   - a per-sheet CAPABILITY LINK (the original). The token alone picks the
+     sheet and a tool argument can never name another one.
 
    Transport notes (proved in spikes/08-mcp-transport.clj): the protocol needs no
    library — a JSON-RPC codec, a dispatch case and one route. Request/response
@@ -29,6 +35,7 @@
   (:require [clojure.string :as str]
             [jsonista.core :as json]
             [uno.michelada.saltrim.addr :as addr]
+            [uno.michelada.saltrim.auth :as auth]
             [uno.michelada.saltrim.db :as db]
             [uno.michelada.saltrim.sheet :as sheet]
             [uno.michelada.saltrim.store :as store]
@@ -69,27 +76,83 @@
           not-empty))
 
 (defn credential
-  "Resolve a link token to {:sheet-id :level :uid}, or nil when it grants
-   nothing. The TOKEN decides the sheet — a tool argument never can, so an agent
-   can't reach a sheet it wasn't given. `:uid` is a stable synthetic author id
-   recorded on the cells this agent writes."
+  "Resolve a Bearer token to a credential, or nil when it grants nothing. Two
+   kinds, tried in order:
+
+   - `:account` — an AGENT KEY (`srk_…`, `auth/agent-key->uid`). Authenticates a
+     USER, so every sheet they own or were granted is reachable with one
+     credential and no per-sheet configuration. The sheet then comes from a tool
+     argument, but `resolve-sheet` re-checks it against that user's real ACL on
+     every call, so this widens reach WITHOUT widening authority.
+   - `:link` — a per-sheet capability link (the original). The TOKEN alone picks
+     the sheet; a tool argument can never name another one.
+
+   `:uid` is the author recorded on cells this agent writes: the real user for
+   an account key, a synthetic `mcp-<tok8>` for an anonymous link."
   [token]
-  (when-let [sheet-id (db/sheet-by-link-token token)]
-    (when-let [level (db/access-level nil sheet-id token)]
-      {:sheet-id sheet-id :level level :uid (str "mcp-" (subs token 0 8))})))
+  (or (when-let [uid (auth/agent-key->uid token)]
+        {:kind :account :uid uid})
+      (when-let [sheet-id (db/sheet-by-link-token token)]
+        (when-let [level (db/access-level nil sheet-id token)]
+          {:kind :link :sheet-id sheet-id :level level
+           :uid (str "mcp-" (subs token 0 8))}))))
+
+(defn- level-for
+  "This credential's effective level on `sheet-id`: owners get :read-write,
+   everyone else whatever the ACL grants them. nil = no access."
+  [{:keys [uid]} sheet-id]
+  (let [[owner _] (store/split-id sheet-id)]
+    (if (= uid owner) :read-write (db/access-level uid sheet-id nil))))
+
+(defn resolve-sheet
+  "The sheet a call targets, as {:sheet-id :level} — the single authorization
+   gate every tool goes through.
+
+   For a LINK credential the token's own sheet wins and a mismatching `sheet`
+   argument is refused outright. For an ACCOUNT credential the argument selects
+   the sheet, but it is authorized against that user's ACL, so an agent key can
+   only reach what its owner can. Throws with an actionable message otherwise."
+  [{:keys [kind sheet-id] :as cred} requested]
+  (let [requested (not-empty (str requested))]
+    (if (= kind :link)
+      (if (and requested (not= requested sheet-id))
+        (throw (ex-info (str "this credential is scoped to the sheet \"" sheet-id
+                             "\" and cannot reach \"" requested "\"") {}))
+        {:sheet-id sheet-id :level (:level cred)})
+      (cond
+        (nil? requested)
+        (throw (ex-info (str "which sheet? pass `sheet` — call saltrim_list_sheets "
+                             "to see the ones you can reach") {}))
+        (not (store/valid-id? requested))
+        (throw (ex-info (str "not a valid sheet id: " (pr-str requested)) {}))
+        :else
+        (if-let [level (level-for cred requested)]
+          {:sheet-id requested :level level}
+          (throw (ex-info (str "no access to sheet \"" requested
+                               "\" (call saltrim_list_sheets for the ones you can reach)")
+                          {})))))))
 
 (defn agent-branch
-  "The branch this credential works on. Derived from the token so the same agent
-   resumes its own branch across stateless calls, and two agents on one sheet
-   never collide. Never `main`."
-  [token]
-  (str "agent-" (subs token 0 8)))
+  "The branch this credential works on — stable across stateless calls, so an
+   agent resumes its own work, and distinct per agent so two never collide.
+   Never `main`.
+
+   For an ACCOUNT key it is derived from the USER, not the key: rotating a key
+   must not strand the branch the agent was working on (and no part of the
+   secret belongs in a branch name). For a LINK there is no user identity to
+   key on, so a prefix of the (capability, semi-public) token is used."
+  [{:keys [kind uid]} token]
+  (let [raw (if (= kind :account)
+              (str "agent-" uid)
+              (str "agent-" (subs token 0 8)))]
+    ;; branch names are [A-Za-z0-9-]{1,32} (store/valid-branch?)
+    (subs (str/replace raw #"[^A-Za-z0-9-]" "-") 0 (min 32 (count raw)))))
 
 (defn- ensure-agent-branch!
   "Fork `main` into this credential's branch on first write, so agent edits never
    land on main. Idempotent. Returns the branch name."
-  [sheet-id token]
-  (let [b (agent-branch token)]
+  [sheet-id cred token]
+  (let [b (agent-branch cred token)]
     (when-not (db/branch-exists? sheet-id b)
       (db/fork-branch! sheet-id db/MAIN b)
       (u/log "INFO" "mcp" "forked" sheet-id db/MAIN "->" b))
@@ -97,15 +160,28 @@
 
 ;; --- tool definitions ------------------------------------------------------
 
+(def ^:private sheet-arg
+  {:type "string"
+   :description (str "storage id of the sheet, e.g. \"alice__budget\" (from "
+                     "saltrim_list_sheets). Optional for a single-sheet link "
+                     "credential, which is already scoped to its own sheet.")})
+
 (def tools
-  [{:name "saltrim_describe_sheet"
+  [{:name "saltrim_list_sheets"
     :description
-    (str "Describe the SaltRim sheet this credential grants access to: its id, "
-         "your access level, the branch your writes go to, and the branches that "
-         "exist. Call this first — it tells you the sheet id to pass to the other "
-         "tools. SaltRim is a REACTIVE spreadsheet: cells hold Clojure formulas "
-         "that recalculate, not frozen values.")
+    (str "List every SaltRim sheet this credential can reach, with your access "
+         "level on each. CALL THIS FIRST — it gives you the sheet ids the other "
+         "tools need. SaltRim is a REACTIVE spreadsheet: cells hold Clojure "
+         "formulas that keep recalculating, not frozen values.")
     :inputSchema {:type "object" :properties {} :additionalProperties false}
+    :annotations {:readOnlyHint true :destructiveHint false :idempotentHint true
+                  :openWorldHint false}}
+
+   {:name "saltrim_describe_sheet"
+    :description
+    (str "Describe one sheet: its id, your access level, the branch your writes "
+         "go to, and the branches that exist.")
+    :inputSchema {:type "object" :properties {:sheet sheet-arg}}
     :annotations {:readOnlyHint true :destructiveHint false :idempotentHint true
                   :openWorldHint false}}
 
@@ -117,7 +193,8 @@
          "pass branch to read back your own edits.")
     :inputSchema
     {:type "object"
-     :properties {:range  {:type "string"
+     :properties {:sheet  sheet-arg
+                  :range  {:type "string"
                            :description "A1-style rectangle, e.g. \"A1:D20\" (or a single cell \"B7\")"}
                   :branch {:type "string"
                            :description "branch to read (default \"main\"); use your agent branch to see your own writes"}}
@@ -138,7 +215,8 @@
          "sheet owner reviews and merges. The result reports that branch.")
     :inputSchema
     {:type "object"
-     :properties {:cells {:type "array"
+     :properties {:sheet sheet-arg
+                  :cells {:type "array"
                           :description "cells to write, applied in order"
                           :items {:type "object"
                                   :properties {:addr {:type "string" :description "A1-style address, e.g. \"B7\""}
@@ -169,19 +247,41 @@
                            " — use an A1-style rectangle like \"A1:D20\"") {})))
     [a b]))
 
-(defn describe-sheet [{:keys [sheet-id level]} token]
-  {:sheet sheet-id
-   :name (second (store/split-id sheet-id))
-   :level (name level)
-   :writes_go_to (if (= :read-write level) (agent-branch token) nil)
-   :branches (vec (db/branch-names sheet-id))
-   :note (if (= :read-write level)
-           (str "Your writes auto-fork onto \"" (agent-branch token)
-                "\"; the sheet owner reviews and merges them. main is never edited directly.")
-           "Read-only credential — write tools will be refused.")})
+(defn list-sheets
+  "Every sheet this credential can reach. An ACCOUNT key sees the user's own
+   sheets plus everything shared with them; a LINK is scoped to its one sheet."
+  [{:keys [kind uid sheet-id level] :as cred}]
+  (if (= kind :link)
+    {:sheets [{:sheet sheet-id :name (second (store/split-id sheet-id))
+               :level (name level) :owned false}]
+     :note "This credential is a per-sheet link, so it reaches exactly this one sheet."}
+    (let [owned  (for [id (db/sheets-of-owner uid)]
+                   {:sheet id :name (second (store/split-id id))
+                    :level "read-write" :owned true})
+          shared (for [{:keys [sheet-id name level]} (db/sheets-shared-with uid)]
+                   {:sheet sheet-id
+                    :name (or (not-empty (str name)) (second (store/split-id sheet-id)))
+                    :level (clojure.core/name level) :owned false})
+          all    (vec (concat owned shared))]
+      (cond-> {:sheets all}
+        (empty? all)
+        (assoc :note "No sheets yet — create one in the SaltRim UI first.")))))
 
-(defn read-range [{:keys [sheet-id]} {:keys [range branch]}]
-  (let [branch (or (not-empty (str branch)) db/MAIN)
+(defn describe-sheet [cred {:keys [sheet]} token]
+  (let [{:keys [sheet-id level]} (resolve-sheet cred sheet)]
+    {:sheet sheet-id
+     :name (second (store/split-id sheet-id))
+     :level (name level)
+     :writes_go_to (if (= :read-write level) (agent-branch cred token) nil)
+     :branches (vec (db/branch-names sheet-id))
+     :note (if (= :read-write level)
+             (str "Your writes auto-fork onto \"" (agent-branch cred token)
+                  "\"; the sheet owner reviews and merges them. main is never edited directly.")
+             "Read-only access to this sheet — write tools will be refused.")}))
+
+(defn read-range [cred {:keys [range branch] :as args}]
+  (let [{:keys [sheet-id]} (resolve-sheet cred (:sheet args))
+        branch (or (not-empty (str branch)) db/MAIN)
         _ (when-not (store/valid-branch? branch)
             (throw (ex-info (str "bad branch name " (pr-str branch)) {})))
         _ (when-not (db/branch-exists? sheet-id branch)
@@ -203,9 +303,12 @@
   "Apply the writes on this credential's OWN branch (forked from main on first
    use), settle the engine, persist, and broadcast to every browser session in
    that room."
-  [{:keys [sheet-id level uid]} {:keys [cells]} token]
+  [cred {:keys [cells] :as args} token]
+  (let [{:keys [sheet-id level]} (resolve-sheet cred (:sheet args))
+        uid (:uid cred)]
   (when-not (= :read-write level)
-    (throw (ex-info "read-only credential — this link grants view access only" {})))
+    (throw (ex-info (str "read-only access to \"" sheet-id
+                         "\" — this credential grants view access only") {})))
   (when-not (seq cells)
     (throw (ex-info "no cells given" {})))
   (when (> (count cells) MAX-WRITE-CELLS)
@@ -213,7 +316,7 @@
   (doseq [{:keys [addr]} cells]
     (when-not (addr/valid? addr)
       (throw (ex-info (str "bad cell address " (pr-str addr) " — use A1 style") {}))))
-  (let [branch (ensure-agent-branch! sheet-id token)
+  (let [branch (ensure-agent-branch! sheet-id cred token)
         room   [sheet-id branch]
         {:keys [sh]} (room-of sheet-id branch)]
     (doseq [{:keys [addr src]} cells]
@@ -223,15 +326,17 @@
     ;; nil editor-sid = authored by no browser session, so EVERY session in the
     ;; room (i.e. anyone viewing this branch) gets the patch live
     (broadcast! nil room sh (map :addr cells))
-    {:branch branch
+    {:sheet sheet-id
+     :branch branch
      :cells (mapv #(cell-out sh (:addr %)) cells)
      :note (str "written to branch \"" branch "\" — main is unchanged; "
-                "the sheet owner merges it from the 🌿 branches panel")}))
+                "the sheet owner merges it from the 🌿 branches panel")})))
 
 (defn- call-tool [cred token {:keys [name arguments]}]
   (let [args (or arguments {})]
     (case name
-      "saltrim_describe_sheet" (describe-sheet cred token)
+      "saltrim_list_sheets"    (list-sheets cred)
+      "saltrim_describe_sheet" (describe-sheet cred args token)
       "saltrim_read_range"     (read-range cred args)
       "saltrim_write_cells"    (write-cells cred args token)
       (throw (ex-info (str "unknown tool: " name) {})))))
@@ -284,7 +389,10 @@
                  "WWW-Authenticate" "Bearer"}
        :body (json/write-value-as-string
               (rpc-error nil ERR-PARAMS
-                         "missing Authorization: Bearer <sheet link token>"))}
+                         (str "missing Authorization: Bearer <token>. Use an "
+                              "account agent key (srk_…, from the 🔑 panel in "
+                              "SaltRim — reaches all your sheets) or a "
+                              "single-sheet capability link token.")))}
 
       (or (= ::bad body) (nil? body))
       {:status 400 :headers {"Content-Type" "application/json"}

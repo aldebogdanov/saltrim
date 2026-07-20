@@ -338,12 +338,21 @@ the same reason. NOT via the style bar (kept out of `meta-props`/`style-bar-prop
 (`mcp` ns, one route in `web.clj`) — a side-process would be a SECOND WRITER
 bypassing the room/autosave/broadcast. Stateless JSON-RPC (no Mcp-Session-Id,
 no second SSE beside the browser stream); notifications (no `:id`) → 202 no
-body; tool failures are `isError` RESULTS, not protocol errors. Auth = the
-existing **capability link**: `Authorization: Bearer <link-token>` → exactly one
-sheet at `:read`/`:read-write` (`mcp/credential`); the TOKEN picks the sheet, a
-tool arg never can. **Agent writes AUTO-FORK**: first write forks `main` into
-`agent-<tok8>` (`mcp/agent-branch`, idempotent), so the human reviews via the
-owner-only 3-way merge — main is never written by an agent. Tools go through the
+body; tool failures are `isError` RESULTS, not protocol errors. Auth (`mcp/credential`) takes
+TWO kinds of `Authorization: Bearer`: an **account AGENT KEY** (`srk_…`,
+`:agentkey` datoms, SHA-256 hashed like the browser token — `auth/mint-agent-key!`
+/`agent-key->uid`/`revoke-agent-key!`, minted in the 🔑 panel via `/agentkey`)
+authenticating a USER, or the older per-sheet **capability link**. An account key
+reaches every sheet its owner can (so a new sheet needs NO config change) — the
+sheet comes from a tool arg but `mcp/resolve-sheet` re-authorizes it against that
+user's real ACL on EVERY call, so reach widens and AUTHORITY does not; a link
+credential still refuses any sheet arg but its own. Minting REPLACES the previous
+key (rotation = revocation); the secret is returned once and never readable again.
+**Agent writes AUTO-FORK**: first write forks `main` into `mcp/agent-branch`
+(idempotent), so the human reviews via the owner-only 3-way merge — main is never
+written by an agent. That branch is derived from the UID for an account key (so
+rotating doesn't strand the agent's work, and no secret lands in a branch name),
+from the token for a link. Tools go through the
 handler seam (`sheet-rec`→`set-cell!`→`settle!`→`save-rec!`→`broadcast!` with a
 nil editor-sid = every session sees it live) and return COMPUTED values so the
 agent gets the reactive feedback loop. Tool descriptions push FORMULAS over

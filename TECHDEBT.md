@@ -452,9 +452,19 @@ inputs + current target), runtime cycle guard, dashed graph edges. Deferred:
   their own auto-forked branch, so the human's remedy is "don't merge" / delete
   the branch. A durable, author-scoped undo (`:cellprop/author` + history) would
   close it properly.
-- **No agent branch lifecycle.** `agent-<tok8>` branches are created on first
-  write and never cleaned up; rotating the link token orphans the old one.
-  Wants a "discard my branch" tool and/or owner-side pruning in the 🌿 panel.
+- **No agent branch lifecycle.** Agent branches are created on first write and
+  never cleaned up. Rotating an ACCOUNT key no longer orphans one (the branch is
+  derived from the uid, not the key), but a rotated LINK token still does, and
+  nothing prunes a branch whose agent is gone. Wants a "discard my branch" tool
+  and/or owner-side pruning in the 🌿 panel.
+- **One agent key per user, unlabelled.** Minting replaces the previous key, so
+  two agents can't hold distinct credentials and you can't revoke one without
+  revoking the other — and they'd share an agent branch anyway (it is keyed on
+  the uid). Multiple named keys, each with its own branch, is the natural next
+  step if more than one agent works a sheet.
+- **Account keys carry the user's FULL access.** By design — reach follows the
+  ACL — but there is no way to mint a read-only key, or one scoped to a subset
+  of sheets. A per-sheet capability link is the only narrower option today.
 - **Read pagination is a cap, not a cursor.** `saltrim_read_range` truncates
   at `MAX-READ-CELLS` and says so; MCP guidance prefers a real cursor/
   `has_more` so an agent can page a large sheet.

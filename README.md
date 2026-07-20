@@ -310,18 +310,32 @@ other's cursors and edit locks live.
 SaltRim speaks the **Model Context Protocol**, so an AI agent can work in your
 sheet as a collaborator — served by the same process, at `POST /mcp`.
 
-**Give an agent access** the same way you'd give a person a link: enable the
-sheet's capability link at **edit** level and hand the agent its token. The token
-grants exactly one sheet, and you can rotate or revoke it at any time.
+**Give an agent access** with an **agent key** — the 🔑 button (top bar) mints one
+for your account. A single key reaches **every sheet you can**, so making a new
+sheet needs no configuration change. It carries *your* access and nothing more:
+an agent can only touch sheets you own or were granted.
+
+The secret is shown **once** (only its hash is stored). **Rotate** at any time —
+the old key stops working immediately — or **revoke** it outright.
 
 ```jsonc
-// Claude Code / Claude Desktop MCP config
+// ~/.claude.json or Claude Desktop config
 { "mcpServers": {
     "saltrim": {
-      "type": "http",
-      "url": "https://your-saltrim/mcp",
-      "headers": { "Authorization": "Bearer <sheet link token>" } } } }
+      "command": "npx",
+      "args": ["-y", "mcp-remote@latest",
+               "https://your-saltrim/mcp",
+               "--transport", "http-only",
+               "--header", "Authorization:${AUTH_TOKEN}"],
+      "env": { "AUTH_TOKEN": "Bearer srk_…" } } } }
 ```
+
+> Note the `--header` value has **no space** around the `:` — put the space
+> inside the env var, as above. That's an `mcp-remote` argument-parsing quirk.
+
+A per-sheet **capability link** token also works as a credential if you want to
+scope an agent to exactly one sheet (enable the link at edit level and use its
+token instead) — then the sheet argument is fixed and cannot name another.
 
 **Agent edits never touch `main`.** The first write on a token forks `main` into
 that agent's own branch (`agent-<token prefix>`). You review its work through the
@@ -334,7 +348,8 @@ pre-computed numbers: what an agent builds keeps recalculating after it's gone.
 Writes come back with the computed values, and you watch the cells land live if
 you have the branch open.
 
-Tools: `saltrim_describe_sheet` · `saltrim_read_range` · `saltrim_write_cells`.
+Tools: `saltrim_list_sheets` · `saltrim_describe_sheet` · `saltrim_read_range` ·
+`saltrim_write_cells`.
 
 ### Export to Excel
 
