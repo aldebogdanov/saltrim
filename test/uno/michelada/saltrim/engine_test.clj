@@ -70,6 +70,52 @@
       (is (= 42 (v s "C1")))
       (is (= 43 (v s "C2"))))))
 
+(deftest static-ranges-are-capped
+  ;; ranges expand eagerly to one ref marker per cell, so an unbounded rectangle
+  ;; builds millions of markers before anything can reject it. Dynamic ranges
+  ;; were already capped (rt/MAX-DYN-RANGE); static ones were not.
+  (let [s (mk)]
+    (testing "a normal range still works"
+      (put s "A1" "1") (put s "A2" "2") (put s "A3" "3")
+      (put s "B1" "=(reduce + $A1:A3)")
+      (is (= 6 (v s "B1"))))
+    (testing "an oversized rectangle is refused, not expanded"
+      (is (thrown-with-msg? Exception #"covers .* cells \(max"
+                            (put s "C1" "=(reduce + $A1:ZZ99999)")))
+      (is (thrown-with-msg? Exception #"covers .* cells \(max"
+                            (put s "C2" "=(reduce + #cells A1:ZZ99999)"))))
+    (testing "the cap is applied to the rectangle AREA, not one axis"
+      ;; 200 cols x 200 rows = 40000 > 10000, though neither side is huge
+      (is (thrown-with-msg? Exception #"covers 40000 cells"
+                            (put s "C3" "=(count $A1:GR200)"))))
+    (testing "a big-but-allowed range is fine"
+      (is (= 900 (count (:deps (formula/parse "(count $A1:AD30)" nil))))))))
+
+(deftest clear-then-retype-takes-the-new-value
+  ;; Signals are interned by id in the execution context: blanking a cell drops
+  ;; our `vals` entry but leaves "val:<addr>" registered, so re-creating it hands
+  ;; back the OLD signal. Without an unconditional reset the cell silently kept
+  ;; its previous value — Delete then type 99 still read 5, and every dependent
+  ;; computed off the stale number.
+  (let [s (mk)]
+    (put s "A1" "5")
+    (put s "B1" "=(* #cell A1 2)")
+    (is (= 5 (v s "A1")))
+    (is (= 10 (v s "B1")))
+    (testing "clear"
+      (put s "A1" "")
+      (is (nil? (v s "A1"))))
+    (testing "retype a DIFFERENT value"
+      (put s "A1" "99")
+      (is (= 99 (v s "A1")) "the cell must show what was typed, not the old value")
+      (is (= "99" (sh/raw s "A1")))
+      (is (= 198 (v s "B1")) "dependents recompute off the new value"))
+    (testing "and it still works a second time round"
+      (put s "A1" "")
+      (put s "A1" "7")
+      (is (= 7 (v s "A1")))
+      (is (= 14 (v s "B1"))))))
+
 (deftest cycles
   (let [s (mk)]
     (testing "self reference rejected, cell keeps prior value"
