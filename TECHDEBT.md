@@ -432,6 +432,7 @@ inputs + current target), runtime cycle guard, dashed graph edges. Deferred:
 - **Pre-existing quirk inherited:** `shift-refs`'s text regexes rewrite
   `$A1`-shaped tokens inside STRING literals too (`=(str "owe $A1")` shifts
   on paste) — applies inside `$(…)` bodies the same way.
+  
 - **MCP: agent writes are not undoable by the human.** The undo stack is
   per-SESSION (per browser tab) in `web`; an MCP writer has no tab, so an
   agent's edits can't be `Ctrl+Z`'d. Mitigated by design — agent writes land on
@@ -453,6 +454,7 @@ inputs + current target), runtime cycle guard, dashed graph edges. Deferred:
   returned as data, but a cell containing instructions is a prompt-injection
   surface for whatever client is driving. Worth an explicit note in the tool
   descriptions if agents start reading third-party sheets.
+  
 - **Merged cells — partial overlap not rejected.** `/mergecells` clears any
   `:merge` span whose anchor sits INSIDE the new rectangle, but a pre-existing
   merge anchored OUTSIDE the rectangle that only partially overlaps it is left
