@@ -305,6 +305,37 @@ link** (an unguessable URL, rotatable) or with **specific people**, at view or
 edit level. Multiple people can edit the same sheet at once — you'll see each
 other's cursors and edit locks live.
 
+### AI agents (MCP)
+
+SaltRim speaks the **Model Context Protocol**, so an AI agent can work in your
+sheet as a collaborator — served by the same process, at `POST /mcp`.
+
+**Give an agent access** the same way you'd give a person a link: enable the
+sheet's capability link at **edit** level and hand the agent its token. The token
+grants exactly one sheet, and you can rotate or revoke it at any time.
+
+```jsonc
+// Claude Code / Claude Desktop MCP config
+{ "mcpServers": {
+    "saltrim": {
+      "type": "http",
+      "url": "https://your-saltrim/mcp",
+      "headers": { "Authorization": "Bearer <sheet link token>" } } } }
+```
+
+**Agent edits never touch `main`.** The first write on a token forks `main` into
+that agent's own branch (`agent-<token prefix>`). You review its work through the
+normal 🌿 **branches** panel — a 3-way merge preview with a conflict picker — and
+merge it when you're happy, or delete the branch if you're not. Nothing the agent
+does can silently rewrite your sheet.
+
+Because the sheet is reactive, agents are told to write **formulas**, not
+pre-computed numbers: what an agent builds keeps recalculating after it's gone.
+Writes come back with the computed values, and you watch the cells land live if
+you have the branch open.
+
+Tools: `saltrim_describe_sheet` · `saltrim_read_range` · `saltrim_write_cells`.
+
 ### Export to Excel
 
 The **⬇ xlsx** button (top bar) downloads the sheet as an `.xlsx` file. It is a
