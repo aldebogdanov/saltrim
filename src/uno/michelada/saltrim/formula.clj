@@ -79,6 +79,30 @@
     (walk/postwalk (fn [x] (when (dynref? x) (vreset! acc true)) x) form)
     @acc))
 
+(def MAX-RANGE-CELLS
+  "Cap on how many cells a STATIC range (`$A1:D9`, `#cells A1:D9`) may expand to
+   at read time. Ranges expand eagerly into one ref marker per cell, so a typo'd
+   `$A1:ZZ99999` would build millions of markers (and that many `await`s in one
+   body) before anything could reject it. Mirrors `rt/MAX-DYN-RANGE`, which caps
+   the dynamic `$(…)` path the same way."
+  10000)
+
+(defn- expand-range
+  "`(vector <ref> …)` for the inclusive rectangle `a`..`b`, refusing anything
+   over `MAX-RANGE-CELLS`. The size is computed from the corner INDICES first —
+   counting after materializing the addresses would already have paid the cost
+   we're trying to refuse."
+  [a b]
+  (let [{ca :ci ra :ri} (addr/parse a)
+        {cb :ci rb :ri} (addr/parse b)
+        n (* (inc (- (max ca cb) (min ca cb)))
+             (inc (- (max ra rb) (min ra rb))))]
+    (when (> n MAX-RANGE-CELLS)
+      (throw (ex-info (str "range " a ":" b " covers " n " cells (max "
+                           MAX-RANGE-CELLS ") — reference a smaller rectangle")
+                      {:range [a b] :cells n})))
+    (cons 'vector (map ref-marker (addr/range-cells a b)))))
+
 (def ^:private readers
   {;; #cell A1 -> (::ref "A1")
    'cell  (fn [sym] (ref-marker (str sym)))
@@ -86,7 +110,7 @@
    ;; #cells A1:C1 -> (vector (::ref "A1") (::ref "B1") (::ref "C1"))  (rectangle)
    'cells (fn [sym]
             (let [[a b] (str/split (str sym) #":")]
-              (cons 'vector (map ref-marker (addr/range-cells a b)))))})
+              (expand-range a b)))})
 
 (defn deps
   "Cell addresses referenced by a marker form."
@@ -111,7 +135,7 @@
   (when (symbol? x)
     (when-let [[_ a b] (re-matches dollar-ref-re (name x))]
       (if b
-        (cons 'vector (map ref-marker (addr/range-cells a b)))
+        (expand-range a b)
         (ref-marker a)))))
 
 ;; A RELATIVE `$`-ref names a cell by OFFSET from the owner cell, so it survives

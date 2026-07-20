@@ -49,6 +49,16 @@ This removes the row cap entirely and makes the cap purely a coordinate clamp.
   lock serializes server side, but simultaneous async posts arrive unordered).
 - No config system yet — grid bounds, geometry are `def` constants. Fold into
   per-sheet settings once persistence lands.
+- **Signals are INTERNED BY ID in the execution context — a trap worth
+  remembering.** `sig/->SignalRef "val:<addr>"` does not always hand back a
+  fresh signal: after a cell is blanked (which drops our `vals` entry but leaves
+  the signal registered under that id) it returns the OLD one, still holding the
+  old value, and `ensure-signal-initialized!` will not overwrite it. That made
+  clear-then-retype silently keep the previous value (`raw` said 99, the cell
+  read 5, and dependents computed off the stale number); it self-healed on
+  reload, which is why it hid for so long. `write-cell!` now `reset!`s the signal
+  unconditionally after creating it. Any future code that mints a signal by a
+  reused id must do the same.
 
 ## Sessions — crash/sleep cleanup backstop
 
@@ -76,9 +86,9 @@ reap-session! which close-sse!s the stored generator. No heartbeat.
 
 ## Collaboration — follow-ups
 
-- **Stream reconnect**: the stream is opened via Datastar `@get`; if it drops
-  (server restart, transient network) the client does not auto-reconnect like a
-  native EventSource. Add a reconnect (re-click the trigger on error / poll).
+- **Stream reconnect — DONE.** `app.cljs` re-opens the stream on `finished` /
+  `retries-failed` with capped exponential backoff (`schedule-reopen!`, 2s→30s),
+  suppressed while unloading/hidden. No heartbeat.
 - **Dead-connection reaping latency**: a crashed peer's stream is closed on the
   next broadcast to it (write throws -> reap) or by the sweep. Fine, but means a
   zombie socket can linger up to the sweep interval with no traffic.
@@ -88,8 +98,9 @@ reap-session! which close-sse!s the stored generator. No heartbeat.
 - **Conflict policy**: last-write-wins for distinct cells. Same-cell editing is
   now guarded by presence locks (below); cross-cell merge is still absent.
 
-The `/debug` endpoint (session/sheet counts) is dev-only — gate or remove before
-any real deployment.
+The `/debug` endpoint (session/sheet counts) is already gated on
+`auth/dev-auth?` in `web.clj`, so it is unreachable once a real OAuth provider
+is configured. Nothing to do before deploy.
 
 ## Presence & edit locking — follow-ups
 
@@ -187,9 +198,6 @@ REMAINING:
 - **Real-provider flows untested live**: GitHub/Google were implemented to
   spec but only exercised with the provider unconfigured (redirect + error
   paths). Needs one manual run with real client ids.
-- **Legacy un-namespaced sheets** (`data/default.edn` etc.) are no longer
-  served — only `owner__name` ids resolve. Claim by renaming the file to
-  `<uid>__<name>.edn` (loads as fmt 1 = public, next save upgrades to fmt 2).
 - **Sheet picker — DONE.** The toolbar has a `#sheetpicker` dropdown of the
   signed-in user's sheets (`store/list-names`); selecting one navigates to it.
   A foreign shared sheet shows as a leading `↗ <name>` option. The `#sheetbox`
@@ -307,13 +315,11 @@ REMAINING:
 
 ## Insert row/column + multi-cell style (feat/insert-line)
 
-- **Inserting inside a range surfaces #ERR until the blank is filled.** A
-  `#cells A1:A5` straddling the insert correctly grows to `A1:A6`, but SaltRim's
-  engine treats a reference to a BLANK cell as an error (existing semantics — see
-  the engine-test "reference to a blank cell"), so the formula shows `#ERR` until
-  the inserted cell gets a value. Consistent with the model, but a spreadsheet
-  user expects blanks to count as 0 in an aggregate. Tolerating blank refs (nil
-  → 0/skip) is a broader engine change, tracked separately.
+- **Inserting inside a range — RESOLVED.** This used to surface `#ERR` until the
+  blank was filled, because a reference to a BLANK cell was an error. Blank cells
+  now read as `nil` (`runtime/lookup` returns a fresh const nil-Spin) and the
+  stdlib aggregates filter nils, so a range that grows over an inserted blank
+  keeps computing. Plain scalar arithmetic over a blank still needs `(or $X 0)`.
 - **`delete-line!` assumes the removed line is unreferenced.** It is built as the
   inverse of `insert-line!` (so an insert undoes in one step) and that holds for a
   freshly-blank inserted line. A user-facing **delete row/column** would need
@@ -404,16 +410,20 @@ shorthand rendered straight into the cell's inline style. Deferred:
 Shipped: runtime-computed cell/range addresses, reactive both ways (address
 inputs + current target), runtime cycle guard, dashed graph edges. Deferred:
 
-- **Dynamic refs in STYLE formulas** — rejected with a clear error for now.
-  The `:dyn` registry keys by owner ADDRESS; a style's dynamic edge would
-  masquerade as a *value* dep of the owner (false "circular" rejections), so
-  styles need a per-`[addr prop]` registry — plus style-layer rebuild
-  machinery that doesn't exist at all (see next item).
-- **Verify suspected pre-existing gap:** style formulas likely go stale when a
-  referenced cell's spin is structurally REPLACED (e.g. literal→formula) —
-  `set-cell!`'s rebuild loop rebuilds value dependents only, and nothing ever
-  re-installs a style spin. If confirmed, a style rebuild hook fixes both this
-  and the item above.
+- **Dynamic refs in STYLE formulas** — still rejected with a clear error. The
+  `:dyn` registry keys by owner ADDRESS; a style's dynamic edge would masquerade
+  as a *value* dep of the owner (false "circular" rejections), so styles need a
+  per-`[addr prop]` registry. The style-layer rebuild machinery this also needed
+  now EXISTS (`sheet/rebuild-styles!`, see below), so the registry split is the
+  only remaining blocker.
+- **Style staleness on structural replace — CONFIRMED AND FIXED.** The suspicion
+  was correct: a style formula `await`s the referenced cell's public spin, but
+  style deps live in their own registry, so `set-cell!`'s value-layer rebuild
+  never reached them — a `literal → formula` edit recomputed the cell and left
+  its colour frozen forever. `set-cell!` now collects every address whose spin it
+  REPLACED and calls `rebuild-styles!`, which recompiles exactly the style
+  formulas referencing them (`$val` included, since it rewrites to a ref on the
+  owner). Covered by `style_test.clj`.
 - **Rebuild-skip optimization** — `set-cell!` structurally rebuilds every
   dynamic dependent in the reverse closure on ANY upstream edit (the
   stale-continuation guard, see spike 07). Cheap but over-broad: an edit that
@@ -423,9 +433,10 @@ inputs + current target), runtime cycle guard, dashed graph edges. Deferred:
 - **xlsx import: `INDIRECT(text)` → `$(…)`** — the importer currently leaves
   INDIRECT untranslated (demoted to a value); the address-string grammar now
   exists to target.
-- **Static ranges have no size cap** — dynamic ranges are capped
-  (`rt/MAX-DYN-RANGE`, 10000 cells); a typed `$A1:ZZ99999` still expands
-  unboundedly at read time.
+- **Static range size cap — DONE.** `formula/MAX-RANGE-CELLS` (10000, mirroring
+  `rt/MAX-DYN-RANGE`) refuses an oversized rectangle at parse time, computing the
+  area from the corner INDICES so a typo'd `$A1:ZZ99999` is rejected before any
+  markers are built.
 - **Stale conts hold the abandoned target's spin** until the parent's next
   rebuild — harmless under the rebuild hook (one edit's worth), noted for
   engine archaeology.

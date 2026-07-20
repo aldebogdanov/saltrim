@@ -104,6 +104,13 @@
           (reset! vs v)                              ; value-only: propagates
           (let [vs (sig/->SignalRef (str "val:" addr) v)]
             (sig/ensure-signal-initialized! vs)
+            ;; Signals are INTERNED BY ID in the execution context, so after a
+            ;; blank (which drops our `vals` entry but leaves "val:<addr>"
+            ;; registered) this hands back the OLD signal still holding the old
+            ;; value — and ensure-signal-initialized! won't overwrite it. Reset
+            ;; unconditionally, or clear-then-retype silently keeps the previous
+            ;; value (raw said 99, the cell still read 5).
+            (reset! vs v)
             (swap! vals assoc addr vs)))
         (swap! meta assoc addr {:raw raw :kind :literal})
         (swap! dyn dissoc addr)
@@ -143,24 +150,35 @@
                (into out (filter #(get-in @meta [% :dyn?]) new))))
       out)))
 
+(declare rebuild-styles!)
+
 (defn set-cell!
   "Set cell `addr` from raw input. When a cell's public spin is replaced
    (structural change), transitively rebuilds dependents so they re-capture
    the new node. Value-only edits skip that rebuild (the signal propagates) —
    EXCEPT dependents with dynamic refs, which are always rebuilt (see
-   `dyn-dependents`). The visited set guards against cycles. Returns the sheet."
+   `dyn-dependents`). The visited set guards against cycles.
+
+   Every address whose spin was actually REPLACED is collected, and the style
+   layer is rebuilt against that set at the end (`rebuild-styles!`) — a style
+   formula `await`s the cell's public spin just like a value formula does, but
+   it is not in anyone's `:deps`, so without this it would keep awaiting the
+   dead node and the cell would hold its old colour forever. Returns the sheet."
   [{:keys [rt meta dyn] :as sheet} addr raw]
   (binding [ec/*execution-context* rt]
-    (let [visited (volatile! #{})]
+    (let [visited  (volatile! #{})
+          replaced (volatile! #{})]
       (letfn [(go [a r]
                 (when-not (contains? @visited a)
                   (vswap! visited conj a)
                   (when (write-cell! sheet a r)
+                    (vswap! replaced conj a)
                     (doseq [d (rdeps meta dyn a)]
                       (go d (get-in @meta [d :raw]))))))]
         (go addr raw)
         (doseq [d (dyn-dependents meta dyn addr)]
-          (go d (get-in @meta [d :raw]))))))
+          (go d (get-in @meta [d :raw])))
+        (rebuild-styles! sheet @replaced))))
   sheet)
 
 (defn dependents*
@@ -265,6 +283,28 @@
       (swap! styles assoc-in [addr prop] e)
       (swap! styles update addr dissoc prop)))
   sheet)
+
+(defn- rebuild-styles!
+  "Recompile every style formula that references one of `addrs`. Called by
+   `set-cell!` with the addresses whose public spin it just REPLACED.
+
+   A style spin `await`s the referenced cell's public spin object, exactly like
+   a value formula — but style deps live in their own registry, so `set-cell!`'s
+   value-layer rebuild loop never reaches them. Left alone, the style keeps
+   awaiting the dead spin and silently freezes at its last value (this bit
+   `literal -> formula` edits: the cell recomputed, its colour did not).
+   Recompiling against the current registry re-captures the live node.
+
+   `@styles` is deref'd once, so `set-style!`'s own swaps can't disturb the walk.
+   `$val` rewrites to a ref on the owner, so an owner's OWN structural change is
+   covered too."
+  [{:keys [styles] :as sheet} addrs]
+  (when (seq addrs)
+    (let [hit? (set addrs)]
+      (doseq [[a props] @styles
+              [prop {:keys [kind deps raw]}] props
+              :when (and (= kind :formula) (some hit? deps))]
+        (set-style! sheet a prop raw)))))
 
 (defn style-value
   "Computed value of style PROP of `addr`: a string, nil (blank/absent), or
