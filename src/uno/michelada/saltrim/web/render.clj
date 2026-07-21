@@ -1140,6 +1140,12 @@
      [:body {:data-signals:cell "''"
              :data-signals:v "''"
              :data-signals:err "''"
+             ;; a SEPARATE channel from $err: a positive confirmation ("merged
+             ;; 3 cells…") is not a failure and must not render in the same red
+             ;; error toast. Both are one-shot single-slot notices (a new value
+             ;; on either replaces whatever was showing), so a handler picks
+             ;; exactly one — never sets both in the same signals! call.
+             :data-signals:info "''"
              :data-signals:sel "''"
              :data-signals:edit "false"
              ;; floating in-cell editor visibility (distinct from $edit: only the
@@ -1231,7 +1237,14 @@
                          "background:var(--bg);color:var(--fg);")}
       [:div {:id "toast" :data-show "$err != ''" :data-text "$err"
              :data-on:click "$err=''"
-             :style (str "position:fixed;top:1rem;right:1rem;max-width:26rem;background:#c0392b;"
+             :style (str "position:fixed;top:1rem;right:1rem;max-width:26rem;background:var(--danger);"
+                         "color:#fff;padding:.6rem .9rem;border-radius:6px;font:13px sans-serif;"
+                         "cursor:pointer;box-shadow:0 2px 8px rgba(0,0,0,.3);z-index:20;")}]
+      ;; positive confirmations (merge applied, …) — same slot/behavior as the
+      ;; error toast, but styled as GOOD news, not a failure (see $info above).
+      [:div {:id "infotoast" :data-show "$info != ''" :data-text "$info"
+             :data-on:click "$info=''"
+             :style (str "position:fixed;top:1rem;right:1rem;max-width:26rem;background:var(--lime);"
                          "color:#fff;padding:.6rem .9rem;border-radius:6px;font:13px sans-serif;"
                          "cursor:pointer;box-shadow:0 2px 8px rgba(0,0,0,.3);z-index:20;")}]
       (h/raw (help-html))
