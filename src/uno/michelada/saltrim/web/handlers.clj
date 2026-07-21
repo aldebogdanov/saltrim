@@ -1077,14 +1077,15 @@
                     (let [acts     (mrg/actions plan (split-keys mergetake))
                           affected (apply-merge! sh sid acts)]
                       (if (empty? acts)
-                        (signals! gen {:err (str "🌿 " target " is already up to date") :mergetake ""})
+                        (signals! gen {:info (str "🌿 " target " is already up to date")
+                                       :mergetake ""})
                         (do (sheet/settle! sh)
                             (save-rec! (:room rec) uid)
                             (render-window! gen sid (:room rec) sh (session-view sid))
                             (broadcast-window! sid (:room rec) sh)
                             (d*/patch-elements! gen (str (h/html [:div {:id "mergeresult"}])))
-                            (signals! gen {:err (str "merged " (count acts) " cell-propert"
-                                                     (if (= 1 (count acts)) "y" "ies") " from 🌿 " source)
+                            (signals! gen {:info (str "merged " (count acts) " cell-propert"
+                                                      (if (= 1 (count acts)) "y" "ies") " from 🌿 " source)
                                            :mergetake "" :mergefrom "" :branchpanel false})))))
                   (signals! gen {:err ""}))))))))))
 

@@ -209,6 +209,14 @@ Gotchas learned the hard way:
 - There is no `data-on:load` plugin; run once-on-load via `data-effect` (no
   signal refs ⇒ fires once), or — as we do for the stream — dispatch a custom
   event from `app.cljs` to a `data-on:<evt>__window` handler.
+- **Two toast channels, `$err` (red) / `$info` (green, `--lime`), same corner —
+  mutually exclusive by construction.** `web.sse/signals!` is the ONE choke
+  point every handler patches signals through; it auto-clears whichever of
+  `:err`/`:info` a call doesn't mention when the other is set to non-blank, so
+  a stale success toast can never linger behind a fresh error (or vice versa)
+  without every one of 60+ call sites having to remember to clear the sibling.
+  A merge/action confirmation ("merged N cells…") is `:info`, never `:err` —
+  don't reuse the error channel for good news.
 - **No hidden trigger buttons / bound-input boxes** (the old smell). The split:
   Datastar attributes own all signals + server round-trips (`@post`/`@get`);
   `app.cljs` owns the imperative work (scroll, editor position, resize, keyboard,

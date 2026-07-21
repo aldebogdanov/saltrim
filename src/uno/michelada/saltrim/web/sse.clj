@@ -106,8 +106,20 @@
   (let [html (if (str/blank? html) "<!-- -->" html)]
     (d*/patch-elements! gen html {d*/selector selector d*/patch-mode d*/pm-inner})))
 
-(defn signals! [gen m]
-  (d*/patch-signals! gen (json/write-value-as-string m)))
+(defn signals!
+  "Patch signals. `:err` and `:info` are mutually exclusive one-shot toasts
+   sharing the same screen corner (error vs. positive confirmation) — a caller
+   that sets one of them to a non-blank value gets the OTHER auto-cleared
+   unless it also set that one explicitly. Without this, a lingering success
+   toast from an earlier action would still be showing (same corner, same
+   z-index) behind — or next to — a fresh error, and vice versa."
+  [gen m]
+  (let [m (cond-> m
+            (and (not (contains? m :info)) (not (str/blank? (str (:err m)))))
+            (assoc :info "")
+            (and (not (contains? m :err)) (not (str/blank? (str (:info m)))))
+            (assoc :err ""))]
+    (d*/patch-signals! gen (json/write-value-as-string m))))
 
 ;; --- handlers -----------------------------------------------------------
 
