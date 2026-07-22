@@ -63,6 +63,22 @@
    (-> (or (as-count wr) (span-count #(row-h sh %) (or r0 0) WIN-PX-H MAX-WIN-ROWS))
        (max 1) (min MAX-WIN-ROWS))])
 
+(defn- clamp-idx
+  "A client-supplied axis index, coerced into [0, cap). Total by construction:
+   anything that isn't a number (or is NaN) reads as 0."
+  [x cap]
+  (let [n (if (number? x) (double x) 0.0)]
+    (if (Double/isNaN n) 0 (long (min (max 0.0 n) (double (dec (long cap))))))))
+
+(defn clamp-view
+  "Build the render `view` from CLIENT signals ({:r0 :c0 :wc :wr}), coerced into
+   the grid. The signals are whatever the browser sent, so neither the type nor
+   the magnitude can be assumed: `(long \"abc\")` is a ClassCastException, and an
+   r0 of 1e18 overflows the offset multiply in `axis-off` — both abort the render
+   mid-SSE. `wc`/`wr` need no clamp here; `win-dims` already bounds them."
+  [{:keys [r0 c0 wc wr]}]
+  {:r0 (clamp-idx r0 MAX-ROWS) :c0 (clamp-idx c0 MAX-COLS) :wc wc :wr wr})
+
 (defn window
   "Cell coords [ci-range ri-range] rendered for `view` = {:r0 :c0 :wc :wr}: the
    columns/rows it covers plus OVER cells of overscan on each side (clamped)."

@@ -5,7 +5,8 @@
 
    Two id spaces:
    - address string \"AAB1234\"  (canonical: signal/spin id, user-facing)
-   - 0-based [col-idx row-idx]   (grid geometry / viewport math)")
+   - 0-based [col-idx row-idx]   (grid geometry / viewport math)"
+  (:require [uno.michelada.saltrim.constants :refer [MAX-COLS MAX-ROWS]]))
 
 ;; (int \A) and (int char) compile to a bit-or in ClojureScript (chars are just
 ;; strings there), so spell the code points out and read them portably.
@@ -32,10 +33,21 @@
         (recur (quot (dec n) 26) (str (char (+ A-code r)) out)))
       out)))
 
+(def ^:private addr-re #"([A-Za-z]+)([0-9]+)")
+
+;; Longest COL/ROW strings we will even convert to a number. The grid caps
+;; (MAX-COLS = XFD, MAX-ROWS = 1048576) are 3 letters and 7 digits, so anything
+;; longer is out of bounds by definition — and refusing it on the STRING keeps
+;; `parse` away from inputs that overflow the integer conversion (a 20-digit row
+;; threw NumberFormatException, which is not a shape any caller expects).
+(def ^:private MAX-COL-CHARS 3)
+(def ^:private MAX-ROW-CHARS 7)
+
 (defn parse
-  "\"AAB1234\" -> {:col \"AAB\" :row 1234 :ci <0-based> :ri <0-based>}."
+  "\"AAB1234\" -> {:col \"AAB\" :row 1234 :ci <0-based> :ri <0-based>}.
+   Only defined for addresses `valid?` accepts — callers gate on that."
   [addr]
-  (let [[_ col row] (re-matches #"([A-Za-z]+)([0-9]+)" addr)
+  (let [[_ col row] (re-matches addr-re addr)
         row-n #?(:clj  (Long/parseLong row)
                  :cljs (js/parseInt row))]
     {:col col :row row-n :ci (col->idx col) :ri (dec row-n)}))
@@ -46,8 +58,41 @@
   (str (idx->col ci) (inc ri)))
 
 (defn valid?
+  "Is `addr` a cell address this grid can actually hold? Syntax is only half of
+   it — the address must also be IN BOUNDS:
+
+   - the row is 1-based, so `A0` names no cell (it parses to row index -1, which
+     renders nowhere but stores and persists happily — an invisible ghost);
+   - both indices must fall inside MAX-COLS/MAX-ROWS, so an address can never be
+     stored that the geometry pass cannot lay out.
+
+   This is the single gate that keeps unrenderable addresses out of a sheet; the
+   engine (`sheet/write-cell!`, `sheet/set-style!`) refuses anything it rejects."
   [addr]
-  (boolean (re-matches #"[A-Za-z]+[0-9]+" (str addr))))
+  (boolean
+   (when-let [[_ col row] (re-matches addr-re (str addr))]
+     (and (<= (count col) MAX-COL-CHARS)
+          (<= (count row) MAX-ROW-CHARS)
+          (let [r #?(:clj (Long/parseLong row) :cljs (js/parseInt row))]
+            (and (<= 1 r MAX-ROWS)
+                 (< (col->idx col) MAX-COLS)))))))
+
+(defn canon
+  "Canonical form of a `valid?` address: \"a1\" -> \"A1\". Addresses are keys —
+   in `:meta`, in the style map, in the `<sheet>|<branch>|<addr>|<prop>` datom
+   key — so an uncanonicalized write makes \"a1\" a SECOND cell that the renderer
+   (which always asks for the canonical form) never draws."
+  [a]
+  (let [{:keys [ci ri]} (parse a)] (make ci ri)))
+
+(defn range-size
+  "How many cells the inclusive rectangle a..b covers, computed from the corner
+   INDICES. Callers cap ranges with this BEFORE `range-cells` materializes them —
+   counting afterwards would already have paid the cost the cap exists to refuse."
+  [a b]
+  (let [{ca :ci ra :ri} (parse a)
+        {cb :ci rb :ri} (parse b)]
+    (* (inc (abs (- ca cb))) (inc (abs (- ra rb))))))
 
 (defn range-cells
   "Inclusive rectangle from address a to address b, ROW-MAJOR.

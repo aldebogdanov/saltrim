@@ -83,10 +83,23 @@
             :else       (recur (into stack (deps-of c)) (conj seen c))))
         false))))
 
+(defn- check-addr!
+  "Refuse an address the grid can't hold. The engine is the LAST gate before an
+   address becomes persistent state, and a stored out-of-bounds address is not a
+   cosmetic problem: `A0` is invisible forever, and a row number too long to
+   convert threw on every later render, taking the whole sheet down with it. So
+   this throws rather than silently dropping — the caller surfaces it as a toast."
+  [addr]
+  (when-not (addr/valid? addr)
+    (throw (ex-info (str "bad cell address " (pr-str addr)
+                         " — use A1 style, inside the grid")
+                    {:addr addr}))))
+
 (defn- write-cell!
   "Local update of one cell. Returns true if addr's PUBLIC spin object was
    created/replaced/removed (structural change -> dependents must rebuild)."
   [{:keys [registry vals meta dyn sci]} addr raw]
+  (check-addr! addr)
   (let [prev-kind (get-in @meta [addr :kind])
         old-spin  (get @registry addr)]
     (case (classify raw)
@@ -165,7 +178,9 @@
    it is not in anyone's `:deps`, so without this it would keep awaiting the
    dead node and the cell would hold its old colour forever. Returns the sheet."
   [{:keys [rt meta dyn] :as sheet} addr raw]
-  (binding [ec/*execution-context* rt]
+  (check-addr! addr)
+  (let [addr (addr/canon addr)]      ; "a1" and "A1" must not be two cells
+   (binding [ec/*execution-context* rt]
     (let [visited  (volatile! #{})
           replaced (volatile! #{})]
       (letfn [(go [a r]
@@ -178,7 +193,7 @@
         (go addr raw)
         (doseq [d (dyn-dependents meta dyn addr)]
           (go d (get-in @meta [d :raw])))
-        (rebuild-styles! sheet @replaced))))
+        (rebuild-styles! sheet @replaced)))))
   sheet)
 
 (defn dependents*
@@ -276,12 +291,14 @@
   "Set style PROP (keyword, e.g. :bg) of `addr` from raw source. Blank removes
    it. Returns the sheet."
   [{:keys [rt styles] :as sheet} addr prop raw]
-  (binding [ec/*execution-context* rt]
-    (when-let [old (get-in @styles [addr prop])]
-      (when-let [sp (:spin old)] (spin-core/cleanup-spin! sp)))
-    (if-let [e (compile-style sheet addr raw)]
-      (swap! styles assoc-in [addr prop] e)
-      (swap! styles update addr dissoc prop)))
+  (check-addr! addr)                 ; styled cells are laid out too — same bound
+  (let [addr (addr/canon addr)]      ; and keyed the same way (see addr/canon)
+    (binding [ec/*execution-context* rt]
+      (when-let [old (get-in @styles [addr prop])]
+        (when-let [sp (:spin old)] (spin-core/cleanup-spin! sp)))
+      (if-let [e (compile-style sheet addr raw)]
+        (swap! styles assoc-in [addr prop] e)
+        (swap! styles update addr dissoc prop))))
   sheet)
 
 (defn- rebuild-styles!
@@ -508,19 +525,28 @@
    before its dependencies. Tolerant: a cell/style whose formula can't compile
    (e.g. it calls a name the sheet's current definitions don't provide) is kept
    as an error (its raw is preserved; `value` reports {:error …}) instead of
-   aborting the load. Returns {:errors [[addr msg] …]}."
+   aborting the load.
+
+   An address the grid can't hold is DROPPED, not kept as an error: recording it
+   would put it right back into `:meta`, where the geometry pass walks it — which
+   is exactly what made such a cell fatal in the first place. Dropping it means a
+   sheet written before addresses were bounded still opens (minus the ghost).
+   Returns {:errors [[addr msg] …]}."
   [{:keys [meta] :as sheet} doc]
   (let [errs (atom [])]
     (doseq [[addr props] doc]
-      (when-let [raw (:value props)]
-        (try (set-cell! sheet addr raw)
-             (catch Exception e
-               (swap! errs conj [addr (.getMessage e)])
-               (swap! meta assoc addr {:raw raw :kind :error :err (.getMessage e)}))))
-      (doseq [[prop raw] (:style props)]
-        (try (set-style! sheet addr prop raw)
-             (catch Exception e
-               (swap! errs conj [(str addr " " (name prop)) (.getMessage e)])))))
+      (if-not (addr/valid? addr)
+        (swap! errs conj [addr "address outside the grid — cell dropped"])
+        (do
+          (when-let [raw (:value props)]
+            (try (set-cell! sheet addr raw)
+                 (catch Exception e
+                   (swap! errs conj [addr (.getMessage e)])
+                   (swap! meta assoc addr {:raw raw :kind :error :err (.getMessage e)}))))
+          (doseq [[prop raw] (:style props)]
+            (try (set-style! sheet addr prop raw)
+                 (catch Exception e
+                   (swap! errs conj [(str addr " " (name prop)) (.getMessage e)])))))))
     {:errors @errs}))
 
 ;; --- structural edits: insert / delete a whole row or column ------------

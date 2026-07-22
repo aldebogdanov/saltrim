@@ -3,7 +3,7 @@
    sheet's default cell size and the client's own viewport, or the grid comes up
    short of the viewport (empty strip to the right / below)."
   (:require [clojure.test :refer [deftest is testing use-fixtures]]
-            [uno.michelada.saltrim.constants :refer [CW MAX-WIN-COLS MAX-WIN-ROWS MINSZ RH WIN-COLS WIN-ROWS OVER]]
+            [uno.michelada.saltrim.constants :refer [CW MAX-COLS MAX-ROWS MAX-WIN-COLS MAX-WIN-ROWS MINSZ RH WIN-COLS WIN-ROWS OVER]]
             [uno.michelada.saltrim.sheet :as sheet]
             [uno.michelada.saltrim.web.geom :as geom]))
 
@@ -86,3 +86,20 @@
 (deftest window-clamps-at-the-grid-origin
   (is (= 0 (first (first (geom/window *sh* {:r0 0 :c0 0}))))
       "no negative indices at the top-left"))
+
+(deftest clamp-view-is-total-over-client-signals
+  ;; $r0/$c0 are raw client signals: neither the type nor the magnitude can be
+  ;; assumed. Anything that escapes here aborts the render mid-SSE — (long "abc")
+  ;; is a ClassCastException, and 1e18 overflows the multiply in axis-off.
+  (testing "ordinary values pass through"
+    (is (= {:r0 3 :c0 4 :wc 10 :wr 20} (geom/clamp-view {:r0 3 :c0 4 :wc 10 :wr 20}))))
+  (testing "out of range is clamped into the grid, not rejected"
+    (is (= [(dec MAX-ROWS) (dec MAX-COLS)]
+           ((juxt :r0 :c0) (geom/clamp-view {:r0 1e18 :c0 999999999}))))
+    (is (= [0 0] ((juxt :r0 :c0) (geom/clamp-view {:r0 -5 :c0 -1})))))
+  (testing "non-numbers, nil and NaN read as the origin"
+    (doseq [bad ["abc" nil {} [] ##NaN]]
+      (is (= [0 0] ((juxt :r0 :c0) (geom/clamp-view {:r0 bad :c0 bad})))
+          (str "clamp-view on " (pr-str bad)))))
+  (testing "the clamped view still renders"
+    (is (seq (first (geom/window *sh* (geom/clamp-view {:r0 1e18 :c0 "x"})))))))

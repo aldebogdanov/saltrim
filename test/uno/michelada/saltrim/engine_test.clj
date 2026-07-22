@@ -748,3 +748,61 @@
       (is (= "tomato" (sh/style-value s "B2" :bg)) "moved down with the insert")
       (sh/delete-line! s :row 0) (sh/settle! s)
       (is (= "tomato" (sh/style-value s "B1" :bg)) "and back"))))
+
+(deftest addresses-outside-the-grid-are-refused
+  ;; The engine is the last gate before an address becomes persistent state, and
+  ;; a stored out-of-bounds address is not cosmetic: "A0" renders nowhere (row
+  ;; index -1) yet saves happily, and a row number too long to convert threw in
+  ;; the geometry pass on EVERY later render — one cell bricked the whole sheet.
+  (let [s (mk)]
+    (testing "writing one throws instead of storing it"
+      (doseq [a ["A0" "A99999999999999999999" "ZZZZZZZZ1" "A1048577" "nope" ""]]
+        (is (thrown? clojure.lang.ExceptionInfo (put s a "1"))
+            (str "set-cell! " (pr-str a)))
+        (is (thrown? clojure.lang.ExceptionInfo (sh/set-style! s a :bg "red"))
+            (str "set-style! " (pr-str a)))))
+    (testing "and nothing was left behind"
+      (is (empty? (sh/cells s)))
+      (is (empty? (sh/document s))))
+    (testing "the boundary addresses themselves still work"
+      (put s "XFD1048576" "corner")
+      (is (= "corner" (v s "XFD1048576"))))))
+
+(deftest addresses-are-canonicalized-on-write
+  ;; addresses are KEYS (:meta, the style map, the cellprop datom key), and the
+  ;; renderer only ever asks for the canonical form — so a lowercase write used
+  ;; to create a second, permanently invisible cell beside the real one
+  (let [s (mk)]
+    (put s "a1" "10")
+    (sh/set-style! s "b2" :bg "tomato")
+    (is (= 10 (v s "A1")))
+    (is (= "tomato" (sh/style-value s "B2" :bg)))
+    (is (= #{"A1"} (set (sh/cells s))))
+    (is (= #{"A1" "B2"} (set (keys (sh/document s)))))
+    (testing "and a re-write through the other casing updates the same cell"
+      (put s "a1" "20")
+      (is (= 20 (v s "A1")))
+      (is (= #{"A1"} (set (sh/cells s))))))
+  ;; reads stay keyed literally — they run once per rendered cell, and every
+  ;; caller already holds a canonical address (addr/make emits one; the web and
+  ;; MCP handlers canonicalize their incoming signal once, at the boundary)
+  (let [s (mk)]
+    (put s "a1" "10")
+    (is (nil? (sh/raw s "a1")) "read by the non-canonical key finds nothing")))
+
+(deftest a-sheet-stored-before-the-bound-still-opens
+  ;; A document written by an older build can already hold a ghost. Loading must
+  ;; DROP it (recording it as an error would put it straight back into :meta,
+  ;; where the geometry pass walks it) so the sheet opens and can be repaired.
+  (let [s (mk)
+        {:keys [errors]} (sh/load-document!
+                          s {"A1"                    {:value "1"}
+                             "A0"                    {:value "ghost"}
+                             "A99999999999999999999" {:value "brick"}
+                             "B1"                    {:style {:bg "tomato"}}})]
+    (sh/settle! s)
+    (is (= 1 (v s "A1")))
+    (is (= "tomato" (sh/style-value s "B1" :bg)))
+    (is (= #{"A1"} (set (sh/cells s))) "the ghosts are gone, not stored as errors")
+    (is (= #{"A0" "A99999999999999999999"} (set (map first errors)))
+        "and both are reported to the caller")))
