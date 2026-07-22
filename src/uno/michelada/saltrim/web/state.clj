@@ -8,6 +8,24 @@
 
 (defonce sheets* (atom {}))
 
+;; --- edit serialization ---------------------------------------------------
+;; Edits are serialized PER ROOM, not globally. A single shared lock meant any
+;; slow edit — worst case a formula that never terminates — blocked every write
+;; on every sheet for every user, so one cell could freeze the whole server. A
+;; room is the unit that actually shares mutable state (one engine, one autosave,
+;; one broadcast), so it is the right granularity. Locks are dropped with the
+;; room they guard (see `unload-sheet!`).
+
+(defonce ^:private edit-locks* (atom {}))
+
+(defn edit-lock
+  "The monitor serializing edits to `room` ([sheet-id branch]), created on first
+   use. Also serializes a session's undo/redo stack read-modify-write — a session
+   lives in exactly one room, so per-room is still strong enough for that."
+  [room]
+  (or (@edit-locks* room)
+      (get (swap! edit-locks* update room #(or % (Object.))) room)))
+
 (defn sheet-rec
   "The loaded record for a (storage id, branch); loads from the db lazily, else
    creates a fresh private sheet owned by `owner`. Registers the SHEET (not the
@@ -103,7 +121,8 @@
     (let [{:keys [sh]} (@sheets* room)]
       (save-rec! room)                   ; autosave on unload — no acting user
       (sheet/close! sh)
-      (swap! sheets* dissoc room))))
+      (swap! sheets* dissoc room)
+      (swap! edit-locks* dissoc room))))
 
 (defn touch! [sid] (when (@sessions* sid) (swap! sessions* assoc-in [sid :last-seen] (now))))
 
