@@ -114,6 +114,51 @@
     [:post "/graph"]      (handle-graph req)
     {:status 404 :body "not found"})))
 
+;; --- security headers -----------------------------------------------------
+
+(def security-headers
+  "Sent on every response. Two of these earn their keep specifically here:
+
+   `Content-Security-Policy` is the second layer under the style-value check in
+   `web.render` — a cell's computed style is spliced into a `style` attribute, so
+   `img-src`/`connect-src` of `'self'` mean that even a value which slipped past
+   that check cannot fetch from, or talk to, a third-party host. `frame-ancestors
+   'none'` stops the app being framed and clicked through.
+
+   `Referrer-Policy: no-referrer` matters because a share URL *is* the
+   credential (`/?t=<token>`): the token must never ride a Referer header off
+   this origin. Browsers default to `strict-origin-when-cross-origin`, which is
+   already safe, but the URL is too sensitive to leave to a default.
+
+   `'unsafe-eval'` is not optional: Datastar compiles every `data-*` expression
+   with `new Function`. `'unsafe-inline'` in style-src likewise — the page ships
+   one inline <style> and every cell carries an inline `style` attribute. The
+   CDN origin is the Datastar bundle (see `web.render/page`); switching to the
+   vendored /datastar.js lets that entry go."
+  {"Content-Security-Policy"
+   (str/join "; " ["default-src 'self'"
+                   "script-src 'self' 'unsafe-eval' https://cdn.jsdelivr.net"
+                   "style-src 'self' 'unsafe-inline'"
+                   "img-src 'self' data:"
+                   "font-src 'self'"
+                   "connect-src 'self'"
+                   "form-action 'self'"
+                   "base-uri 'none'"
+                   "object-src 'none'"
+                   "frame-ancestors 'none'"])
+   "Referrer-Policy"        "no-referrer"
+   "X-Content-Type-Options" "nosniff"
+   "X-Frame-Options"        "DENY"})       ; for engines predating frame-ancestors
+
+(defn- wrap-security-headers
+  "Add `security-headers` to every response, without overriding a header the
+   handler set itself (SSE responses carry their own Content-Type/Cache-Control)."
+  [handler]
+  (fn [req]
+    (let [resp (handler req)]
+      (cond-> resp
+        (map? resp) (update :headers #(merge security-headers %))))))
+
 (defn port
   "HTTP port — SALTRIM_PORT env or 8080."
   []
@@ -141,7 +186,8 @@
            (let [stop (http/run-server (-> #'app
                                            wrap-params
                                            wrap-keyword-params
-                                           wrap-cookies)
+                                           wrap-cookies
+                                           wrap-security-headers)
                                        {:port (port)})]
                   (util/log "  serving http://localhost:" (port) "·"
                             (if-let [ps (seq (keys (auth/providers)))]
