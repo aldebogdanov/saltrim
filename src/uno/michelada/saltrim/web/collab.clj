@@ -8,7 +8,7 @@
             [uno.michelada.saltrim.store :as store]
             [starfederation.datastar.clojure.api :as d*]
             [uno.michelada.saltrim.web.geom :refer [in-window? window]]
-            [uno.michelada.saltrim.web.state :refer [SESSION-TTL-MS color-for now sessions* sessions-on sheet-rec sid-re touch! unload-sheet!]]
+            [uno.michelada.saltrim.web.state :refer [ROOM-IDLE-MS SESSION-TTL-MS color-for now sessions* sessions-on sheet-rec sheets* sid-re touch! unload-sheet!]]
             [uno.michelada.saltrim.web.sse :refer [patch-inner! signals! webkit-flush!]]
             [uno.michelada.saltrim.web.render :refer [cells-html colhead-html deflib-html meta-html peers-html render-cells rowhead-html self-html]]))
 
@@ -52,11 +52,25 @@
       (broadcast-presence! (:room s))
       (broadcast-deflib! (:room s)))))
 
+(defn- sweep-orphan-rooms!
+  "Release rooms that no session owns and nothing has touched for ROOM-IDLE-MS.
+   A room is normally unloaded when its LAST session leaves (`reap-session!`),
+   but some never have one: an MCP tool call and a bare GET that never opens a
+   /stream both load a room that no `reap-session!` will ever reach, so they
+   accumulated for the life of the process. The idle window is what keeps this
+   off a load that is mid-handshake — a room just touched has a fresh stamp."
+  []
+  (let [cutoff (- (now) ROOM-IDLE-MS)]
+    (doseq [[room {:keys [at]}] @sheets*
+            :when (and (zero? (sessions-on room)) (< (long (or at 0)) cutoff))]
+      (unload-sheet! room))))
+
 (defn sweep! []
   (let [cutoff (- (now) SESSION-TTL-MS)]
     (doseq [[sid s] @sessions*]
       (when (< (long (:last-seen s 0)) cutoff)
-        (reap-session! sid)))))
+        (reap-session! sid))))
+  (sweep-orphan-rooms!))
 
 ;; The session sweeper IS its mount state: the state value is the scheduled
 ;; executor pool; :stop shuts it down. (declared lower, with `server`, once
