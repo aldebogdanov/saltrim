@@ -71,3 +71,42 @@
         "a cell draws no border of its own — that is what used to split the colour")
     (testing "and the two coloured slots are contiguous"
       (is (= [0 CW] (lefts html))))))
+
+(deftest a-cell-picks-which-side-of-the-grid-it-paints-on
+  ;; the grid lines and the cells are SIBLINGS in one layer, which is the whole
+  ;; reason a per-cell z-index can order them at all: separate layers would each
+  ;; be their own stacking context and nothing inside could cross out
+  (sheet/set-cell! *sh* "A1" "1")
+  (sheet/set-cell! *sh* "B1" "2")
+  (testing "by default a cell carries no layer prop — it sits under the lines"
+    (is (false? (sheet/over-grid? *sh* "A1")))
+    (is (not (str/includes? (render/cells-html *sh* (range 0 2) (range 0 1)) "cell over"))))
+  (testing "opting over the grid marks the cell, and only that cell"
+    (sheet/set-style! *sh* "A1" sheet/layer-prop sheet/layer-over)
+    (is (true? (sheet/over-grid? *sh* "A1")))
+    (is (false? (sheet/over-grid? *sh* "B1")))
+    (let [html (render/cells-html *sh* (range 0 2) (range 0 1))]
+      (is (str/includes? html "class=\"cell over\""))
+      (is (= 1 (count (re-seq #"cell over" html))))))
+  (testing "and clearing it puts the cell back under"
+    (sheet/set-style! *sh* "A1" sheet/layer-prop "")
+    (is (false? (sheet/over-grid? *sh* "A1")))
+    (is (not (str/includes? (render/cells-html *sh* (range 0 2) (range 0 1)) "cell over")))))
+
+(deftest the-layer-choice-rides-the-ordinary-cellprop-plumbing
+  ;; which is what gets it persistence, branching, 3-way merge and undo for free
+  (sheet/set-cell! *sh* "A1" "1")
+  (sheet/set-style! *sh* "A1" sheet/layer-prop sheet/layer-over)
+  (let [doc (sheet/document *sh*)]
+    (is (= "over" (get-in doc ["A1" :style :layer])))
+    (let [s2 (sheet/create-sheet)]
+      (try
+        (sheet/load-document! s2 doc)
+        (is (true? (sheet/over-grid? s2 "A1")) "restored on load")
+        (finally (sheet/close! s2))))))
+
+(deftest one-layer-carries-both-the-lines-and-the-cells
+  (sheet/set-cell! *sh* "A1" "x")
+  (let [html (render/cells-layer-html *sh* (range 0 2) (range 0 2))]
+    (is (str/includes? html "class=\"gl gv\""))
+    (is (str/includes? html "id=\"c_A1\""))))
