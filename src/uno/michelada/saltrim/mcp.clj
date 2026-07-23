@@ -288,9 +288,21 @@
             (throw (ex-info (str "no branch \"" branch "\" — existing: "
                                  (str/join ", " (db/branch-names sheet-id))) {})))
         [a b] (parse-range range)
-        all   (addr/range-cells a b)
-        n     (count all)
-        shown (take MAX-READ-CELLS all)
+        ;; size the rectangle from its CORNERS first: `range-cells` materializes
+        ;; one address per cell, so expanding "A1:XFD1048576" (17 billion) and
+        ;; then taking a prefix would exhaust the heap before the cap could apply.
+        ;; Shrink to the first whole ROWS that fit instead — a truncation an agent
+        ;; can reason about, which is what the note below promises it.
+        n     (addr/range-size a b)
+        shown (if (<= n MAX-READ-CELLS)
+                (addr/range-cells a b)
+                (let [{ca :ci ra :ri} (addr/parse a)
+                      {cb :ci rb :ri} (addr/parse b)
+                      c0 (min ca cb) r0 (min ra rb)
+                      c1 (min (max ca cb) (+ c0 MAX-READ-CELLS -1))
+                      w  (inc (- c1 c0))
+                      r1 (min (max ra rb) (+ r0 (dec (quot MAX-READ-CELLS w))))]
+                  (addr/range-cells (addr/make c0 r0) (addr/make c1 r1))))
         {:keys [sh]} (room-of sheet-id branch)]
     (cond-> {:branch branch
              :cells (vec (keep #(when (some? (sheet/raw sh %)) (cell-out sh %)) shown))}
@@ -315,8 +327,12 @@
     (throw (ex-info (str "too many cells in one call (max " MAX-WRITE-CELLS ")") {})))
   (doseq [{:keys [addr]} cells]
     (when-not (addr/valid? addr)
-      (throw (ex-info (str "bad cell address " (pr-str addr) " — use A1 style") {}))))
-  (let [branch (ensure-agent-branch! sheet-id cred token)
+      (throw (ex-info (str "bad cell address " (pr-str addr)
+                           " — use A1 style, inside the grid") {}))))
+  ;; canonicalize at the boundary so an agent writing "a1" and "A1" edits ONE
+  ;; cell, and the value we read back is the one we just wrote (see addr/canon)
+  (let [cells  (mapv #(update % :addr addr/canon) cells)
+        branch (ensure-agent-branch! sheet-id cred token)
         room   [sheet-id branch]
         {:keys [sh]} (room-of sheet-id branch)]
     (doseq [{:keys [addr src]} cells]

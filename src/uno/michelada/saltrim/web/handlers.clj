@@ -21,7 +21,7 @@
             [ring.middleware.multipart-params.byte-array :as mp-bytes]
             [starfederation.datastar.clojure.api :as d*]
             [starfederation.datastar.clojure.adapter.http-kit :as hk]
-            [uno.michelada.saltrim.web.geom :refer [block-of in-window? known-formula-error? pretty-err qparam url-decode url-encode window]]
+            [uno.michelada.saltrim.web.geom :refer [block-of clamp-view in-window? known-formula-error? pretty-err qparam url-decode url-encode window]]
             [uno.michelada.saltrim.web.state :refer [accessible-rec can-read? def-editor-of locked-by-other? now owner-of save-rec! session-view sessions* set-session-view! sheets* sid-re unload-sheet!]]
             [uno.michelada.saltrim.web.sse :refer [patch-inner! read-signals signals! sse sse-opts webkit-ua?]]
             [uno.michelada.saltrim.web.render :refer [border-prop border-props cells-html colhead-html denied-page graph-svg import-error-html import-report-html login-page merge-result-html meta-html page prop-allowed? render-cells rowhead-html self-html share-html]]
@@ -212,8 +212,15 @@
       (if (not= :read-write (:level rec))
         (signals! gen {:err "read-only access — you can't edit this sheet"})
         (let [sh (:sh rec)]
-          (when (addr/valid? cell)
-            (locking edit-lock
+          (if-not (addr/valid? cell)
+            ;; say so rather than no-op: silence here read as "my edit vanished"
+            (signals! gen {:err (str (or (not-empty (str cell)) "that cell")
+                                     " isn't a cell address inside this grid")})
+            ;; canonicalize ONCE, at the boundary: the engine keys writes by the
+            ;; canonical form, so reading `before` (undo) by the raw signal would
+            ;; look at a different key. Reads stay literal — they are the hot path.
+            (let [cell (addr/canon cell)]
+             (locking edit-lock
               (try
                 (when (locked-by-other? sid (:room rec) cell)
                   (throw (ex-info "locked by another collaborator" {:locked cell})))
@@ -227,7 +234,7 @@
                                                 (sheet/style-dependents sh cell))))
                 (catch Throwable e
                   (log-err! "/cell" e)
-                  (signals! gen {:err (str cell ": " (pretty-err (.getMessage e)))}))))))))))
+                  (signals! gen {:err (str cell ": " (pretty-err (.getMessage e)))})))))))))))
 
 (defn handle-flatten
   "Compute the flattened (+ simplified) source of the selected formula cell and
@@ -291,12 +298,22 @@
 
 (defn- selected-cells
   "All distinct cell addresses across the space-separated \"TL:BR\" ranges in
-   `selcells` (handles multi-range)."
+   `selcells` (handles multi-range).
+
+   `$selcells` comes from the client, so both halves are guarded: a range whose
+   endpoints aren't valid addresses is skipped (rather than throwing out of the
+   handler), and the whole selection is capped at `MAX-SEL-CELLS` — expanding
+   \"A1:XFD1048576\" one address per cell would exhaust the heap long before any
+   handler could object."
   [selcells]
-  (->> (str/split (str selcells) #"\s+")
-       (remove str/blank?)
-       (mapcat (fn [r] (let [[a b] (str/split r #":")] (addr/range-cells a (or b a)))))
-       distinct))
+  (let [ranges (->> (str/split (str selcells) #"\s+")
+                    (remove str/blank?)
+                    (keep (fn [r]
+                            (let [[a b] (str/split r #":")
+                                  b (or b a)]
+                              (when (and (addr/valid? a) (addr/valid? b)) [a b])))))]
+    (when (<= (reduce + 0 (map (fn [[a b]] (addr/range-size a b)) ranges)) c/MAX-SEL-CELLS)
+      (distinct (mapcat (fn [[a b]] (addr/range-cells a b)) ranges)))))
 
 (defn- sel-topleft
   "Top-left [c0 r0] of the bounding box of all selected cells, or nil when empty."
@@ -469,9 +486,9 @@
       (let [sh   (:sh rec)
             ;; $wc/$wr = the window this client's viewport needs; kept ON the
             ;; session view so every later push (cells, presence) is scoped to
-            ;; the same window this render produced. geom/win-dims clamps them.
-            view {:r0 (max 0 (long (or r0 0))) :c0 (max 0 (long (or c0 0)))
-                  :wc wc :wr wr}]
+            ;; the same window this render produced. geom/win-dims clamps them,
+            ;; clamp-view bounds r0/c0 (both are raw client signals).
+            view (clamp-view {:r0 r0 :c0 c0 :wc wc :wr wr})]
         (set-session-view! sid view)
         ;; logical scroll: always cheap inner patches. The window is positioned
         ;; relative to (c0,r0); /app.js translates + sizes the scrollbars from
@@ -489,9 +506,7 @@
         branch   (sig-branch sig)
         at       (sig-at sig)
         token    (not-empty (str (:link sig)))
-        view {:r0 (max 0 (long (or (:r0 sig) 0)))
-              :c0 (max 0 (long (or (:c0 sig) 0)))
-              :wc (:wc sig) :wr (:wr sig)}]
+        view     (clamp-view (select-keys sig [:r0 :c0 :wc :wr]))]
     (if-not (and at (can-read? uid sheet-id branch token))
       (deny req "no access")
       (if-let [{:keys [sh]} (store/load-record-asof sheet-id branch at)]

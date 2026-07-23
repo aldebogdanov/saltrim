@@ -42,3 +42,9 @@
 ;; merge is presentational, but the covered set is materialized, so cap it well
 ;; below anything a user would want to merge in one gesture.
 (def MAX-MERGE-CELLS 4096)
+;; Largest SELECTION a selection-wide action (clear / style / copy / cut / paste /
+;; merge) will expand. $selcells arrives from the client as "TL:BR" ranges and is
+;; materialized one address per cell, so an unbounded range ("A1:XFD1048576" is 17
+;; BILLION cells) would exhaust the heap before any handler could refuse it — the
+;; same eager-expansion trap MAX-RANGE-CELLS closes for formulas.
+(def MAX-SEL-CELLS 100000)
