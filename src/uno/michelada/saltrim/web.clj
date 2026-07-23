@@ -17,7 +17,7 @@
             [uno.michelada.saltrim.mcp :refer [handle-mcp]]
             [uno.michelada.saltrim.web.state :refer [SWEEP-MS sessions* sheets*]]
             [uno.michelada.saltrim.web.collab :refer [sweep!]]
-            [uno.michelada.saltrim.web.handlers :refer [auth-routes handle-branch handle-cell handle-clear handle-copy handle-cut handle-defadd handle-defdel handle-deflock handle-defsave handle-defunlock handle-delete-sheet handle-export handle-flatten handle-graph handle-agentkey handle-import handle-insert handle-merge handle-mergecells handle-paste handle-presence handle-props handle-redo handle-root handle-session-end handle-share handle-size handle-stream handle-style handle-undo handle-unmergecells handle-view handle-viewat]])
+            [uno.michelada.saltrim.web.handlers :refer [auth-routes handle-branch handle-cell handle-clear handle-copy handle-cut handle-defadd handle-defdel handle-deflock handle-defsave handle-defunlock handle-delete-sheet handle-deleteline handle-export handle-flatten handle-graph handle-agentkey handle-import handle-insert handle-merge handle-mergecells handle-paste handle-presence handle-props handle-redo handle-root handle-session-end handle-share handle-size handle-stream handle-style handle-undo handle-unmergecells handle-view handle-viewat]])
   (:gen-class))
 
 (defn- app [req]
@@ -96,6 +96,7 @@
     [:post "/paste"]      (handle-paste req)
     [:post "/size"]       (handle-size req)
     [:post "/insert"]     (handle-insert req)
+    [:post "/deleteline"] (handle-deleteline req)
     [:post "/agentkey"]     (handle-agentkey req)
     [:post "/mergecells"]   (handle-mergecells req)
     [:post "/unmergecells"] (handle-unmergecells req)

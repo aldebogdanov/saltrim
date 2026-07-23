@@ -174,13 +174,19 @@
 
 (defn- record-structural!
   "Push a structural undo entry (a whole row/col insert/delete) — undone/redone as
-   ONE step by sheet/undo-step. Clears redo, like record-edit!."
-  [sid op axis at]
-  (when (@sessions* sid)
-    (swap! sessions* update sid
-           (fn [s] (-> s
-                       (update :undo #(vec (take-last UNDO-CAP (conj (or % []) {:op op :axis axis :at at}))))
-                       (assoc :redo []))))))
+   ONE step by sheet/undo-step. Clears redo, like record-edit!. A DELETE carries
+   the line it removed (`cells`), since undoing it has to restore the content and
+   not just re-open the gap."
+  ([sid op axis at] (record-structural! sid op axis at nil))
+  ([sid op axis at cells]
+   (when (@sessions* sid)
+     (swap! sessions* update sid
+            (fn [s] (-> s
+                        (update :undo #(vec (take-last UNDO-CAP
+                                                       (conj (or % [])
+                                                             (cond-> {:op op :axis axis :at at}
+                                                               cells (assoc :cells cells))))))
+                        (assoc :redo [])))))))
 
 (defn- handle-undo* [req dir]
   (with-access req
@@ -589,6 +595,51 @@
                   (signals! gen {:err ""})
                   (catch Throwable e
                     (log-err! "/insert" e)
+                    (signals! gen {:err (pretty-err (.getMessage e))})))))))))))
+
+(defn handle-deleteline
+  "Delete the row/column the active cell ($sel) is on. `$deletedir` ∈ row|col.
+
+   `sheet/remove-line!` shifts everything after it back and turns references to
+   the removed cells into #REF! (a reference that silently re-points at whichever
+   cell slid into the slot would keep computing, and be wrong). The removed line
+   is captured into the structural undo entry — restoring the geometry without
+   its content would be a silent data loss. Re-renders the whole window, like
+   /insert."
+  [req]
+  (with-access req
+    (fn [uid sheet-id rec {:keys [sid sel deletedir]} gen]
+      (ensure-session! sid sheet-id (:branch rec) uid (:token rec))
+      (let [sh (:sh rec)]
+        (cond
+          (not= :read-write (:level rec))
+          (signals! gen {:err "read-only access — you can't edit this sheet"})
+          (not (addr/valid? sel))
+          (signals! gen {:err "select a cell first"})
+          :else
+          (let [{:keys [ci ri]} (addr/parse sel)
+                [axis at] (case (str deletedir)
+                            "row" [:row ri]
+                            "col" [:col ci]
+                            [nil nil])]
+            (if-not axis
+              (signals! gen {:err ""})
+              (locking (edit-lock (:room rec))
+                (try
+                  (let [cells (sheet/remove-line! sh axis at)]
+                    (sheet/settle! sh)
+                    (record-structural! sid :delete axis at cells)
+                    (save-rec! (:room rec) uid)
+                    (render-window! gen sid (:room rec) sh (session-view sid))
+                    (broadcast-window! sid (:room rec) sh)
+                    ;; no cell count here: `cells` is the undo SNAPSHOT, which
+                    ;; also covers formulas elsewhere that the delete rewrote, so
+                    ;; counting it would claim a row held cells it never had
+                    (signals! gen {:info (str "deleted " (if (= axis :row) "row " "column ")
+                                              (if (= axis :row) (inc ri) (addr/idx->col ci))
+                                              " — Ctrl/⌘+Z to restore")}))
+                  (catch Throwable e
+                    (log-err! "/deleteline" e)
                     (signals! gen {:err (pretty-err (.getMessage e))})))))))))))
 
 ;; --- merged cells ----------------------------------------------------------
