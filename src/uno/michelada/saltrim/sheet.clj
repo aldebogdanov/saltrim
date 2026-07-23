@@ -462,6 +462,23 @@
   "The style/meta prop naming a merge span on the anchor cell (\"<rows>x<cols>\")."
   :merge)
 
+(def layer-prop
+  "The prop deciding whether a cell paints UNDER the grid lines (absent, the
+   default — a fill tints the cell while the table's ruling still reads across
+   it) or OVER them (\"over\" — a solid block of colour, so neighbours sharing a
+   fill merge into one region). Like `:merge` it rides the ordinary cellprop
+   plumbing, so it persists, branches, merges and undoes for free, and like
+   `:merge` it is NOT offered in the style bar: the value is one of two words and
+   a dedicated button writes it."
+  :layer)
+
+(def layer-over "over")
+
+(defn over-grid?
+  "Does `addr` paint over the grid lines?"
+  [sheet addr]
+  (= layer-over (get (style-srcs sheet addr) layer-prop)))
+
 (defn parse-span
   "\"<rows>x<cols>\" -> [rows cols] (both positive), or nil for a blank/garbage/
    1×1 span (a 1×1 merge is a no-op, so it never counts as a merge)."

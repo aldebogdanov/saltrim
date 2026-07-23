@@ -132,7 +132,7 @@
         tx (- (axis-pos (:cb m) (:dcw m) (:colw m)) @SX)
         ty (- (axis-pos (:rb m) (:drh m) (:rowh m)) @SY)]
     ;; selection/editor/peer overlays + the cell layer all share the transform
-    (doseq [id ["gridlines" "cells" "selrange" "self" "peers" "editlayer"]] (set-transform! id tx ty))
+    (doseq [id ["cells" "selrange" "self" "peers" "editlayer"]] (set-transform! id tx ty))
     (set-transform! "colstrip" tx 0)
     (set-transform! "rowstrip" 0 ty)
     (thumb! "vbar" "vthumb" @SY (:th m) true)

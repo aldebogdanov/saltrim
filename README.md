@@ -161,6 +161,13 @@ formulas yet — use static `$A1` references there.
 **Styling a whole selection:** select a range (or several), then apply a property
 — it sets that property on every cell in the selection at once.
 
+**Fill and the grid.** A cell's fill paints *under* the grid lines, so a coloured
+block still reads as a table — the ruling shows across it. When you want a solid
+region instead (a banner, a header block), select the cells and press **over
+grid** in the format row: they rise above the lines, so neighbours sharing a fill
+merge into one unbroken area. **under grid** puts them back. It is an ordinary
+cell property, so it is saved, branched, merged and undone like any other.
+
 ### Labels & comments
 
 Two properties in the same dropdown describe a cell instead of painting it:

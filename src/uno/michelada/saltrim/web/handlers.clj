@@ -24,7 +24,7 @@
             [uno.michelada.saltrim.web.geom :refer [block-of clamp-view in-window? known-formula-error? pretty-err qparam url-decode url-encode window]]
             [uno.michelada.saltrim.web.state :refer [accessible-rec can-read? def-editor-of edit-lock locked-by-other? now owner-of save-rec! session-view sessions* set-session-view! sheets* sid-re unload-sheet!]]
             [uno.michelada.saltrim.web.sse :refer [patch-inner! read-signals signals! sse sse-opts webkit-ua?]]
-            [uno.michelada.saltrim.web.render :refer [border-prop border-props cells-html colhead-html css-errors denied-page graph-svg gridlines-html import-error-html import-report-html login-page merge-result-html meta-html page prop-allowed? render-cells rowhead-html self-html share-html]]
+            [uno.michelada.saltrim.web.render :refer [border-prop border-props cells-layer-html colhead-html css-errors denied-page graph-svg import-error-html import-report-html login-page merge-result-html meta-html page prop-allowed? render-cells rowhead-html self-html share-html]]
             [uno.michelada.saltrim.web.collab :refer [broadcast! broadcast-deflib-except! broadcast-presence! broadcast-window! ensure-session! evict-branch-deleted! evict-deleted! push-deflib! reap-session! render-window!]]))
 
 (defn- log-err!
@@ -522,8 +522,7 @@
         (sse req (fn [gen]
                    (try
                      (let [[cis ris] (window sh view)]
-                       (patch-inner! gen "#gridlines" (gridlines-html sh cis ris))
-                       (patch-inner! gen "#cells"   (cells-html sh cis ris))
+                       (patch-inner! gen "#cells"   (cells-layer-html sh cis ris))
                        (patch-inner! gen "#colhead" (colhead-html sh cis))
                        (patch-inner! gen "#rowhead" (rowhead-html sh ris))
                        (d*/patch-elements! gen (meta-html sh view)))   ; #meta by id
@@ -734,6 +733,45 @@
               (signals! gen {:err ""})
               (catch Throwable e
                 (log-err! "/unmergecells" e)
+                (signals! gen {:err (pretty-err (.getMessage e))})))))))))
+
+(defn handle-celllayer
+  "Put the selected cells over or under the grid lines ($layerdir ∈ over|under).
+
+   A fill under the lines keeps the table's ruling readable across it, which is
+   what you want most of the time; over them, neighbours sharing a fill become
+   one solid region. Written as a plain cell prop, so it persists, branches,
+   merges and undoes like any other — and NOT through the style bar, whose values
+   are free text: this one is a choice of two, so a button writes it (the same
+   reasoning as merge/unmerge)."
+  [req]
+  (with-access req
+    (fn [uid sheet-id rec {:keys [sid selcells sel layerdir]} gen]
+      (ensure-session! sid sheet-id (:branch rec) uid (:token rec))
+      (let [sh    (:sh rec)
+            cells (let [cs (selected-cells selcells)]
+                    (if (seq cs) cs (when (addr/valid? sel) [sel])))
+            src   (case (str layerdir) "over" sheet/layer-over "under" "" nil)]
+        (cond
+          (not= :read-write (:level rec))
+          (signals! gen {:err "read-only access — you can't edit this sheet"})
+          (nil? src)     (signals! gen {:err ""})
+          (empty? cells) (signals! gen {:err "select a cell first"})
+          :else
+          (locking (edit-lock (:room rec))
+            (try
+              (doseq [c cells]
+                (let [before (get (sheet/style-srcs sh c) sheet/layer-prop)]
+                  (sheet/set-style! sh c sheet/layer-prop src)
+                  (record-edit! sid c sheet/layer-prop before
+                                (get (sheet/style-srcs sh c) sheet/layer-prop))))
+              (sheet/settle! sh)
+              (save-rec! (:room rec) uid)
+              ;; only paint order changed, so the touched cells re-render — no
+              ;; geometry moved, unlike a merge
+              (push-changes! gen sid (:room rec) sh cells)
+              (catch Throwable e
+                (log-err! "/celllayer" e)
                 (signals! gen {:err (pretty-err (.getMessage e))})))))))))
 
 (defn handle-agentkey

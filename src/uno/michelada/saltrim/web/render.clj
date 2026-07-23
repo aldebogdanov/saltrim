@@ -202,7 +202,9 @@
         [w h] (if span
                 (span-px sh ci ri (first span) (second span))
                 [(col-w sh ci) (row-h sh ri)])]
-    [:div {:id (cell-id a) :class (str "cell" (when note " noted") (when span " merged"))
+    [:div {:id (cell-id a)
+           :class (str "cell" (when note " noted") (when span " merged")
+                       (when (= sheet/layer-over (get srcs sheet/layer-prop)) " over"))
            :data-raw raw
            :title note                     ; the comment itself, on hover
            :data-sty (when (seq srcs) (json/write-value-as-string srcs))
@@ -297,6 +299,21 @@
                         :data-merges (json/write-value-as-string (sheet/merge-spans sh))
                         :style "display:none;"}]))))
 
+(defn cells-layer-html
+  "The whole cell layer: the grid lines and the cells, as SIBLINGS.
+
+   They used to be two layers, grid under cells, which fixed the seam between two
+   coloured neighbours but made the choice permanent — a styled cell always hid
+   the grid beneath it. Most of the time you want the opposite: the fill tinting
+   the row while the table's own ruling still reads. One layer lets each cell
+   pick, because z-index only orders siblings: a separate layer is its own
+   stacking context and nothing inside it can cross out.
+
+   Order here is DOM order only; what actually decides is z-index (see the
+   `.gl` / `.cell` / `.cell.over` rules)."
+  [sh cis ris]
+  (str (gridlines-html sh cis ris) (cells-html sh cis ris)))
+
 (defn- grid-layers
   "Logical-scroll viewport: fills the page below the toolbars, overflow hidden.
    Clipped header strips + a cell area, each holding an absolutely-positioned
@@ -342,13 +359,12 @@
       ;; cell area (clipped; translated in X+Y)
       [:div {:id "cellclip" :style (format "%sleft:%dpx;top:%dpx;right:%dpx;bottom:%dpx;"
                                            clip GUT HDR BAR BAR)}
-       ;; the grid itself, UNDER the cells: an unstyled (transparent) cell lets it
-       ;; through, a styled one paints over it edge to edge. Translated with the
-       ;; cells, so it scrolls with them.
-       [:div {:id "gridlines" :style "position:absolute;left:0;top:0;will-change:transform;"}
-        (h/raw (gridlines-html sh cis ris))]
+       ;; The grid lines and the cells share ONE layer, so a cell can sit either
+       ;; side of them by z-index (see `cells-layer-html`). Separate layers would
+       ;; each be their own stacking context, and no per-cell z-index could ever
+       ;; cross between them.
        [:div {:id "cells" :style "position:absolute;left:0;top:0;will-change:transform;"}
-        (h/raw (cells-html sh cis ris))]
+        (h/raw (cells-layer-html sh cis ris))]
        ;; multi-cell selection highlight — drawn CLIENT-side by app.cljs from its
        ;; selection state (ranges + multi-range), translated with #cells. Local
        ;; only: peers see your active cell via presence, not the whole marquee.
@@ -470,6 +486,10 @@
              "applies to: all, vertical, horizontal, top, bottom, left, right."]
             [:p {:style p} "e.g. bg " [:span {:style kbd} "=(if (> $val 100) \"tomato\" \"white\")"]]
             [:p {:style p} "Select a range first and a style applies to every cell in it."]
+            [:p {:style p} "A fill sits " [:b "under"] " the grid lines, so the table's ruling still "
+             "reads across it. " [:span {:style kbd} "over grid"] " (format row) lifts the selected "
+             "cells above the lines instead — neighbours sharing a fill then become one solid block "
+             "of colour. " [:span {:style kbd} "under grid"] " puts them back."]
 
             [:div {:style h3} "Labels and comments"]
             [:p {:style p} "Two more properties in the same row describe the cell rather than paint it. "
@@ -1280,7 +1300,12 @@
                 ;; A 3px band whose outer pixels are the grid colour and whose
                 ;; middle is transparent — pixel-for-pixel what two cell borders
                 ;; either side of a 1px gap used to draw.
-                ".gl{position:absolute;box-sizing:border-box;}"
+                ;; The grid sits BETWEEN two cell layers. A cell defaults below
+                ;; it, so a fill tints the cell while the table's ruling still
+                ;; reads across it; `.over` lifts it above, so neighbours sharing
+                ;; a fill become one solid region. Only siblings can be ordered
+                ;; this way — which is why the lines live in the cell layer.
+                ".gl{position:absolute;box-sizing:border-box;z-index:1;}"
                 ".gv{top:0;width:3px;border-left:1px solid var(--grid);"
                 "border-right:1px solid var(--grid);}"
                 ".gh{left:0;height:3px;border-top:1px solid var(--grid);"
@@ -1295,14 +1320,17 @@
                                ;; 1px more than it looks: it absorbs the border the
                                ;; cell no longer draws, so text lands on exactly the
                                ;; pixel it always did.
-                               ".cell{position:absolute;width:%dpx;height:%dpx;"
+                               ".cell{position:absolute;width:%dpx;height:%dpx;z-index:0;"
                                "box-sizing:border-box;"
                                "padding:3px 5px 4px 5px;font:13px monospace;overflow:hidden;"
                                "white-space:nowrap;background:transparent;}"
                                ;; a merge covers boundaries that are still drawn
                                ;; beneath it, so the anchor is opaque and keeps a
                                ;; box of its own around the whole block
-                               ".cell.merged{background:var(--bg);"
+                               ".cell.over{z-index:2;}"
+                               ;; a merge always covers the boundaries inside its
+                               ;; own block, so it paints above them regardless
+                               ".cell.merged{background:var(--bg);z-index:2;"
                                "border:1px solid var(--grid);padding:2px 4px;}"
                                ;; commented cell: a small corner flag (the comment
                                ;; text itself is the cell's hover title).
@@ -1404,6 +1432,7 @@
              :data-signals:selcells "''"
              :data-signals:insertdir "''"   ; top|bottom|left|right (insert blank row/col)
              :data-signals:deletedir "''"   ; row|col (delete the line the cursor is on)
+             :data-signals:layerdir "''"    ; over|under (which side of the grid a fill paints on)
              :data-signals:rzcmd "''"
              ;; definitions library (ƒ modal)
              :data-signals:defspanel "false"
@@ -1591,7 +1620,18 @@
        [:button {:class "btn" :title "merge the selected range into one cell (top-left keeps its address; the rest are hidden but kept — reversible)"
                  :data-on:click "@post('/mergecells')"} "⛶ merge"]
        [:button {:class "btn" :title "unmerge the selected cell back into individual cells"
-                 :data-on:click "@post('/unmergecells')"} "unmerge"]])
+                 :data-on:click "@post('/unmergecells')"} "unmerge"]
+       ;; which side of the grid lines the selected cells paint on
+       [:span {:style "border-left:1px solid var(--grid);margin:0 .2rem;align-self:stretch;"}]
+       [:span {:style "font:11px sans-serif;color:var(--muted);"} "fill"]
+       [:button {:class "btn"
+                 :title (str "paint the selected cells OVER the grid lines — neighbours "
+                             "sharing a fill become one solid block of colour")
+                 :data-on:click "$layerdir='over', @post('/celllayer')"} "over grid"]
+       [:button {:class "btn"
+                 :title (str "paint the selected cells UNDER the grid lines (the default) — "
+                             "the fill tints them while the table's ruling still reads across")
+                 :data-on:click "$layerdir='under', @post('/celllayer')"} "under grid"]])
       ;; logical-scroll viewport (custom wheel + scrollbars in /app.js)
       (grid-layers sh {:r0 0 :c0 0})
 
