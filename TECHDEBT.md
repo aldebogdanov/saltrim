@@ -16,9 +16,12 @@ ceiling — they're a pure coordinate clamp, sized to a familiar grid
 element limit" rationale below is historical.
 
 Follow-ups: keyboard nav DONE (arrows/Tab/Enter move selection, Enter/dblclick
-edit — see web layer); PgUp/PgDn/Home/End not yet wired; WIN-COLS/ROWS are fixed
-(generous) rather than computed from viewport size; momentum/trackpad feel is
-raw deltas (could smooth). The notes below are the original analysis, kept for
+edit — see web layer). **Window size from the viewport is DONE**: the client
+measures its own viewport and reports `$wc`/`$wr`, which `geom/window` uses
+(falling back to a px-budget guess before first paint, clamped by `MAX-WIN-*`) —
+the fixed WIN-COLS/ROWS this entry complained about are now just that fallback.
+Still open: PgUp/PgDn/Home/End are not wired; momentum/trackpad feel is raw
+deltas (could smooth). The notes below are the original analysis, kept for
 context.
 
 ### (original) giant spacer analysis
@@ -45,8 +48,11 @@ This removes the row cap entirely and makes the cap purely a coordinate clamp.
 
 ## Other
 
-- Concurrent edits can race into a transient `#ERR` / stale toast (per-sheet
-  lock serializes server side, but simultaneous async posts arrive unordered).
+- Concurrent edits can race into a transient `#ERR` (the edit lock — now per
+  ROOM, `[sheet branch]`, not per sheet — serializes server side, but
+  simultaneous async posts arrive unordered). The "stale toast" half of this is
+  gone: toasts are appended cards, so a message can no longer be overwritten by
+  a later one before it is read.
 - No config system yet — grid bounds, geometry are `def` constants. Fold into
   per-sheet settings once persistence lands.
 - **Signals are INTERNED BY ID in the execution context — a trap worth
@@ -74,10 +80,13 @@ sheet forever. A swept client transparently re-registers on its next action
 (ensure-session!). No client heartbeat.
 
 REMAINING (minor):
-- a sheet loaded by a bare GET / with no following /session/start (e.g. a probe)
-  has zero sessions and is never unloaded. Consider sweeping session-less sheets
-  too (carefully — avoid racing a load that is mid-handshake).
 - TTL/sweep interval are constants; move to config.
+
+DONE: **session-less rooms are swept.** A room loaded by a bare GET (or an MCP
+tool call) that never opens a `/stream` has no session to release it, so those
+accumulated for the life of the process. `sweep-orphan-rooms!` now releases any
+room with zero sessions untouched for `ROOM-IDLE-MS`; the idle window is what
+keeps it off a load that is mid-handshake.
 
 NOTE: collaboration uses a persistent per-session SSE stream (/stream) for
 server->client push. Cleanup does NOT rely on http-kit's channel close (it
@@ -148,9 +157,13 @@ REMAINING:
   file's `:public` bool. `sheet-rec` registers the `sheet` entity (`ensure-
   sheet!`) and, on its FIRST registration, one-shot-migrates the file's legacy
   `:public` into a grant; `accessible-rec` queries `db/access-level`; `handle-
-  share` toggles the grant. The file envelope still carries `:public` (vestigial
-  migration seed; harmless). Sheet ids stay `<owner>__<name>` strings (the uuid
+  share` toggles the grant. Sheet ids stay `<owner>__<name>` strings (the uuid
   switch was NOT needed and is deferred).
+  **Now dead code:** that one-shot migration reads `(:public rec)`, but since the
+  file store was retired `store/load-record` hardcodes `:public false`, so the
+  branch can never fire. The legacy flag it migrated only ever lived in the
+  `data/*.edn` files that are no longer read. Both the field and the migration
+  can go.
 - **Read-only tier + direct user grants — DONE (Datahike step 2b).** Public is
   now a level (`:everyone`/`:read` view OR `:read-write` edit), and owners can
   grant **direct per-user shares** (`:user` kind; resolved by name in dev /
@@ -200,9 +213,12 @@ REMAINING:
   non-owner session on the sheet (`evict-foreign!`) when it goes public→private;
   their held streams close and the next /cell, /view or /stream reconnect fails
   the access check. Verified via /debug + two-client curl.
-- **Real-provider flows untested live**: GitHub/Google were implemented to
-  spec but only exercised with the provider unconfigured (redirect + error
-  paths). Needs one manual run with real client ids.
+- **Google OAuth is still unexercised.** GitHub is no longer in this bucket —
+  it is the provider the production deployment signs in with. Google was
+  implemented to the same spec but its code path has never met the real
+  endpoint. Before 1.0 it needs one manual run against a real client id, or the
+  provider should be cut and the app shipped GitHub-only rather than offering a
+  button that might 500.
 - **Sheet picker — DONE.** The toolbar has a `#sheetpicker` dropdown of the
   signed-in user's sheets (`store/list-names`); selecting one navigates to it.
   A foreign shared sheet shows as a leading `↗ <name>` option. The `#sheetbox`
@@ -245,8 +261,9 @@ REMAINING:
   reader comment beside it, which made a CDN outage a blank page and put a
   third-party origin in `script-src` with full access to every cell. Bumping the
   version now means replacing that one file.
-- **`app.legacy.js`** is the pre-CLJS hand-written engine, kept for reference.
-  Delete once the CLJS port has been in use long enough to trust.
+- **`app.legacy.js` — DELETED.** The pre-CLJS hand-written engine was kept for
+  reference until the port had been in use long enough to trust; it is no longer
+  in the tree (`git log -- '**/app.legacy.js'` if you need to read it).
 
 ## Git-like branching (PR A: switch + fork · PR B: merge)
 
@@ -265,11 +282,12 @@ REMAINING:
   preview and apply, so a collaborator editing the source/target in between can
   shift what Apply does (it always uses live state at apply time). Acceptable;
   a confirm-against-previewed-plan check could tighten it.
-- **Deleting a branch strands collaborators on it.** `delete-branch!` + the
-  in-memory room discard prevent resurrection, but other sessions currently on
-  the deleted branch aren't redirected — their next request is denied and they
-  must reload to main. A broadcast-redirect (push `$goto` to the room before
-  dropping it) would be friendlier.
+- **Deleting a branch tells its collaborators — DONE.** `evict-branch-deleted!`
+  pushes `$branchgone` to every other session in the room, raising a modal that
+  names the branch. Deliberately NOT the `$goto` redirect this entry originally
+  asked for: silently landing someone on `main` is how a person carries on typing
+  and edits main by accident. Until they dismiss it their `$branch` still names
+  the dead branch, so every write 403s and no keystroke can reach main.
 - **Branch list isn't pushed live.** A fork/delete by the owner only shows up in
   collaborators' branch pickers on reload (the picker is server-rendered once per
   page). Acceptable since branches are owner-managed; could patch `#branchbar`
@@ -322,11 +340,12 @@ REMAINING:
   now read as `nil` (`runtime/lookup` returns a fresh const nil-Spin) and the
   stdlib aggregates filter nils, so a range that grows over an inserted blank
   keeps computing. Plain scalar arithmetic over a blank still needs `(or $X 0)`.
-- **`delete-line!` assumes the removed line is unreferenced.** It is built as the
-  inverse of `insert-line!` (so an insert undoes in one step) and that holds for a
-  freshly-blank inserted line. A user-facing **delete row/column** would need
-  `#REF`-style handling for formulas pointing AT the deleted line — so the engine
-  op exists but no delete UI is exposed yet (trivial to add once #REF is decided).
+- **Delete row/column — DONE.** `#REF!` was decided: `formula/delete-shift`
+  rewrites references past the deleted line and turns a reference AT it into
+  `(deleted-ref)` → `#REF!`. `⊖ row` / `⊖ col` expose it. Note the undo is not
+  the inverse rewrite (`delete-shift` isn't invertible): `delete-undo-snapshot`
+  captures the line plus every cell whose source the rewrite touched, so one
+  Ctrl+Z restores both the cells and the references to them.
 - **Insert is a full rebuild + full-window re-render.** `insert-line!` rebuilds
   the whole cell graph from the shifted document and the handler re-renders the
   entire window for every session. Cheap for modest sheets; could be incremental
@@ -526,3 +545,17 @@ remains:
   deliberate abuser can therefore still burn a core per sheet they can edit.
 - **`EVAL-TIMEOUT-MS` is a constant** (2s — three orders of magnitude above any
   real formula). Fold into per-sheet settings with the other constants.
+
+## Datahike value-size caps
+
+Datahike 0.8.1746 added opt-in value-size caps; we set `:max-string-length 0`
+(explicitly unbounded) rather than take the `:value-caps :default` preset, whose
+4096-char string cap would start REFUSING writes that work today — at save time,
+on data already typed. The `:defs` blob (a sheet's whole function library in one
+string) is the one that would hit it first. Unbounded is what the app always did.
+
+Worth revisiting with a MEASURED cap: large enough for a real defs library and
+the longest plausible formula or comment, small enough to bound index growth and
+stay inside backend value limits. That needs numbers from a real sheet, plus a
+decision about what the app does when a write exceeds it (refuse at the UI, with
+a message, rather than throw at save).
