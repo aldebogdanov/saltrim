@@ -1,46 +1,84 @@
 (ns uno.michelada.saltrim.sse-test
-  "The err/info toast channels are mutually exclusive (same screen corner): a
-   handler setting one non-blank must not leave the other showing a stale
-   message. Enforced centrally in `signals!` so every call site gets it for
-   free — this locks that policy down at the wire level."
+  "A toast is an element appended to the page's `#toasts` list, not a signal
+   written into a slot — that is what lets messages stack instead of overwriting
+   each other, and what puts each card's whole lifetime (click, and a CSS
+   animation that ends by removing an info card) in the markup the server sends
+   once. `signals!` is the single choke point every handler patches through, so
+   these tests pin the translation at the wire level."
   (:require [clojure.test :refer [deftest is testing]]
+            [clojure.string :as str]
             [jsonista.core :as json]
             [starfederation.datastar.clojure.api :as d*]
             [uno.michelada.saltrim.web.sse :as sse]))
 
-(defn- sent
-  "The map `signals!` actually hands to patch-signals!, captured instead of
-   opened over a real SSE connection."
+(defn- capture
+  "Run `signals!` with the SSE writes captured instead of opened over a real
+   connection: `{:cards [[html opts] …] :signals <map or ::none>}`."
   [m]
-  (let [captured (atom nil)]
-    (with-redefs [d*/patch-signals! (fn [_gen json-str] (reset! captured json-str))]
+  (let [cards (atom [])
+        sigs  (atom ::none)]
+    (with-redefs [d*/patch-elements! (fn [_gen html opts] (swap! cards conj [html opts]))
+                  d*/patch-signals!  (fn [_gen s] (reset! sigs (json/read-value s json/keyword-keys-object-mapper)))]
       (sse/signals! :fake-gen m))
-    (json/read-value @captured json/keyword-keys-object-mapper)))
+    {:cards @cards :signals @sigs}))
 
-(deftest err-clears-a-stale-info
-  (is (= {:err "boom" :info ""} (sent {:err "boom"}))))
+(defn- cards [m] (mapv first (:cards (capture m))))
 
-(deftest info-clears-a-stale-err
-  (is (= {:info "merged 3 cells" :err ""} (sent {:info "merged 3 cells"}))))
+(deftest a-message-is-an-appended-element-not-a-signal
+  (let [{:keys [cards signals]} (capture {:err "boom"})]
+    (is (= 1 (count cards)))
+    (let [[html opts] (first cards)]
+      (is (= "#toasts" (get opts d*/selector)))
+      (is (= d*/pm-append (get opts d*/patch-mode))
+          "append — anything else would replace the cards already up")
+      (is (str/includes? html "boom")))
+    (is (= ::none signals) "nothing left to send as signals")))
 
-(deftest blank-err-does-not-clobber-info
-  ;; clearing an error ({:err ""}) is not "setting an error" — a handler doing
-  ;; so mid-flow must not blow away an info toast someone else just showed
-  (is (= {:err ""} (sent {:err ""})) "no :info key injected for a blank err"))
+(deftest an-info-card-dismisses-itself-and-an-error-card-does-not
+  (let [[info] (cards {:info "merged 3 cells"})
+        [err]  (cards {:err "boom"})]
+    (is (str/includes? info "class=\"toast info\""))
+    (is (str/includes? err  "class=\"toast err\""))
+    (testing "the animation's end is what removes an info card"
+      (is (str/includes? info "data-on:animationend=\"el.remove()\"")))
+    (testing "an error waits to be acknowledged"
+      (is (not (str/includes? err "animationend"))))
+    (testing "either way a click takes it away"
+      (is (every? #(str/includes? % "data-on:click=\"el.remove()\"") [info err])))))
 
-(deftest blank-info-does-not-clobber-err
-  (is (= {:info ""} (sent {:info ""}))))
+(deftest messages-stack-rather-than-replacing-each-other
+  (testing "two channels in one call are two cards, not one winner"
+    (let [[a b] (cards {:err "boom" :info "saved"})]
+      (is (str/includes? a "boom"))
+      (is (str/includes? b "saved"))))
+  (testing "and the same message twice is two cards — no de-duplication by text"
+    ;; the old single-slot signal made this a silent no-op: the value never
+    ;; changed, so the second report of an identical mistake showed nothing
+    (let [[a b] (concat (cards {:err "bad formula"}) (cards {:err "bad formula"}))]
+      (is (every? #(str/includes? % "bad formula") [a b]))
+      (is (not= a b) "distinct ids, so morphing can never fold them together"))))
 
-(deftest explicit-value-is-never-overridden
-  (testing "caller already cleared info alongside a real error — left alone"
-    (is (= {:err "boom" :info "kept"} (sent {:err "boom" :info "kept"}))))
-  (testing "same the other way"
-    (is (= {:info "yay" :err "kept"} (sent {:info "yay" :err "kept"})))))
+(deftest a-blank-channel-says-nothing
+  ;; it used to CLEAR the shared slot; there is no slot now, and a card belongs
+  ;; to whoever it was sent to
+  (is (= [] (cards {:err ""})))
+  (is (= [] (cards {:info ""})))
+  (is (= [] (cards {:err "" :info ""}))))
 
-(deftest unrelated-signals-pass-through-untouched
-  (is (= {:pcw "10" :prh "20" :err ""} (sent {:pcw "10" :prh "20" :err ""})))
-  (is (= {:mergetake "" :mergefrom "" :branchpanel false :info "merged 1 cell" :err ""}
-         (sent {:mergetake "" :mergefrom "" :branchpanel false :info "merged 1 cell"}))))
+(deftest a-message-is-escaped
+  ;; messages routinely carry user text — a formula, a sheet name, an exception
+  (let [[html] (cards {:err "bad ref <img src=x onerror=alert(1)> in =A1"})]
+    (is (not (str/includes? html "<img")))
+    (is (str/includes? html "&lt;img"))))
 
-(deftest neither-channel-touched-when-neither-set
-  (is (= {:pcw "10"} (sent {:pcw "10"}))))
+(deftest other-signals-are-untouched
+  (is (= {:pcw "10" :prh "20"} (:signals (capture {:pcw "10" :prh "20"}))))
+  (testing "a call carrying both goes out as both: cards AND the rest as signals"
+    (let [{:keys [cards signals]} (capture {:mergetake "" :branchpanel false :info "merged 1 cell"})]
+      (is (= 1 (count cards)))
+      (is (= {:mergetake "" :branchpanel false} signals)))))
+
+(deftest an-empty-call-still-patches
+  ;; /stream's on-open flush is an empty signals patch: a persistent SSE that has
+  ;; sent nothing looks finished to the client and it reconnect-storms
+  (is (= {} (:signals (capture {})))))

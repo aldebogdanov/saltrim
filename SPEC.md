@@ -197,7 +197,7 @@ await chain).
   owners reach (and auto-create) their own sheets; a foreign sheet is reachable
   iff the user holds a grant (a direct `:user` share) or carries the sheet's
   capability-link `token`. Unauthenticated → redirect `/login` (page) or an
-  `$err` toast / 403 (API, stream). `?s=<name>` opens your own sheet,
+  error toast / 403 (API, stream). `?s=<name>` opens your own sheet,
   `?u=<owner>&s=<name>&t=<token>` someone else's shared one.
 - **Sharing**: a Datahike ACL of `share` grants (`db` ns). Each grant is
   `(sheet, grantee, grantee-kind, level)` where kind ∈ `:user | :link`
@@ -271,6 +271,13 @@ that the client `translate`s.
   keeps these keys from the doc-level nav handler).
 - **Keyboard navigation** (document-level): arrows / Tab move `$sel` (scrolling
   it into view); Enter opens the editor. Ignored while any input is focused.
+- **Toasts are elements, not signals.** `web.sse/signals!` turns a non-blank
+  `:err`/`:info` into an `<li>` appended to `#toasts` (patch mode `append`), so
+  messages stack rather than overwrite. Each card dismisses itself: a click
+  (`data-on:click="el.remove()"`) on any of them, and on an `info` card a CSS
+  animation that fades out at its last keyframe plus
+  `data-on:animationend="el.remove()"`. Errors have no such animation and stay
+  until clicked. The server keeps no record of a card once sent.
 
 ### Client engine (`app.cljs`)
 
@@ -315,7 +322,7 @@ that the client `translate`s.
   ride in the request **signals** (not the URL). Registers the session, stores
   its generator, flushes once to establish the stream. Stays open.
 - `POST /cell` — edit (Datastar `@post`, signals carry `cell/v/sheet/sid`).
-  Edits, settles, autosaves, returns the editor's window patch + `$err`, and
+  Edits, settles, autosaves, returns the editor's window patch + any toast, and
   **broadcasts** the change to other sessions on the sheet.
 - `POST /view` — window change (signals carry `r0/c0/sheet/sid`). Patches
   `#cells/#colhead/#rowhead` inner + `#meta`.

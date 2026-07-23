@@ -5,6 +5,7 @@
             [clojure.string :as str]
             [org.httpkit.server :as http]
             [jsonista.core :as json]
+            [hiccup2.core :as h]
             [uno.michelada.saltrim.util :as util]
             [starfederation.datastar.clojure.api :as d*]
             [starfederation.datastar.clojure.adapter.http-kit :as hk]
@@ -106,20 +107,68 @@
   (let [html (if (str/blank? html) "<!-- -->" html)]
     (d*/patch-elements! gen html {d*/selector selector d*/patch-mode d*/pm-inner})))
 
+;; --- toasts -------------------------------------------------------------
+;; A toast is an ELEMENT the server appends to the page's `#toasts` list, not a
+;; signal written into a slot. As signals, `:err` and `:info` were two
+;; single-value channels over one screen corner: a second message overwrote the
+;; first before anyone had read it, and the two had to blank each other out to
+;; avoid overlapping. Appended cards stack instead — every message gets its own.
+;;
+;; Each card carries its whole life in its own markup:
+;;
+;;   click    — `data-on:click="el.remove()"`, on every card.
+;;   timeout  — an `info` card also runs a CSS animation whose last keyframe
+;;              fades it out; `data-on:animationend` then removes the node. An
+;;              `err` card has no such animation and so waits to be
+;;              acknowledged: missing a failure costs more than missing a
+;;              success.
+;;
+;; So this is fire-and-forget. Nothing server-side tracks a card, times it, or
+;; ever has to take it back — no timers, no per-session bookkeeping, and no
+;; client code beyond the two Datastar expressions above.
+
+(defonce ^:private toast-n (java.util.concurrent.atomic.AtomicLong. 0))
+
+(def ^:private toast-list
+  "The `<ul>` in `web.render/page` that cards are appended to."
+  "#toasts")
+
+(defn- toast-html
+  "One card. The message is ordinary hiccup content, so it is HTML-escaped —
+   it routinely carries user text (a formula, a sheet name, an exception)."
+  [kind msg]
+  (str (h/html
+        [:li (cond-> {:id            (str "toast" (.incrementAndGet toast-n))
+                      :class         (str "toast " (name kind))
+                      :title         "click to dismiss"
+                      :data-on:click "el.remove()"}
+               (= :info kind) (assoc :data-on:animationend "el.remove()"))
+         msg])))
+
+(defn toast!
+  "Append a `:err` / `:info` card to the page's toast list."
+  [gen kind msg]
+  (d*/patch-elements! gen (toast-html kind msg)
+                      {d*/selector toast-list d*/patch-mode d*/pm-append}))
+
 (defn signals!
-  "Patch signals. `:err` and `:info` are mutually exclusive one-shot toasts
-   sharing the same screen corner (error vs. positive confirmation) — a caller
-   that sets one of them to a non-blank value gets the OTHER auto-cleared
-   unless it also set that one explicitly. Without this, a lingering success
-   toast from an earlier action would still be showing (same corner, same
-   z-index) behind — or next to — a fresh error, and vice versa."
+  "Patch signals — except `:err` and `:info`, which are not signals at all any
+   more: a non-blank one raises its own toast card (see above) and never reaches
+   the client as a value. A BLANK one is a no-op, where it used to clear the
+   slot; there is no slot to clear, and a card belongs to whoever it was sent to.
+
+   This stays the one choke point every handler patches through, so all ~90 call
+   sites keep passing `{:err …}` / `{:info …}` exactly as before."
   [gen m]
-  (let [m (cond-> m
-            (and (not (contains? m :info)) (not (str/blank? (str (:err m)))))
-            (assoc :info "")
-            (and (not (contains? m :err)) (not (str/blank? (str (:info m)))))
-            (assoc :err ""))]
-    (d*/patch-signals! gen (json/write-value-as-string m))))
+  (doseq [kind [:err :info]
+          :let  [msg (str (get m kind))]
+          :when (not (str/blank? msg))]
+    (toast! gen kind msg))
+  (let [sigs (dissoc m :err :info)]
+    ;; an all-toast call has no signals left to send — but a caller that
+    ;; deliberately passed nothing (the /stream open flush) still gets its patch
+    (when (or (seq sigs) (empty? m))
+      (d*/patch-signals! gen (json/write-value-as-string sigs)))))
 
 ;; --- handlers -----------------------------------------------------------
 

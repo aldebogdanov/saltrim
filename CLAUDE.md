@@ -210,14 +210,23 @@ Gotchas learned the hard way:
 - There is no `data-on:load` plugin; run once-on-load via `data-effect` (no
   signal refs ⇒ fires once), or — as we do for the stream — dispatch a custom
   event from `app.cljs` to a `data-on:<evt>__window` handler.
-- **Two toast channels, `$err` (red) / `$info` (green, `--lime`), same corner —
-  mutually exclusive by construction.** `web.sse/signals!` is the ONE choke
-  point every handler patches signals through; it auto-clears whichever of
-  `:err`/`:info` a call doesn't mention when the other is set to non-blank, so
-  a stale success toast can never linger behind a fresh error (or vice versa)
-  without every one of 60+ call sites having to remember to clear the sibling.
-  A merge/action confirmation ("merged N cells…") is `:info`, never `:err` —
-  don't reuse the error channel for good news.
+- **A toast is an ELEMENT, not a signal.** `:err` / `:info` still go through
+  `web.sse/signals!` (the ONE choke point every handler patches through, ~90
+  call sites), but it turns a non-blank one into a `<li>` APPENDED to the page's
+  `#toasts` list — they are no longer signals and `$err`/`$info` don't exist.
+  So messages STACK (newest on top) instead of overwriting each other, and the
+  same message twice is two cards. Each card carries its whole life in its own
+  markup: `data-on:click="el.remove()"` on all of them, plus — on `info` only —
+  a CSS animation whose last keyframe fades it out and a
+  `data-on:animationend="el.remove()"` that drops the node. Errors have no such
+  animation and wait to be acknowledged. **Fire-and-forget: nothing server-side
+  tracks a card and there is no client code for it.** A blank `:err`/`:info` is
+  a no-op now (there is no slot to clear). Cards are LIGHT with a coloured left
+  rule, never a block of colour — messages carry emoji (🌿, 🕘) and a
+  green-on-green 🌿 was invisible; and `#toasts` sits at z-index 80, ABOVE the
+  modals (50/70) that raise most of them. A merge/action confirmation ("merged
+  N cells…") is `:info`, never `:err` — don't reuse the error channel for good
+  news.
 - **No hidden trigger buttons / bound-input boxes** (the old smell). The split:
   Datastar attributes own all signals + server round-trips (`@post`/`@get`);
   `app.cljs` owns the imperative work (scroll, editor position, resize, keyboard,

@@ -1220,6 +1220,51 @@
                 "background:var(--accent-bg);border:1px solid var(--accent2);"
                 "border-radius:10px;padding:0 .5rem;}"
                 ".spacer{flex:1;}"
+                ;; Toast list. The server APPENDS a card per message (see
+                ;; web.sse/toast!), so they stack instead of overwriting each
+                ;; other. `column-reverse` puts the newest at the top: the list
+                ;; is pinned by its top edge, so it grows downward and older
+                ;; cards slide away from the corner rather than the new one
+                ;; appearing somewhere further down the screen. Clipped at the
+                ;; viewport, because an error card stays until it is clicked and
+                ;; a bad afternoon should not paint over the whole grid.
+                ;; above the modals (50, and 70 for the branch-gone block): most
+                ;; messages are RAISED by a modal action — merge, properties,
+                ;; share — and at the old z-index of 20 the confirmation you had
+                ;; just asked for came up dimmed behind that modal's backdrop.
+                "#toasts{position:fixed;top:1rem;right:1rem;z-index:80;margin:0;padding:0;"
+                "list-style:none;display:flex;flex-direction:column-reverse;gap:.4rem;"
+                "align-items:flex-end;max-height:calc(100vh - 2rem);overflow:hidden;"
+                "pointer-events:none;}"
+                ;; Cards are LIGHT with a coloured left rule, not a block of
+                ;; solid colour: messages carry emoji (🌿 for a branch, 🕘 for a
+                ;; revision) and a green-on-green 🌿 was simply invisible. Dark
+                ;; text on the page colour keeps every glyph readable whatever
+                ;; the message says.
+                ".toast{pointer-events:auto;max-width:26rem;background:var(--bg);"
+                "color:var(--fg);border:1px solid var(--line);border-left:4px solid var(--muted);"
+                "border-radius:6px;padding:.55rem .8rem;font:13px sans-serif;cursor:pointer;"
+                "box-shadow:0 2px 10px rgba(0,0,0,.18);animation:toastin .18s ease-out;}"
+                ".toast.err{border-left-color:var(--danger);}"
+                ;; ONE animation on an info card, not an entrance plus a
+                ;; lifetime: `animationend` is what removes the node, and a
+                ;; second animation would fire it early. So the fade-in is the
+                ;; first 4% of the same keyframes. (The rule overrides the
+                ;; shorthand above, so an err card keeps the bare entrance and
+                ;; never auto-dismisses.)
+                ".toast.info{border-left-color:var(--lime);"
+                "animation:toastlife 5s ease-out forwards;}"
+                "@keyframes toastin{from{opacity:0;transform:translateX(12px);}}"
+                "@keyframes toastlife{0%{opacity:0;transform:translateX(12px);}"
+                "4%{opacity:1;transform:none;}88%{opacity:1;transform:none;}"
+                "100%{opacity:0;transform:translateX(12px);}}"
+                ;; reduced motion still needs the animation to END — that event is
+                ;; the dismissal — so it holds still for the same 5s and then
+                ;; cuts out, with no movement and no fade.
+                "@media(prefers-reduced-motion:reduce){"
+                ".toast{animation:none;}"
+                ".toast.info{animation:toastcut 5s steps(1,end) forwards;}}"
+                "@keyframes toastcut{from{opacity:1;}to{opacity:0;}}"
                 ;; resize grips: a thin hit-zone on a header's trailing edge that
                 ;; /app.js drags. The #rzguide is the single moving guide line.
                 ".colgrip{position:absolute;top:0;right:-3px;width:6px;height:100%;"
@@ -1301,13 +1346,9 @@
       [:script {:src "/app.js"}]]
      [:body {:data-signals:cell "''"
              :data-signals:v "''"
-             :data-signals:err "''"
-             ;; a SEPARATE channel from $err: a positive confirmation ("merged
-             ;; 3 cells…") is not a failure and must not render in the same red
-             ;; error toast. Both are one-shot single-slot notices (a new value
-             ;; on either replaces whatever was showing), so a handler picks
-             ;; exactly one — never sets both in the same signals! call.
-             :data-signals:info "''"
+             ;; ($err / $info are gone: a message is an appended card in #toasts,
+             ;; not a signal in a slot — see web.sse. Handlers still write them
+             ;; through signals!, which turns them into elements.)
              :data-signals:sel "''"
              :data-signals:edit "false"
              ;; floating in-cell editor visibility (distinct from $edit: only the
@@ -1401,18 +1442,11 @@
              :style (str "font-family:sans-serif;margin:0;padding:.6rem;height:100vh;"
                          "box-sizing:border-box;display:flex;flex-direction:column;"
                          "background:var(--bg);color:var(--fg);")}
-      [:div {:id "toast" :data-show "$err != ''" :data-text "$err"
-             :data-on:click "$err=''"
-             :style (str "position:fixed;top:1rem;right:1rem;max-width:26rem;background:var(--danger);"
-                         "color:#fff;padding:.6rem .9rem;border-radius:6px;font:13px sans-serif;"
-                         "cursor:pointer;box-shadow:0 2px 8px rgba(0,0,0,.3);z-index:20;")}]
-      ;; positive confirmations (merge applied, …) — same slot/behavior as the
-      ;; error toast, but styled as GOOD news, not a failure (see $info above).
-      [:div {:id "infotoast" :data-show "$info != ''" :data-text "$info"
-             :data-on:click "$info=''"
-             :style (str "position:fixed;top:1rem;right:1rem;max-width:26rem;background:var(--lime);"
-                         "color:#fff;padding:.6rem .9rem;border-radius:6px;font:13px sans-serif;"
-                         "cursor:pointer;box-shadow:0 2px 8px rgba(0,0,0,.3);z-index:20;")}]
+      ;; Toasts: the server appends one card per message (web.sse/toast!), each
+      ;; carrying its own dismissal — click on all of them, plus an animation
+      ;; that ends by removing an info card. Empty here, and empty again once
+      ;; the last card goes; `aria-live` announces arrivals to a screen reader.
+      [:ul {:id "toasts" :aria-live "polite"}]
       (h/raw (help-html))
       (when-not asof? (h/raw (defs-html storage-id)))
       (when-not asof? (h/raw (bigedit-html)))
@@ -1547,10 +1581,10 @@
        [:span {:style "font:11px sans-serif;color:var(--muted);"} "delete"]
        [:button {:class "btn" :style "color:var(--danger);"
                  :title "delete this row — cells after it shift up, references to it become #REF! (Ctrl/⌘+Z restores)"
-                 :data-on:click "$deletedir='row', @post('/deleteline')"} "⌫ row"]
+                 :data-on:click "$deletedir='row', @post('/deleteline')"} "⊖ row"]
        [:button {:class "btn" :style "color:var(--danger);"
                  :title "delete this column — cells after it shift left, references to it become #REF! (Ctrl/⌘+Z restores)"
-                 :data-on:click "$deletedir='col', @post('/deleteline')"} "⌫ col"]
+                 :data-on:click "$deletedir='col', @post('/deleteline')"} "⊖ col"]
        ;; merge / unmerge the selection into one big cell (top-left keeps its
        ;; address; the swallowed cells are hidden but keep their data)
        [:span {:style "border-left:1px solid var(--grid);margin:0 .2rem;align-self:stretch;"}]
