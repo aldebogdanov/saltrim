@@ -1384,7 +1384,16 @@
                 ".peer .peertag{position:absolute;top:-15px;left:-2px;"
                 "font:10px/14px sans-serif;color:#fff;padding:0 4px;"
                 "border-radius:3px 3px 3px 0;white-space:nowrap;}"))]
-      [:script {:type "module" :src "https://cdn.jsdelivr.net/gh/starfederation/datastar@v1.0.2/bundles/datastar.js" #_"/datastar.js"}]
+      ;; Datastar 1.0.2, served by US from `resources/public/datastar.js` (the
+      ;; /datastar.js route in `web`). It used to load from
+      ;; `cdn.jsdelivr.net/gh/starfederation/datastar@v1.0.2/bundles/datastar.js`
+      ;; with this local path sitting beside it as a comment — but the CDN owns
+      ;; the whole app when it is the source: a jsdelivr outage is a blank sheet,
+      ;; and whatever it serves at that URL runs with full access to every cell.
+      ;; Self-hosting also lets `script-src` in `web/security-headers` drop the
+      ;; third-party origin, and it is what makes the app work air-gapped. Bump
+      ;; the vendored file to change version.
+      [:script {:type "module" :src "/datastar.js"}]
       [:script {:src "/app.js"}]]
      [:body {:data-signals:cell "''"
              :data-signals:v "''"

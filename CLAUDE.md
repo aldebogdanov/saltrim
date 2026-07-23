@@ -186,11 +186,10 @@ Gotchas learned the hard way:
 
 ## Datastar / http-kit gotchas — already solved
 
-- Datastar is **1.0.2 from the CDN** (`@v1.0.2/bundles/datastar.js`); the page
-  uses the CDN URL. A matching copy is vendored at `resources/public/datastar.js`
-  (served at `/datastar.js`) for offline/air-gapped use — the local path sits as
-  a reader comment next to the CDN URL in `web.render/page`, so switching is a
-  one-line swap; keep the two in sync if you bump the version. SSE
+- Datastar is **1.0.2, vendored** at `resources/public/datastar.js` and served
+  by us at `/datastar.js`. **No CDN** — the page used to load it from jsdelivr,
+  which made an outage there a blank sheet and put a third-party origin in
+  `script-src`. To bump the version, replace that file. SSE
   events: `datastar-patch-elements` / `datastar-patch-signals`. Attrs use colon
   syntax (`data-on:click`, `data-bind:x`); the event var in expressions is `evt`.
 - SSE/lifecycle now uses the official SDK (`dev.data-star.clojure/*`).
