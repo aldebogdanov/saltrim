@@ -135,12 +135,15 @@
 
    `'unsafe-eval'` is not optional: Datastar compiles every `data-*` expression
    with `new Function`. `'unsafe-inline'` in style-src likewise — the page ships
-   one inline <style> and every cell carries an inline `style` attribute. The
-   CDN origin is the Datastar bundle (see `web.render/page`); switching to the
-   vendored /datastar.js lets that entry go."
+   one inline <style> and every cell carries an inline `style` attribute.
+
+   `script-src` is `'self'` alone: every script the page loads is one we serve
+   (`/datastar.js`, `/app.js`). It used to also allow `https://cdn.jsdelivr.net`,
+   which is where the Datastar bundle came from — so the policy had to trust a
+   third-party origin to run code with full access to the sheet."
   {"Content-Security-Policy"
    (str/join "; " ["default-src 'self'"
-                   "script-src 'self' 'unsafe-eval' https://cdn.jsdelivr.net"
+                   "script-src 'self' 'unsafe-eval'"
                    "style-src 'self' 'unsafe-inline'"
                    "img-src 'self' data:"
                    "font-src 'self'"

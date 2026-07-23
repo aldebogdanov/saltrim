@@ -14,10 +14,8 @@ on load. Multiple clients edit one sheet live.
 - `org.babashka/sci` is the formula sandbox: the user expression is evaluated by
   SCI (real lexical scope, no host interop), not a symbol whitelist + host
   `eval` (see Formulas).
-- Client: **Datastar 1.0.2** (the page loads it from the CDN; a matching copy is
-  vendored at `resources/public/datastar.js`, served at `/datastar.js`, for
-  offline/air-gapped use — swap the `<script src>` in `web.render/page`, where
-  the local path sits as a reader comment next to the CDN URL) +
+- Client: **Datastar 1.0.2**, vendored at `resources/public/datastar.js` and
+  served by us at `/datastar.js` (no CDN — see `web.render/page`), +
   `resources/public/app.js`, **compiled from `src/.../app.cljs`** (plain CLJS
   compiler, no node/npm — dev watch-compiles on `(start)`, prod `:advanced` in
   `uber`). `app.legacy.js` is the pre-CLJS source, kept for reference only.

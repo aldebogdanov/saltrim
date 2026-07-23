@@ -235,14 +235,11 @@ REMAINING:
   fix for `(int char)`/`(int \A)` (bit-or in CLJS) is currently guarded only by
   the `:advanced` compile + browser verification. A tiny cljs test build (or a
   `clojure -M` cljc round-trip) would lock the CLJS path down.
-- **Datastar is loaded from the CDN (1.0.2)**; a kept-in-sync copy is vendored
-  and served at `/datastar.js` for offline/air-gapped use. The fallback is a
-  **manual one-line swap** (the local path is a reader comment beside the CDN URL
-  in `web.render/page`), not an automatic on-error fallback — so if the CDN is
-  unreachable the page breaks until the src is swapped. The two must be bumped
-  together. A real auto-fallback would need an `onerror` loader (imperative JS in
-  HTML), deliberately avoided. The earlier "always vendor" rule is relaxed to
-  "CDN + kept-in-sync vendored copy" per the current preference.
+- **Datastar (1.0.2) is vendored and self-served** at `resources/public/datastar.js`
+  → `/datastar.js`. DONE — it used to load from jsdelivr with the local path as a
+  reader comment beside it, which made a CDN outage a blank page and put a
+  third-party origin in `script-src` with full access to every cell. Bumping the
+  version now means replacing that one file.
 - **`app.legacy.js`** is the pre-CLJS hand-written engine, kept for reference.
   Delete once the CLJS port has been in use long enough to trust.
 
