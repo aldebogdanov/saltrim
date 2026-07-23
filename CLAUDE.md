@@ -60,9 +60,10 @@ If the user types `/caveman`, invoke the `caveman` Skill.
 - **Spike risky unknowns first** — as REPL walkthroughs under `spikes/` (eval the
   forms at a dev REPL; see `spikes/README.md`), not cold-run mains. Don't build
   UI on unproven engine assumptions.
-- **Test after engine changes**: `clojure -X:test` (must stay green, currently
-  72 tests / 364 assertions; `db`/`auth` suites use the `:memory` Datahike
-  backend). Add tests for new engine behavior.
+- **Test after engine changes**: `clojure -X:test` (must stay green; `db`/`auth`
+  suites use the `:memory` Datahike backend). Add tests for new engine behavior.
+  The count moves every PR, so don't pin it here — run the suite and read the
+  tail. (It has been ~190 tests / ~930 assertions since the 1.0 audit.)
 - **The client is ClojureScript** (`src/.../app.cljs`, compiled to
   `resources/public/app.js`). The dev REPL `(start)` watch-compiles it on save
   (plain CLJS compiler, no node/npm); for a one-shot use `clojure -T:build cljs`.

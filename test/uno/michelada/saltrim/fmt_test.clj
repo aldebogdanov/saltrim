@@ -17,7 +17,12 @@
     (is (= "$1,234.50" (fmt/apply-mask "$#,##0.00" 1234.5)))
     (is (= "1234 USD" (fmt/apply-mask "0 USD" 1234))))
   (testing "negatives"
-    (is (= "-3.50" (fmt/apply-mask "0.00" -3.5))))
+    (is (= "-3.50" (fmt/apply-mask "0.00" -3.5)))
+    ;; the sign belongs to the whole amount, not to the digits after the prefix
+    (is (= "-$5.00" (fmt/apply-mask "$#,##0.00" -5)) "not $-5.00")
+    (is (= "-$1,234.50" (fmt/apply-mask "$#,##0.00" -1234.5)))
+    (is (= "-25.0%" (fmt/apply-mask "0.0%" -0.25)))
+    (is (= "-3 USD" (fmt/apply-mask "0 USD" -3)) "a suffix is unaffected"))
   (testing "no-op cases"
     (is (= "hello" (fmt/apply-mask "0.00" "hello")) "text passes through")
     (is (= "" (fmt/apply-mask "0.00" nil)))

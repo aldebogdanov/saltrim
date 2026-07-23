@@ -25,7 +25,7 @@
             [uno.michelada.saltrim.web.state :refer [accessible-rec can-read? def-editor-of edit-lock locked-by-other? now owner-of save-rec! session-view sessions* set-session-view! sheets* sid-re unload-sheet!]]
             [uno.michelada.saltrim.web.sse :refer [patch-inner! read-signals signals! sse sse-opts webkit-ua?]]
             [uno.michelada.saltrim.web.render :refer [border-prop border-props cells-html colhead-html css-errors denied-page graph-svg import-error-html import-report-html login-page merge-result-html meta-html page prop-allowed? render-cells rowhead-html self-html share-html]]
-            [uno.michelada.saltrim.web.collab :refer [broadcast! broadcast-deflib-except! broadcast-presence! broadcast-window! ensure-session! evict-deleted! push-deflib! reap-session! render-window!]]))
+            [uno.michelada.saltrim.web.collab :refer [broadcast! broadcast-deflib-except! broadcast-presence! broadcast-window! ensure-session! evict-branch-deleted! evict-deleted! push-deflib! reap-session! render-window!]]))
 
 (defn- log-err!
   "Server-side CLI visibility for a handler failure — the toast reaches only
@@ -1011,10 +1011,13 @@
             (do
               (db/delete-branch! sheet-id branch)
               ;; discard the in-memory engine for this room so its eventual unload
-              ;; can't re-save the deleted cells; sessions still here get denied on
-              ;; their next request and reload to main.
+              ;; can't re-save the deleted cells
               (when-let [{:keys [sh]} (@sheets* (:room rec))] (sheet/close! sh))
               (swap! sheets* dissoc (:room rec))
+              ;; collaborators used to be left on a branch that no longer existed,
+              ;; collecting "no access" toasts. Tell them by name instead — and
+              ;; make the move to main their explicit click, not our redirect.
+              (evict-branch-deleted! (:room rec) sid)
               (signals! gen {:err "" :branchpanel false :goto base})))
           (signals! gen {:err ""}))))))
 
