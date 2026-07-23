@@ -33,8 +33,6 @@
         (recur (quot (dec n) 26) (str (char (+ A-code r)) out)))
       out)))
 
-(def ^:private addr-re #"([A-Za-z]+)([0-9]+)")
-
 ;; Longest COL/ROW strings we will even convert to a number. The grid caps
 ;; (MAX-COLS = XFD, MAX-ROWS = 1048576) are 3 letters and 7 digits, so anything
 ;; longer is out of bounds by definition — and refusing it on the STRING keeps
@@ -42,6 +40,8 @@
 ;; threw NumberFormatException, which is not a shape any caller expects).
 (def ^:private MAX-COL-CHARS 3)
 (def ^:private MAX-ROW-CHARS 7)
+
+(def ^:private addr-re (re-pattern (str "([A-Za-z]{1," MAX-COL-CHARS "})([0-9]{1," MAX-ROW-CHARS "})")))
 
 (defn parse
   "\"AAB1234\" -> {:col \"AAB\" :row 1234 :ci <0-based> :ri <0-based>}.
@@ -71,11 +71,10 @@
   [addr]
   (boolean
    (when-let [[_ col row] (re-matches addr-re (str addr))]
-     (and (<= (count col) MAX-COL-CHARS)
-          (<= (count row) MAX-ROW-CHARS)
-          (let [r #?(:clj (Long/parseLong row) :cljs (js/parseInt row))]
-            (and (<= 1 r MAX-ROWS)
-                 (< (col->idx col) MAX-COLS)))))))
+     (let [r #?(:clj (Long/parseLong row) :cljs (js/parseInt row))]
+       (and (<= 1 r MAX-ROWS)
+            (< (col->idx col) MAX-COLS))))))
+          
 
 (defn canon
   "Canonical form of a `valid?` address: \"a1\" -> \"A1\". Addresses are keys —
