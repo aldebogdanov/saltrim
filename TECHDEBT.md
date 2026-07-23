@@ -182,10 +182,15 @@ REMAINING:
   bounded **recents** list for link-visited sheets are both deferred; the link
   token is stored in plaintext (it's a capability URL, not a credential — fine,
   but note it's readable in the DB).
-- **Spindel pinned at 0.1.15**: 0.1.23 changes spin-cancellation semantics and
-  breaks the structural-rebuild path (recomputed cells come back
-  `{:error "Spin cancelled by user"}`; 2 engine-test failures). Bumping spindel
-  needs its own investigation + likely an engine fix; do it in a separate PR.
+- **Spindel pinned at 0.1.15** — retested 2026-07-23 against **0.1.36**, still
+  broken the same way: **24 failures across 10 tests** (every `dynamic-*` suite
+  plus `structural-rebuild` and `empty-cells`), cells resolving to
+  `{:error "Spin cancelled by user"}` after a rebuild. The cause is the
+  spin-cancellation semantics changed in 0.1.23: we rebuild dependents
+  structurally on every edit, which dynamic refs REQUIRE (retargeting `$(expr)`
+  otherwise leaves the old target's await continuation live — spike 07). So
+  unpinning is not a version bump, it is reworking that path against the new
+  semantics, in its own PR with the dynamic-ref suite as the oracle.
 - **Datahike create→connect pause**: first-run creation sleeps ~300 ms before
   `connect` to dodge konserve-jdbc's async c3p0 pool close. Works, but a retry/
   await on a readiness signal would be cleaner than a fixed sleep.
