@@ -170,6 +170,12 @@
 (defn pretty-err [msg]
   (let [m (str msg)]
     (cond
+      ;; The most common first mistake there is: arithmetic over a cell that is
+      ;; still empty. A blank cell reads as nil, and the JVM's own words for that
+      ;; are `Cannot invoke "Object.getClass()" because "x" is null` — which says
+      ;; nothing to anyone, and least of all points at the fix.
+      (re-find #"(?i)because \"?\w+\"? is null|NullPointerException" m)
+      "empty cell in arithmetic — wrap it to read as zero, e.g. (+ (or $B5 0) 1)"
       (re-find #"cannot be cast.*?(Number|Long|Double|Integer|Ratio|BigDecimal|BigInt)" m)
       "type error (number expected)"
       (re-find #"cannot be cast" m)    "type error"

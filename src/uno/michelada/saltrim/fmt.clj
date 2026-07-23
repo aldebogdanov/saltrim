@@ -53,8 +53,10 @@
           decd   (subs s cut)
           prefix (re-find #"^[^0#.,%]*" mask)
           suffix (re-find #"[^0#.,%]*$" mask)]
-      (str prefix
-           (when neg? "-") intd
+      ;; the sign goes OUTSIDE the prefix: a currency mask must read -$5.00, not
+      ;; $-5.00 (the prefix belongs to the number, the sign to the whole thing)
+      (str (when neg? "-")
+           prefix intd
            (when (pos? dec-n) (str "." decd))
            suffix
            (when pct? "%")))))
