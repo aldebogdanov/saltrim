@@ -1090,6 +1090,34 @@
                             "text-decoration:none;color:var(--fg);font:12px monospace;")}
             (str "🕘 " (fmt-ts inst))])])]]))
 
+(defn- branch-gone-html
+  "Shown when the owner deletes the branch you are on ($branchgone = its name).
+
+   Deliberately a BLOCKING modal with one button, not a redirect. Dropping
+   someone onto main automatically is how they keep typing and edit main by
+   accident — the branch they believed they were on is gone and nothing said so.
+   Here the move is their own click. No click-outside dismiss, no ✕: while it is
+   up the page still shows the stale branch, and every write already 403s (their
+   $branch names a branch that no longer exists), so nothing can leak to main."
+  [main-href]
+  [:div {:data-show "$branchgone != ''"
+         :style (str "position:fixed;inset:0;z-index:70;background:rgba(0,0,0,.45);"
+                     "display:flex;align-items:center;justify-content:center;padding:1rem;")}
+   [:div {:style (str "background:var(--bg);border:1px solid var(--line);border-radius:8px;"
+                      "box-shadow:0 8px 32px rgba(0,0,0,.3);max-width:26rem;width:100%;"
+                      "padding:1.1rem 1.3rem;font:13px sans-serif;color:var(--fg);")}
+    [:h2 {:style "margin:0 0 .5rem;font:600 15px sans-serif;"} "This branch was deleted"]
+    [:p {:style "color:var(--muted);margin:.2rem 0 .5rem;"}
+     "The owner deleted "
+     [:strong {:data-text "'🌿 ' + $branchgone"}]
+     ". What you see here is no longer saved anywhere, and edits are refused."]
+    [:p {:style "color:var(--muted);margin:.2rem 0 .9rem;"}
+     "Continue on " [:strong "🌿 main"] " — a different branch, so check where you "
+     "are before typing."]
+    [:div {:style "display:flex;justify-content:flex-end;"}
+     [:a {:class "btn primary" :href main-href :style "text-decoration:none;"}
+      "Go to 🌿 main"]]]])
+
 (defn- graph-modal-html
   "The 🕸 dependency-graph modal shell, toggled by $graphpanel. Its #graphview
    inner is server-rendered by /graph when the modal opens (so it's always
@@ -1292,6 +1320,9 @@
              :data-signals:bname "''"            ; new-branch name (fork modal)
              :data-signals:branchact "''"        ; fork | delete | merge-preview/apply
              :data-signals:branchpanel "false"   ; 🌿 modal open?
+             ;; set (to its name) when the owner deletes the branch you are on —
+             ;; raises a blocking modal instead of redirecting you onto main
+             :data-signals:branchgone "''"
              ;; merge (PR B): source branch + the space-separated set of conflict
              ;; keys ("addr|prop") the owner chose to take from source.
              :data-signals:mergefrom "''"
@@ -1378,6 +1409,9 @@
       (when-not asof? (h/raw (agentkey-html (auth/agent-key-info uid))))
       (when-not asof? (history-modal storage-id sname branch revisions link-token owner?))
       (when-not asof? (graph-modal-html))
+      ;; only reachable on a non-main branch — main is never deleted
+      (when (and (not asof?) (not= branch db/MAIN))
+        (branch-gone-html (sheet-href storage-id sname db/MAIN link-token owner?)))
       ;; ── toolbar row 1: sheet management + sharing + identity ───────────
       [:div {:class "toolrow"}
        (sheet-picker uid storage-id sname)

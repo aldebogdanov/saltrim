@@ -109,6 +109,27 @@
            (catch Throwable _ nil))
       (reap-session! sid))))
 
+(defn evict-branch-deleted!
+  "The owner just deleted `room`'s branch: tell everyone else on it, by name.
+
+   Deliberately NOT a `$goto`. Silently landing someone on `main` is how a person
+   carries on typing and edits main by accident — the branch they thought they
+   were on is gone and nothing said so. `$branchgone` raises a modal they must
+   dismiss, and until they do the page keeps showing the (now stale) branch: every
+   write already 403s, since their `$branch` still names a branch that no longer
+   exists, so there is no window in which a keystroke can reach main.
+
+   Sessions are left registered rather than reaped — closing their stream would
+   only start a reconnect loop against a branch that is gone. The TTL sweep
+   collects them."
+  [room except-sid]
+  (let [[_ branch] room]
+    (doseq [[sid s] @sessions*]
+      (when (and (not= sid except-sid) (= room (:room s)) (:gen s))
+        (try (d*/lock-sse! (:gen s) (signals! (:gen s) {:branchgone branch}))
+             (when (:webkit? s) (webkit-flush! sid))
+             (catch Throwable _ nil))))))
+
 ;; --- presence (collaborator cursors + edit locks) ----------------------
 
 (defn broadcast-presence!
