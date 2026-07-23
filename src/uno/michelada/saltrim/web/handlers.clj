@@ -24,7 +24,7 @@
             [uno.michelada.saltrim.web.geom :refer [block-of clamp-view in-window? known-formula-error? pretty-err qparam url-decode url-encode window]]
             [uno.michelada.saltrim.web.state :refer [accessible-rec can-read? def-editor-of edit-lock locked-by-other? now owner-of save-rec! session-view sessions* set-session-view! sheets* sid-re unload-sheet!]]
             [uno.michelada.saltrim.web.sse :refer [patch-inner! read-signals signals! sse sse-opts webkit-ua?]]
-            [uno.michelada.saltrim.web.render :refer [border-prop border-props cells-html colhead-html css-errors denied-page graph-svg import-error-html import-report-html login-page merge-result-html meta-html page prop-allowed? render-cells rowhead-html self-html share-html]]
+            [uno.michelada.saltrim.web.render :refer [border-prop border-props cells-html colhead-html css-errors denied-page graph-svg gridlines-html import-error-html import-report-html login-page merge-result-html meta-html page prop-allowed? render-cells rowhead-html self-html share-html]]
             [uno.michelada.saltrim.web.collab :refer [broadcast! broadcast-deflib-except! broadcast-presence! broadcast-window! ensure-session! evict-branch-deleted! evict-deleted! push-deflib! reap-session! render-window!]]))
 
 (defn- log-err!
@@ -516,6 +516,7 @@
         (sse req (fn [gen]
                    (try
                      (let [[cis ris] (window sh view)]
+                       (patch-inner! gen "#gridlines" (gridlines-html sh cis ris))
                        (patch-inner! gen "#cells"   (cells-html sh cis ris))
                        (patch-inner! gen "#colhead" (colhead-html sh cis))
                        (patch-inner! gen "#rowhead" (rowhead-html sh ris))

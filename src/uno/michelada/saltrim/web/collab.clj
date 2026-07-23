@@ -10,7 +10,7 @@
             [uno.michelada.saltrim.web.geom :refer [in-window? window]]
             [uno.michelada.saltrim.web.state :refer [ROOM-IDLE-MS SESSION-TTL-MS color-for now sessions* sessions-on sheet-rec sheets* sid-re touch! unload-sheet!]]
             [uno.michelada.saltrim.web.sse :refer [patch-inner! signals! webkit-flush!]]
-            [uno.michelada.saltrim.web.render :refer [cells-html colhead-html deflib-html meta-html peers-html render-cells rowhead-html self-html]]))
+            [uno.michelada.saltrim.web.render :refer [cells-html colhead-html deflib-html gridlines-html meta-html peers-html render-cells rowhead-html self-html]]))
 
 (defn- register-session! [sid sheet-id branch uid token]
   (let [[owner _] (store/split-id sheet-id)]
@@ -149,6 +149,7 @@
    `room` = [sheet-id branch]."
   [gen sid room sh view]
   (let [[cis ris] (window sh view)]
+    (patch-inner! gen "#gridlines" (gridlines-html sh cis ris))
     (patch-inner! gen "#cells"   (cells-html sh cis ris))
     (patch-inner! gen "#colhead" (colhead-html sh cis))
     (patch-inner! gen "#rowhead" (rowhead-html sh ris))
