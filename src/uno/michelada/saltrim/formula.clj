@@ -189,6 +189,103 @@
     (set? x)    (into #{} (map fuse-dynrefs x))
     :else       x))
 
+;; `#(...)` — the anonymous-function literal.
+;;
+;; Formula source is read by `edn/read-string`, and EDN has no dispatch macros,
+;; so `=(map #(* 2 %) $A1:A3)` died with "No dispatch macro for: (" — the single
+;; most reflexive thing a Clojure user types. Swapping in the full Clojure reader
+;; would fix it and open the door to record literals (`#java.io.File[...]`
+;; constructs a host object at READ time, before SCI's sandbox sees anything), so
+;; instead `#(` becomes an ordinary call to a macro the sandbox provides.
+;;
+;; The rewrite is textual but only just: `#(` -> `(fn-literal ` keeps the parens
+;; balanced one-for-one, and `%`, `%1`, `%&` are all valid EDN symbols already.
+;; Everything that needs judgment — which `%`s are arguments, what arity that
+;; makes — happens in the macro, on FORMS, where a `%` inside a string literal
+;; is data and can't be mistaken for a parameter.
+
+(def ^:private FN-LITERAL 'fn-literal)
+
+(defn- desugar-fn-literals
+  "Rewrite `#(` to `(fn-literal ` outside string and character literals. The only
+   string-level step; it needs to know just one thing, whether it is inside a
+   string, which is why it can be this small."
+  [s]
+  (let [n    (count s)
+        ;; an escape / character literal is TWO characters, and BOTH have to be
+        ;; copied — appending only the backslash silently ate the character it
+        ;; escaped, which turned `#{\a}` into an unreadable `#{\}`
+        take2 (fn [^StringBuilder out i]
+                (.append out (.charAt ^String s i))
+                (when (< (inc i) n) (.append out (.charAt ^String s (inc i))))
+                out)]
+    (loop [i 0, in-str? false, out (StringBuilder.)]
+      (if (>= i n)
+        (str out)
+        (let [c (.charAt ^String s i)]
+          (cond
+            in-str?
+            (if (= c \\)
+              (recur (+ i 2) true (take2 out i))
+              (recur (inc i) (not= c \") (.append out c)))
+
+            (= c \")     (recur (inc i) true (.append out c))
+            ;; a character literal (\a, \", \\) — the next char is data
+            (= c \\)     (recur (+ i 2) false (take2 out i))
+            (and (= c \#) (< (inc i) n) (= (.charAt ^String s (inc i)) \())
+            (recur (+ i 2) false (.append out (str "(" FN-LITERAL " ")))
+            :else        (recur (inc i) false (.append out c))))))))
+
+(defn- pct-syms
+  "Every `%…` symbol appearing anywhere in `body`, by name."
+  [body]
+  (let [acc (volatile! #{})]
+    (walk/postwalk (fn [x] (when (and (symbol? x) (str/starts-with? (name x) "%"))
+                             (vswap! acc conj (name x)))
+                     x)
+                   body)
+    @acc))
+
+(defn- pct-params
+  "The parameter list a `#()` body implies. `%` and `%1` are the SAME first
+   argument, so each position is named after whichever spelling the body actually
+   used (binding `%` when the body says `%1` is how the first attempt left `%1`
+   unresolvable). Gaps are filled — `#(f %3)` still takes three — and `%&` adds
+   the rest parameter, exactly as Clojure's own reader does."
+  [body]
+  (let [ss   (pct-syms body)
+        nums (keep (fn [s] (cond (= s "%")                1
+                                 (re-matches #"%[1-9]" s) (parse-long (subs s 1))
+                                 :else                    nil))
+                   ss)
+        n    (apply max 0 nums)
+        ps   (mapv (fn [i]
+                     (if (and (= i 1) (contains? ss "%")) '% (symbol (str "%" i))))
+                   (range 1 (inc n)))]
+    (cond-> ps (contains? ss "%&") (conj '& '%&))))
+
+(defn- pct-alias
+  "`%` and `%1` name the same argument. A body that spells it BOTH ways binds one
+   of them as the parameter, so the other needs a local alias — Clojure's reader
+   maps both onto one gensym and we have to match it, or `#(* % %1)` would come
+   back \"Unable to resolve symbol: %1\"."
+  [body form]
+  (let [ss (pct-syms body)]
+    (if (and (contains? ss "%") (contains? ss "%1"))
+      (list 'let ['%1 '%] form)
+      form)))
+
+(defn- fn-literal-macro
+  "The sandbox macro `#(` expands to. `body` arrives SPLICED — `#(* 2 %)` reads as
+   `(fn-literal * 2 %)`, which is what keeps the parens balanced one-for-one — so
+   the function body is `body` itself, re-formed as the call it was written as.
+   Treating the elements as separate statements instead would silently return the
+   last one: `#(* 2 %)` became `(do * 2 %)`, i.e. identity."
+  [_&form _&env & body]
+  (when (some #(and (seq? %) (= FN-LITERAL (first %))) (tree-seq coll? seq body))
+    (throw (ex-info "nested #() isn't allowed — name the inner one with (fn [x] …)" {})))
+  (list 'fn (pct-params body) (pct-alias body (apply list body))))
+
 (defn parse
   "Formula string (without leading =) -> {:form :deps}.
 
@@ -210,7 +307,7 @@
   ([s] (parse s nil))
   ([s self]
    (let [forms (fuse-dynrefs (edn/read-string {:readers readers}
-                                              (str "(" s "\n)")))
+                                              (str "(" (desugar-fn-literals s) "\n)")))
          _     (walk/postwalk
                 (fn [x] (if (= '$ x)
                           (throw (ex-info "dangling $ — write $(expression)" {}))
@@ -268,9 +365,15 @@
     (ref? form)       (str "$" (second form))
     (dynref? form)    (str "$" (unparse (second form)))
     (range-ref? form) (str "$" (nth form 1) ":" (nth form 2))
-    (seq? form)       (if-let [[tl br] (vector-range form)]
-                        (str "$" tl ":" br)
-                        (str "(" (str/join " " (map unparse form)) ")"))
+    (seq? form)       (cond
+                        ;; a fn literal prints as one again, so flattened source
+                        ;; reads the way it was written
+                        (= FN-LITERAL (first form))
+                        (str "#(" (str/join " " (map unparse (rest form))) ")")
+                        :else
+                        (if-let [[tl br] (vector-range form)]
+                          (str "$" tl ":" br)
+                          (str "(" (str/join " " (map unparse form)) ")")))
     (vector? form)    (str "[" (str/join " " (map unparse form)) "]")
     (map? form)       (str "{" (str/join ", " (map (fn [[k v]]
                                                      (str (unparse k) " " (unparse v)))
@@ -546,6 +649,9 @@
    'xvlookup (fn [k table w col]
                (some (fn [row] (when (= k (first row)) (nth row (dec (long col)))))
                      (partition (long w) table)))
+   ;; `#(...)` — see `desugar-fn-literals`. A macro, so `%` is resolved on the
+   ;; FORM and a `%` inside a string literal stays data.
+   FN-LITERAL (with-meta fn-literal-macro {:sci/macro true})
    ;; I/O (see no-io): clear "not available" instead of an opaque cast crash
    'println no-io 'print no-io 'prn no-io 'pr no-io 'printf no-io
    'newline no-io 'flush no-io 'read no-io 'read-line no-io})

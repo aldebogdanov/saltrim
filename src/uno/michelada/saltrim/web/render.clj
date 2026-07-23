@@ -377,6 +377,12 @@
              " / " [:span {:style kbd} "#cells A1:A3"] "."]
             [:p {:style p} "e.g. " [:span {:style kbd} "=(+ $A1 $B1)"] " · "
              [:span {:style kbd} "=(reduce + $A1:A3)"]]
+            [:p {:style p} "It is ordinary Clojure inside: " [:span {:style kbd} "let"] ", "
+             [:span {:style kbd} "fn"] " and the " [:span {:style kbd} "#(…)"]
+             " literal all work — e.g. "
+             [:span {:style kbd} "=(reduce + (map #(* % %) $A1:A10))"]
+             ". (The reader is EDN, so " [:span {:style kbd} "'x"] " isn't available; write "
+             [:span {:style kbd} "(quote x)"] ".)"]
             [:p {:style p} "Relative refs point by offset from the cell itself: "
              [:span {:style kbd} "$<col><row>"] " where each part is "
              [:span {:style kbd} "_"] " (same), " [:span {:style kbd} "+N"] ", or "
