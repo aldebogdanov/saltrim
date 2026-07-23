@@ -100,22 +100,37 @@
 (def ^:private default-id #uuid "c10a4a00-0000-4000-8000-000000000001")
 (defn- store-id [] (if-let [s (env "SALTRIM_DB_ID")] (java.util.UUID/fromString s) default-id))
 
+(def ^:private base-config
+  "Settings every backend shares.
+
+   `:max-string-length 0` = explicitly UNBOUNDED strings. Datahike 0.8.1746 added
+   value-size caps and warns on every connect when they are unset; the two ways
+   to silence it are opposite decisions, so this one is deliberate. The values we
+   store are user text — a formula, a comment, and above all the `:defs` blob,
+   which is the sheet's whole function library serialized into one string. A
+   default cap would start REFUSING writes that work today, and it would do so at
+   save time, on data someone already typed. Unbounded is what the app has always
+   done; this only says so out loud. A measured cap (large enough for a real defs
+   library, small enough to bound the index) is worth revisiting — see TECHDEBT."
+  {:schema-flexibility :write
+   :keep-history?      true
+   :max-string-length  0})
+
 (defn- config []
-  (cond
-    (= "mem" (env "SALTRIM_DB_BACKEND"))
-    {:store {:backend :memory :id (store-id)}
-     :schema-flexibility :write :keep-history? true}
+  (merge
+   base-config
+   (cond
+     (= "mem" (env "SALTRIM_DB_BACKEND"))
+     {:store {:backend :memory :id (store-id)}}
 
-    (env "SALTRIM_DB_JDBC_URL")
-    {:store {:backend :jdbc :id (store-id) :jdbcUrl (env "SALTRIM_DB_JDBC_URL")
-             :table (or (env "SALTRIM_DB_TABLE") "saltrim")}
-     :schema-flexibility :write :keep-history? true}
+     (env "SALTRIM_DB_JDBC_URL")
+     {:store {:backend :jdbc :id (store-id) :jdbcUrl (env "SALTRIM_DB_JDBC_URL")
+              :table (or (env "SALTRIM_DB_TABLE") "saltrim")}}
 
-    :else
-    {:store {:backend :jdbc :id (store-id) :dbtype "h2"
-             :dbname (or (env "SALTRIM_DB_PATH") "data/saltrim-h2")
-             :table "saltrim"}
-     :schema-flexibility :write :keep-history? true}))
+     :else
+     {:store {:backend :jdbc :id (store-id) :dbtype "h2"
+              :dbname (or (env "SALTRIM_DB_PATH") "data/saltrim-h2")
+              :table "saltrim"}})))
 
 (defn- ensure-schema!
   "Install only the schema attributes not already present — so a fresh db gets
@@ -144,10 +159,11 @@
     c))
 
 (defn mem-config
-  "A fresh, isolated in-memory config (unique store id) — for tests."
+  "A fresh, isolated in-memory config (unique store id) — for tests. Shares
+   `base-config`, so a test database is configured like a real one (it used to
+   repeat those settings, and then drifted from them)."
   []
-  {:store {:backend :memory :id (random-uuid)}
-   :schema-flexibility :write :keep-history? true})
+  (assoc base-config :store {:backend :memory :id (random-uuid)}))
 
 ;; The shared Datahike connection IS the mount state — callers use `conn`
 ;; directly (deref for the db value: `@conn`). No side atom. Tests start it with
