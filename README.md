@@ -68,6 +68,17 @@ Examples:
 =(if (> $A1 0) "ok" "no")
 ```
 
+Formulas are ordinary Clojure inside: `let`, `fn`, destructuring and the `#(…)`
+literal all work.
+
+```clojure
+=(reduce + (map #(* % %) $A1:A10))    ; sum of squares
+=(count (filter #(> % 100) $B1:B50))  ; how many are over 100
+```
+
+(The reader is EDN, so the quote shorthand `'x` isn't available — write
+`(quote x)`. Nested `#()` is rejected, same as in Clojure.)
+
 Formulas that depend on other cells recompute automatically when those cells
 change. Circular references are rejected. Errors show as `#ERR` in the cell and
 a toast message describing what went wrong.
