@@ -182,9 +182,11 @@
   [{:keys [rt meta dyn] :as sheet} addr raw]
   (check-addr! addr)
   (let [addr (addr/canon addr)]      ; "a1" and "A1" must not be two cells
+
    ;; NB: an edit does NOT clear a wedge. Writing still works (nothing here
    ;; derefs), so the fix reaches the db and the next load is clean — but the
    ;; runaway body still owns this context and no spin in it will run again.
+
    (binding [ec/*execution-context* rt]
     (let [visited  (volatile! #{})
           replaced (volatile! #{})]
