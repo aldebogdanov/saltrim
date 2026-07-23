@@ -25,6 +25,7 @@
         vals     (atom {})
         meta     (atom {})
         dyn      (atom {})        ; addr -> #{resolved dynamic-ref targets} (see rt/lookup-dyn)
+        slow     (atom nil)       ; the cell that wedged the sheet, if any (see below)
         styles   (atom {})
         cols     (atom {})        ; ci -> width-px  (sparse; falls back to @dcw)
         rows     (atom {})        ; ri -> height-px (sparse; falls back to @drh)
@@ -34,7 +35,8 @@
         defs     (atom [])        ; library: ordered vector of chunks {:id :src} (persisted)
         rt       (ctx/create-execution-context
                   {:metadata {:registry registry :vals vals :meta meta :dyn dyn}})]
-    {:rt rt :registry registry :vals vals :meta meta :dyn dyn :styles styles
+    {:rt rt :registry registry :vals vals :meta meta :dyn dyn :slow slow
+     :styles styles
      :cols cols :rows rows :dcw dcw :drh drh :sci sci :defs defs}))
 
 (defn- classify [raw]
@@ -180,6 +182,9 @@
   [{:keys [rt meta dyn] :as sheet} addr raw]
   (check-addr! addr)
   (let [addr (addr/canon addr)]      ; "a1" and "A1" must not be two cells
+   ;; NB: an edit does NOT clear a wedge. Writing still works (nothing here
+   ;; derefs), so the fix reaches the db and the next load is clean — but the
+   ;; runaway body still owns this context and no spin in it will run again.
    (binding [ec/*execution-context* rt]
     (let [visited  (volatile! #{})
           replaced (volatile! #{})]
@@ -211,8 +216,63 @@
           (recur (into seen new) (into (subvec (vec frontier) 1) new)))
         seen))))
 
-(defn settle! [{:keys [rt]}]
-  (simple/await-drain-complete! rt :timeout-ms 5000))
+;; --- runaway formulas ----------------------------------------------------
+;;
+;; A formula is arbitrary user code and SCI cannot be preempted, so a cell like
+;; `=(loop [] (recur))` runs forever. Spins are LAZY — nothing runs until some
+;; caller derefs — so the hang lands on whoever RENDERS the cell: an HTTP thread,
+;; holding whatever lock the handler took. Unguarded, one such cell froze every
+;; write on every sheet for every user, permanently, and came back after a
+;; restart (the formula is persisted).
+;;
+;; What we can and cannot do about it:
+;;
+;;   - We CAN stop it hanging a request: Spin implements IBlockingDeref, so
+;;     `value` waits with a timeout and always returns.
+;;   - We CANNOT let it keep running and carry on. The runaway body never leaves
+;;     the executor, so the context's drain never completes and NO other spin in
+;;     that sheet — not even a literal — ever gets to run again. The damage is
+;;     per-SHEET by construction; other sheets are untouched.
+;;
+;; So the first timeout WEDGES the sheet: the culprit is recorded once and every
+;; later read answers from that mark instead of waiting. Without this, each cell
+;; in the window would pay the timeout in turn — a 500-cell render would take
+;; sixteen minutes, which is worse than the hang it replaced.
+;;
+;; The mark deliberately does NOT clear on edit. Editing fixes the SOURCE, so the
+;; next load is clean, but nothing can revive this context — the stuck body still
+;; owns it. Hence the message: fix the formula, then reopen the sheet (the room
+;; is rebuilt from scratch once the last session leaves it). Killing the body
+;; outright needs a step budget inside the interpreter — see TECHDEBT.
+
+(def EVAL-TIMEOUT-MS
+  "How long the FIRST cell may compute before the sheet is treated as wedged.
+   Generous by orders of magnitude: 3M interpreted loop iterations take ~100ms,
+   and a real formula over a 10k-cell range is microseconds."
+  2000)
+
+(defn degraded?
+  "The cell that wedged this sheet ({:addr :prop}), or nil while it is healthy."
+  [{:keys [slow]}] @slow)
+
+(defn- wedged-msg [{:keys [addr prop]}]
+  (str "sheet stopped: " addr (when prop (str " " (name prop) " style"))
+       " never finishes computing (unbounded loop or recursion?)"
+       " — fix that formula, then reopen the sheet"))
+
+(defn- wedge!
+  "Record the cell that ran past the timeout, once. Returns its {:error …}."
+  [{:keys [slow]} culprit]
+  (swap! slow #(or % culprit))
+  {:error (wedged-msg @slow)})
+
+(defn settle!
+  "Barrier: wait for the executor to drain. A wedged sheet can never drain (the
+   runaway body stays `running?` forever), so skip the wait rather than burn the
+   full timeout on every subsequent edit."
+  [{:keys [rt] :as sheet}]
+  (when-not (degraded? sheet)
+    (simple/await-drain-complete! rt :timeout-ms 5000)))
 
 (defn close!
   "Release the execution context (executor + drain). Call when unloading a
@@ -222,14 +282,21 @@
 
 (defn value
   "Current computed value of `addr`, or nil if blank. Errors -> {:error msg}
-   (runtime errors, or a compile error recorded when the formula couldn't be
-   built against the sheet's current definitions)."
-  [{:keys [rt registry meta]} addr]
-  (if-let [ref (get @registry addr)]
-    (binding [ec/*execution-context* rt]
-      (try @ref (catch Exception e {:error (.getMessage e)})))
-    (when-let [err (get-in @meta [addr :err])]
-      {:error err})))
+   (runtime errors, a compile error recorded when the formula couldn't be built
+   against the sheet's current definitions, or the sheet being wedged by a
+   non-terminating cell — see the runaway-formula note)."
+  [{:keys [rt registry meta] :as sheet} addr]
+  (if-let [culprit (degraded? sheet)]
+    ;; nothing in this sheet can compute any more; answer at once rather than
+    ;; making every cell in the window wait out the timeout in turn
+    {:error (wedged-msg culprit)}
+    (if-let [ref (get @registry addr)]
+      (binding [ec/*execution-context* rt]
+        (try (let [v (deref ref EVAL-TIMEOUT-MS ::timeout)]
+               (if (= ::timeout v) (wedge! sheet {:addr addr}) v))
+             (catch Exception e {:error (.getMessage e)})))
+      (when-let [err (get-in @meta [addr :err])]
+        {:error err}))))
 
 (defn raw   [{:keys [meta]} addr] (get-in @meta [addr :raw]))
 (defn kind  [{:keys [meta]} addr] (get-in @meta [addr :kind]))
@@ -327,13 +394,21 @@
   "Computed value of style PROP of `addr`: a string, nil (blank/absent), or
    `{:error msg}` when the property's formula blows up. Errors are surfaced (not
    swallowed) so a broken style formula is visible — same contract as `value`."
-  [{:keys [rt styles]} addr prop]
+  [{:keys [rt styles] :as sheet} addr prop]
   (when-let [{:keys [kind raw spin]} (get-in @styles [addr prop])]
     (case kind
+      ;; a literal still shows on a wedged sheet — it needs no computation
       :literal raw
-      :formula (binding [ec/*execution-context* rt]
-                 (try (let [v @spin] (when (some? v) (str v)))
-                      (catch Exception e {:error (.getMessage e)}))))))
+      ;; a style formula is user code on the same executor, so it wedges the
+      ;; sheet exactly like a value formula does
+      :formula (if-let [culprit (degraded? sheet)]
+                 {:error (wedged-msg culprit)}
+                 (binding [ec/*execution-context* rt]
+                   (try (let [v (deref spin EVAL-TIMEOUT-MS ::timeout)]
+                          (if (= ::timeout v)
+                            (wedge! sheet {:addr addr :prop prop})
+                            (when (some? v) (str v))))
+                        (catch Exception e {:error (.getMessage e)})))))))
 
 (defn style-errors
   "Seq of [prop msg] for `addr`'s style props that currently error (for toast)."

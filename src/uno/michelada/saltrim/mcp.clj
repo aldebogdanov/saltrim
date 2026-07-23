@@ -42,7 +42,7 @@
             [uno.michelada.saltrim.util :as u]
             [uno.michelada.saltrim.version :as version]
             [uno.michelada.saltrim.web.collab :refer [broadcast!]]
-            [uno.michelada.saltrim.web.state :refer [save-rec! sheet-rec]]))
+            [uno.michelada.saltrim.web.state :refer [edit-lock save-rec! sheet-rec]]))
 
 (def PROTOCOL-VERSION "2025-06-18")
 
@@ -335,10 +335,14 @@
         branch (ensure-agent-branch! sheet-id cred token)
         room   [sheet-id branch]
         {:keys [sh]} (room-of sheet-id branch)]
-    (doseq [{:keys [addr src]} cells]
-      (sheet/set-cell! sh addr (str src)))
-    (sheet/settle! sh)
-    (save-rec! room uid)
+    ;; same room lock the browser handlers take — an agent writing while a human
+    ;; edits the same branch would otherwise interleave two read-modify-writes of
+    ;; one engine
+    (locking (edit-lock room)
+      (doseq [{:keys [addr src]} cells]
+        (sheet/set-cell! sh addr (str src)))
+      (sheet/settle! sh)
+      (save-rec! room uid))
     ;; nil editor-sid = authored by no browser session, so EVERY session in the
     ;; room (i.e. anyone viewing this branch) gets the patch live
     (broadcast! nil room sh (map :addr cells))

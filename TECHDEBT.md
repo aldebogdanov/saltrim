@@ -493,3 +493,34 @@ inputs + current target), runtime cycle guard, dashed graph edges. Deferred:
 - **Merges don't shift on row/col insert.** The span is a plain `"RxC"`
   string, not ref-rewritten, so a line inserted THROUGH a block doesn't grow
   it.
+
+## Runaway formulas (`sheet/EVAL-TIMEOUT-MS`, `sheet/degraded?`)
+
+A formula is arbitrary user code, SCI cannot be preempted, and spins are lazy —
+so `=(loop [] (recur))` runs forever, starting on whoever first RENDERS the
+cell. That used to be an HTTP thread holding the single global `edit-lock`, i.e.
+one cell froze every write on every sheet for every user, permanently, and came
+back after a restart (the formula is persisted).
+
+Fixed as far as this design allows: `value`/`style-value` deref with a timeout
+(`Spin` implements `IBlockingDeref`), and the edit lock is now per room. What
+remains:
+
+- **A runaway body wedges its whole SHEET, not just its cell.** It never leaves
+  the executor, so the context's drain never completes and no other spin in that
+  sheet — not even a literal wrapper — runs again. `degraded?` records the
+  culprit once and every later read answers from that mark, so a wedged sheet is
+  fast and clearly labelled instead of paying the timeout per cell (a 500-cell
+  window would otherwise take sixteen minutes). Other sheets are unaffected.
+- **Recovery needs a fresh context.** Editing still works (nothing on the write
+  path derefs), so the fix reaches the db and the next load is clean — but the
+  stuck body owns this context forever, hence the message "fix that formula,
+  then reopen the sheet". The room is rebuilt when its last session leaves.
+  Automating that (rebuild into a new execution context on wedge, which needs
+  `:rt` to become swappable) would make recovery invisible.
+- **The thread is never reclaimed.** One executor thread spins until the sheet
+  unloads. Killing it properly needs a step/deadline budget inside the
+  interpreter — SCI has no hook for that today, and `Thread.stop` is gone. A
+  deliberate abuser can therefore still burn a core per sheet they can edit.
+- **`EVAL-TIMEOUT-MS` is a constant** (2s — three orders of magnitude above any
+  real formula). Fold into per-sheet settings with the other constants.
