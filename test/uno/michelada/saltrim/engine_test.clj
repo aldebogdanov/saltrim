@@ -806,3 +806,59 @@
     (is (= #{"A1"} (set (sh/cells s))) "the ghosts are gone, not stored as errors")
     (is (= #{"A0" "A99999999999999999999"} (set (map first errors)))
         "and both are reported to the caller")))
+
+(deftest a-runaway-formula-cannot-hang-a-reader
+  ;; SCI can't be preempted, so `=(loop [] (recur))` runs forever. Spins are
+  ;; LAZY, so the hang lands on whoever DEREFS the cell — an HTTP thread, holding
+  ;; the handler's lock. Before the bounded deref this froze every write on every
+  ;; sheet, permanently, and survived a restart (the formula is persisted).
+  (let [s  (mk)
+        _  (put s "A1" "=(loop [i 0] (if (< i 0) i (recur (inc i))))")
+        t0 (System/currentTimeMillis)
+        r  (sh/value s "A1")
+        ms (- (System/currentTimeMillis) t0)]
+    (is (:error r) "a non-terminating cell reads as an error, not a hang")
+    (is (re-find #"A1" (:error r)) "and the message names the culprit")
+    (is (< ms (* 3 sh/EVAL-TIMEOUT-MS))
+        (str "the read returned in " ms "ms rather than blocking forever"))
+    (testing "the runaway body owns the executor, so the whole SHEET is wedged"
+      ;; not just its own cell: nothing in this context will ever run again.
+      ;; The containment that matters is per-sheet — other sheets are untouched.
+      (is (= {:addr "A1"} (sh/degraded? s)))
+      (put s "B1" "=(+ 2 3)")
+      (is (:error (sh/value s "B1"))))
+    (testing "but every later read answers AT ONCE, without waiting again"
+      ;; each cell paying the timeout in turn would make a 500-cell render take
+      ;; sixteen minutes — worse than the hang it replaced
+      (let [t1 (System/currentTimeMillis)]
+        (dotimes [_ 50] (sh/value s "B1"))
+        (is (< (- (System/currentTimeMillis) t1) 100))))
+    (testing "settle! stops burning its own timeout on a sheet that can't drain"
+      (let [t1 (System/currentTimeMillis)]
+        (sh/settle! s)
+        (is (< (- (System/currentTimeMillis) t1) 100))))
+    (testing "editing still WORKS, so the fix reaches the db for the next load"
+      ;; nothing on the write path derefs, so the user can correct the cell —
+      ;; it just can't revive this context (hence "reopen the sheet")
+      (put s "A1" "=(+ 1 1)")
+      (is (= "=(+ 1 1)" (sh/raw s "A1")))
+      (is (= {"A1" {:value "=(+ 1 1)"} "B1" {:value "=(+ 2 3)"}} (sh/document s))))
+    (testing "and a fresh sheet built from that document is healthy again"
+      (let [s2 (mk)]
+        (sh/load-document! s2 (sh/document s))
+        (is (= 2 (v s2 "A1")))
+        (is (= 5 (v s2 "B1")))
+        (is (nil? (sh/degraded? s2)))))))
+
+(deftest a-runaway-style-formula-wedges-the-sheet-the-same-way
+  (let [s (mk)]
+    (put s "A1" "1")
+    (sh/set-style! s "A1" :fg "navy")
+    (sh/set-style! s "A1" :bg "=(loop [i 0] (if (< i 0) \"red\" (recur (inc i))))")
+    (let [t0 (System/currentTimeMillis)
+          r  (sh/style-value s "A1" :bg)]
+      (is (:error r))
+      (is (re-find #"bg style" (:error r)))
+      (is (< (- (System/currentTimeMillis) t0) (* 3 sh/EVAL-TIMEOUT-MS))))
+    (testing "a LITERAL style still shows — it needs no computation"
+      (is (= "navy" (sh/style-value s "A1" :fg))))))

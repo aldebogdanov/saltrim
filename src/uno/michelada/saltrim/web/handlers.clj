@@ -22,12 +22,10 @@
             [starfederation.datastar.clojure.api :as d*]
             [starfederation.datastar.clojure.adapter.http-kit :as hk]
             [uno.michelada.saltrim.web.geom :refer [block-of clamp-view in-window? known-formula-error? pretty-err qparam url-decode url-encode window]]
-            [uno.michelada.saltrim.web.state :refer [accessible-rec can-read? def-editor-of locked-by-other? now owner-of save-rec! session-view sessions* set-session-view! sheets* sid-re unload-sheet!]]
+            [uno.michelada.saltrim.web.state :refer [accessible-rec can-read? def-editor-of edit-lock locked-by-other? now owner-of save-rec! session-view sessions* set-session-view! sheets* sid-re unload-sheet!]]
             [uno.michelada.saltrim.web.sse :refer [patch-inner! read-signals signals! sse sse-opts webkit-ua?]]
             [uno.michelada.saltrim.web.render :refer [border-prop border-props cells-html colhead-html denied-page graph-svg import-error-html import-report-html login-page merge-result-html meta-html page prop-allowed? render-cells rowhead-html self-html share-html]]
             [uno.michelada.saltrim.web.collab :refer [broadcast! broadcast-deflib-except! broadcast-presence! broadcast-window! ensure-session! evict-deleted! push-deflib! reap-session! render-window!]]))
-
-(def ^:private edit-lock (Object.))
 
 (defn- log-err!
   "Server-side CLI visibility for a handler failure — the toast reaches only
@@ -155,7 +153,8 @@
 ;; step is sheet/undo-step (it skips props a collaborator has overwritten). Undo
 ;; is a normal authored write (persisted + broadcast); the stack is in-memory per
 ;; session (lost on reload, like most editors). Stack mutations all happen under
-;; `edit-lock`, so the read-modify-write of a session's stacks is serialized.
+;; the room's `edit-lock`, so the read-modify-write of a session's stacks is
+;; serialized — a session lives in exactly one room, so per-room is enough.
 
 (def ^:private UNDO-CAP 200)
 
@@ -187,7 +186,7 @@
         (signals! gen {:err "read-only access — you can't edit this sheet"})
         (let [sh (:sh rec)
               affected
-              (locking edit-lock
+              (locking (edit-lock (:room rec))
                 (let [s (@sessions* sid)
                       {:keys [stacks affected]}
                       (sheet/undo-step sh {:undo (:undo s) :redo (:redo s)} dir)]
@@ -220,7 +219,7 @@
             ;; canonical form, so reading `before` (undo) by the raw signal would
             ;; look at a different key. Reads stay literal — they are the hot path.
             (let [cell (addr/canon cell)]
-             (locking edit-lock
+             (locking (edit-lock (:room rec))
               (try
                 (when (locked-by-other? sid (:room rec) cell)
                   (throw (ex-info "locked by another collaborator" {:locked cell})))
@@ -282,7 +281,7 @@
           (empty? cells)
           (signals! gen {:err "select a cell first"})
           :else
-          (locking edit-lock
+          (locking (edit-lock (:room rec))
             (try
               (doseq [c cells, prop props]
                 (let [before (get (sheet/style-srcs sh c) prop)]
@@ -334,7 +333,7 @@
         (let [sh    (:sh rec)
               cells (selected-cells selcells)]
           (when (seq cells)
-            (locking edit-lock
+            (locking (edit-lock (:room rec))
               (try
                 (let [affected (atom [])]
                   (doseq [c cells]
@@ -435,7 +434,7 @@
               clip  (get-in @sessions* [sid :clip])
               cells (selected-cells selcells)]
           (when (and clip (seq cells) (seq (:cells clip)))
-            (locking edit-lock
+            (locking (edit-lock (:room rec))
               (try
                 (let [crs (map #(let [{:keys [ci ri]} (addr/parse %)] [ci ri]) cells)
                       tc0 (apply min (map first crs))  tr0 (apply min (map second crs))
@@ -464,7 +463,7 @@
         (when-let [clip (capture-clip (:sh rec) selcells)]
           (let [sh (:sh rec) [c0 r0] (:origin clip)]
             (swap! sessions* assoc-in [sid :clip] clip)
-            (locking edit-lock
+            (locking (edit-lock (:room rec))
               (try
                 (let [affected (atom [])]
                   (doseq [{cdc :dc cdr :dr value :value} (:cells clip)
@@ -536,7 +535,7 @@
           (not (and (#{"col" "row"} axis) i s (pos? s)))
           (signals! gen {:err ""})
           :else
-          (locking edit-lock
+          (locking (edit-lock (:room rec))
             (try
               (case axis
                 "col" (sheet/set-col-width!  sh i s)
@@ -574,7 +573,7 @@
                             [nil nil])]
             (if-not axis
               (signals! gen {:err ""})
-              (locking edit-lock
+              (locking (edit-lock (:room rec))
                 (try
                   (sheet/insert-line! sh axis at)
                   (sheet/settle! sh)
@@ -623,7 +622,7 @@
               (signals! gen {:err (str "that range is too large to merge (max "
                                        c/MAX-MERGE-CELLS " cells)")})
               :else
-              (locking edit-lock
+              (locking (edit-lock (:room rec))
                 (try
                   ;; drop any existing merge span inside the new rectangle
                   (doseq [a (addr/range-cells anchor (addr/make c1 r1))
@@ -666,7 +665,7 @@
           (empty? targets)
           (signals! gen {:err ""})               ; nothing merged in the selection
           :else
-          (locking edit-lock
+          (locking (edit-lock (:room rec))
             (try
               (doseq [anchor targets
                       :let [before (get (sheet/style-srcs sh anchor) sheet/merge-prop)]]
@@ -726,7 +725,7 @@
       (let [sh (:sh rec)
             w  (parse-long (str pcw))
             h  (parse-long (str prh))]
-        (locking edit-lock
+        (locking (edit-lock (:room rec))
           (try
             (when (and w (pos? w)) (sheet/set-default-col-w! sh w))
             (when (and h (pos? h)) (sheet/set-default-row-h! sh h))
@@ -797,7 +796,7 @@
           (fn []
             (if (not= sid (def-editor-of (:room rec) defid))
               (signals! gen {:err "you no longer hold this definition's lock"})
-              (locking edit-lock
+              (locking (edit-lock (:room rec))
                 (try
                   (let [{:keys [errors]} (sheet/update-def! sh defid (str defsrc))]
                     (swap! sessions* assoc-in [sid :editdef] nil)
@@ -820,7 +819,7 @@
       (let [sh (:sh rec)]
         (guard-rw rec gen
           (fn []
-            (locking edit-lock
+            (locking (edit-lock (:room rec))
               (let [{:keys [id]} (sheet/add-def! sh "")]
                 (swap! sessions* assoc-in [sid :editdef] id)
                 (save-rec! (:room rec) uid)
@@ -840,7 +839,7 @@
           (fn []
             (if (and editor (not= editor sid))
               (signals! gen {:err "that definition is being edited by someone else"})
-              (locking edit-lock
+              (locking (edit-lock (:room rec))
                 (try
                   (let [{:keys [errors]} (sheet/remove-def! sh defid)]
                     (when (= defid (get-in @sessions* [sid :editdef]))
@@ -1088,7 +1087,7 @@
                   "preview"
                   (d*/patch-elements! gen (merge-result-html source target plan))
                   "apply"
-                  (locking edit-lock
+                  (locking (edit-lock (:room rec))
                     (let [acts     (mrg/actions plan (split-keys mergetake))
                           affected (apply-merge! sh sid acts)]
                       (if (empty? acts)
