@@ -34,7 +34,12 @@
    link; any pre-link :everyone grant is upgraded too (one-shot)."
   [id branch owner]
   (let [room [id branch]]
-    (or (@sheets* room)
+    (or (when-let [rec (@sheets* room)]
+          ;; stamp every touch: a room with no session of its own (an MCP call,
+          ;; a bare GET) is otherwise indistinguishable from an abandoned one,
+          ;; and the orphan sweep needs to tell them apart
+          (swap! sheets* assoc-in [room :at] (System/currentTimeMillis))
+          rec)
         (let [loaded   (store/load-record id branch)
               rec      (or loaded {:sh (sheet/create-sheet) :owner owner})
               [o n]    (store/split-id id)
@@ -42,7 +47,8 @@
               new?     (db/ensure-sheet! id owner n)]
           (when (and new? (:public rec)) (db/set-link-level! id :read-write))
           (db/migrate-everyone->link! id)       ; upgrade legacy public grants
-          (let [rec (-> rec (dissoc :public) (assoc :owner owner))]
+          (let [rec (-> rec (dissoc :public) (assoc :owner owner
+                                                    :at (System/currentTimeMillis)))]
             (swap! sheets* assoc room rec)
             rec)))))
 
@@ -62,7 +68,13 @@
    signed-in reaches a foreign sheet they were granted, or whose link token they
    hold. A non-existent branch (other than MAIN) is denied so a typo'd `&b=`
    never materialises an empty branch (creation is explicit via fork). The rec
-   carries `:room`/`:branch`. Nil = denied/invalid."
+   carries `:room`/`:branch`. Nil = denied/invalid.
+
+   The ACL check runs BEFORE the load. It used to run after, which meant anyone
+   signed in could point at a guessable `?u=…&s=…` and make the server load a
+   stranger's sheet — building its engine, evaluating its definitions, and
+   writing `ensure-sheet!`/`migrate-everyone->link!` — before being told no. The
+   answer was already correct; the work should never have happened."
   [uid id branch token]
   (when (and uid (store/valid-id? id))
     (let [[owner _] (store/split-id id)]
@@ -70,9 +82,9 @@
         (nil? owner)                       nil  ; legacy un-namespaced ids: not served
         (not (db/branch-exists? id branch)) nil ; unknown branch (MAIN always exists)
         (= owner uid) (sheet-rec id branch uid)
-        :else (when (or (@sheets* [id branch]) (store/exists? id))
-                (let [rec (sheet-rec id branch owner)]
-                  (when (db/access-level uid id token) rec)))))))
+        :else (when (and (or (@sheets* [id branch]) (store/exists? id))
+                         (db/access-level uid id token))
+                (sheet-rec id branch owner))))))
 
 (defn can-read?
   "Whether `uid` (with optional link `token`) may READ (id, branch): the sheet is
@@ -95,6 +107,13 @@
 (def sid-re #"[A-Za-z0-9-]{1,64}")
 (def SESSION-TTL-MS (* 30 60 1000))   ; reap sessions idle > 30 min
 (def SWEEP-MS 60000)                  ; check once a minute
+(def ROOM-IDLE-MS
+  "How long a room with NO session of its own may sit loaded before the sweep
+   releases it. Rooms are normally unloaded when their last session leaves, but
+   some are never owned by a session at all — an MCP tool call, a bare GET that
+   never opens a /stream — and those used to be pinned in memory (engine,
+   executor, definitions) for the life of the process."
+  (* 5 60 1000))
 
 (defn now [] (System/currentTimeMillis))
 
