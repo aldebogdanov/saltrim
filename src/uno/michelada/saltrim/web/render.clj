@@ -29,6 +29,18 @@
   {:autocomplete "off" :autocorrect "off" :autocapitalize "off" :spellcheck "false"
    :data-lpignore "true" :data-1p-ignore "true" :data-bwignore "true"})
 
+(defn js-str
+  "`v` as a JavaScript string LITERAL, for a value interpolated into a
+   `data-on:*` handler.
+
+   Hiccup's escaping does not protect those: the HTML parser un-escapes an
+   attribute before the JS engine ever sees it, so `&#39;` arrives back as `'`
+   and closes the string. Every value we splice today is sanitized far away
+   (uid charset, chunk id, canonical address, prop keyword) — this makes that
+   safety local instead of depending on a regex in another namespace."
+  [v]
+  (json/write-value-as-string (str v)))
+
 (defn- display [sh a]
   (let [v    (sheet/value sh a)
         mask (sheet/style-value sh a :format)]   ; nil / string / {:error}
@@ -103,6 +115,52 @@
 (defn prop-allowed? [p]
   (or (contains? style-css p) (some #{p} value-props) (some #{p} meta-props)))
 
+;; --- CSS value safety ----------------------------------------------------
+;;
+;; A style prop's computed value is spliced into the cell's `style` attribute as
+;; `<css-prop>:<value>`. Hiccup escapes quotes, so the value cannot break OUT of
+;; the attribute — but a `;` starts a NEW declaration inside it, which is enough
+;; to hand one collaborator arbitrary CSS on everyone else's cells:
+;;
+;;   bg = red;position:fixed;…;background-image:url(https://evil/leak.png)
+;;
+;; That is a tracking beacon fired from every viewer's browser (IP, UA, timing)
+;; and a cell that can cover its neighbours. Formula-computed styles make it
+;; invisible in the source, so the check has to sit on the COMPUTED string.
+;;
+;; None of the supported props (a colour, a weight, an alignment, a CSS border)
+;; has any use for these characters, so an unsafe value is refused rather than
+;; sanitized — silently dropping half a value would be more confusing than
+;; saying no. `Content-Security-Policy` (see `web/security-headers`) is the
+;; second layer: even a value that slipped through cannot reach a third-party
+;; host.
+
+(def ^:private css-unsafe-re
+  ;; `;` `{` `}` end or nest a declaration; `<` `>` `\` and control characters
+  ;; have no business in a CSS value; the rest are how a value fetches or
+  ;; evaluates something (`url(...)`, `image-set(...)`, `@import`, legacy IE
+  ;; `expression(...)`), plus `/*`, which could comment away what follows it.
+  #"(?i)[;{}<>\\\x00-\x1f\x7f]|url\s*\(|image-set\s*\(|expression\s*\(|@import|/\*")
+
+(defn css-value-ok?
+  "Is `v` safe to splice into a cell's `style` attribute as one declaration?"
+  [v]
+  (and (string? v) (nil? (re-find css-unsafe-re v))))
+
+(def ^:private css-unsafe-msg
+  "not allowed in a style value (no ; { } < > \\ url( @import or comments)")
+
+(defn css-errors
+  "Seq of [prop msg] for `addr`'s style props whose COMPUTED value is unsafe to
+   render — reported through the same toast as a style formula that throws, so a
+   refused value is never silently invisible."
+  [sh addr]
+  (keep (fn [prop]
+          (let [v (sheet/style-value sh addr prop)]
+            (when (and (string? v) (not (css-value-ok? v)))
+              [prop css-unsafe-msg])))
+        (filter style-css (keys (sheet/style-srcs sh addr)))))
+
 (def ^:private style-read-js
   "Datastar expression: load the selected cell's source for the CURRENT prop into
    the style box (`c` = that cell's element). For `border` the shown prop is the
@@ -117,12 +175,13 @@
   (concat (remove border-prop-set (keys style-css)) [border-prop] value-props meta-props))
 
 (defn- cell-style-decls
-  "Inline CSS for `a`'s style props (only those resolving to a string; errors /
-   blanks are skipped here and reported via the toast)."
+  "Inline CSS for `a`'s style props (only those resolving to a SAFE string;
+   errors, blanks and values that would inject extra declarations are skipped
+   here and reported via the toast — see `css-value-ok?`)."
   [sh a]
   (apply str (keep (fn [[prop css]]
                      (let [v (sheet/style-value sh a prop)]
-                       (when (string? v) (str ";" css ":" v))))
+                       (when (css-value-ok? v) (str ";" css ":" v))))
                    style-css)))
 
 (defn- cell-input
@@ -1589,8 +1648,8 @@
                   [:div {:style row}
                    (badges src) [:span {:style "flex:1;"}]
                    (when-let [w (fmt-edited edited)] [:span {:style when-s} (str "edited " w)])
-                   [:button {:class "btn" :data-on:click (str "$defid='" id "', @post('/deflock')")} "Edit"]
-                   [:button {:class "btn" :data-on:click (str "$defid='" id "', @post('/defdel')")
+                   [:button {:class "btn" :data-on:click (str "$defid=" (js-str id) ", @post('/deflock')")} "Edit"]
+                   [:button {:class "btn" :data-on:click (str "$defid=" (js-str id) ", @post('/defdel')")
                              :title "delete this definition"} "🗑"]])]))
            [:button {:class "btn" :data-on:click "@post('/defadd')" :style "margin-top:.3rem;"}
             "+ Add definition"]]))))
@@ -1682,7 +1741,7 @@
                                         "border-radius:var(--radius);color:var(--muted);")}]
                    [:button {:class "btn" :title "copy link"
                              :data-on:click
-                             (str "navigator.clipboard.writeText('" url "'), "
+                             (str "navigator.clipboard.writeText(" (js-str url) "), "
                                   "el.textContent='✓', setTimeout(()=>el.textContent='📋',1200)")}
                     "📋"]
                    [:button {:class "btn" :title "make a new link (invalidates the old one)"
@@ -1712,7 +1771,7 @@
                      [:span {:style "flex:1;"} (or (:name (auth/user-info grantee)) grantee)]
                      [:span {:style "color:var(--muted);"} (level-label level)]
                      [:button {:class "btn" :title "remove"
-                               :data-on:click (str "$shareact='revoke', $grantee='" grantee "', @post('/share')")}
+                               :data-on:click (str "$shareact='revoke', $grantee=" (js-str grantee) ", @post('/share')")}
                       "✕"]])
                   [:div {:style "color:var(--muted);margin-bottom:.45rem;"} "not shared with anyone yet"])
                 ;; add person
@@ -1760,8 +1819,8 @@
                                         "padding:.25rem 0;border-top:1px solid var(--grid);")}
                     [:input {:type "checkbox"
                              :data-on:change (str "$mergetake = evt.target.checked"
-                                                  " ? ($mergetake+' " ks "').trim()"
-                                                  " : $mergetake.split(' ').filter(x=>x&&x!=='" ks "').join(' ')")}]
+                                                  " ? ($mergetake+' '+" (js-str ks) ").trim()"
+                                                  " : $mergetake.split(' ').filter(x=>x&&x!==" (js-str ks) ").join(' ')")}]
                     [:span {:style "flex:1;"}
                      [:strong (str a)] " " [:span {:style "color:var(--muted);font-size:11px;"} (name p)]
                      [:div {:style mono} "↱ " (merge-val csrc)]
@@ -1809,7 +1868,7 @@
                              :stroke "#9ec9ee" :stroke-width "1.5" :marker-end "url(#arr)"}
                       (contains? dyn-edges e) (assoc :stroke-dasharray "4 3"))])
            (for [a nodes :let [[x y] (pos a) lbl (node-label sh a)]]
-             [:g {:data-on:click (str "$sel='" a "', $graphpanel=false") :style "cursor:pointer;"}
+             [:g {:data-on:click (str "$sel=" (js-str a) ", $graphpanel=false") :style "cursor:pointer;"}
               [:title (str a)]
               [:rect {:x x :y y :width NW :height NH :rx 4
                       :fill "#f4f6f8" :stroke "#2f8fd8" :stroke-width "1"}]

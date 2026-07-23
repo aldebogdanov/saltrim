@@ -24,7 +24,7 @@
             [uno.michelada.saltrim.web.geom :refer [block-of clamp-view in-window? known-formula-error? pretty-err qparam url-decode url-encode window]]
             [uno.michelada.saltrim.web.state :refer [accessible-rec can-read? def-editor-of edit-lock locked-by-other? now owner-of save-rec! session-view sessions* set-session-view! sheets* sid-re unload-sheet!]]
             [uno.michelada.saltrim.web.sse :refer [patch-inner! read-signals signals! sse sse-opts webkit-ua?]]
-            [uno.michelada.saltrim.web.render :refer [border-prop border-props cells-html colhead-html denied-page graph-svg import-error-html import-report-html login-page merge-result-html meta-html page prop-allowed? render-cells rowhead-html self-html share-html]]
+            [uno.michelada.saltrim.web.render :refer [border-prop border-props cells-html colhead-html css-errors denied-page graph-svg import-error-html import-report-html login-page merge-result-html meta-html page prop-allowed? render-cells rowhead-html self-html share-html]]
             [uno.michelada.saltrim.web.collab :refer [broadcast! broadcast-deflib-except! broadcast-presence! broadcast-window! ensure-session! evict-deleted! push-deflib! reap-session! render-window!]]))
 
 (defn- log-err!
@@ -142,7 +142,11 @@
                               (str a ": " (pretty-err e))))
                     affected)
               (for [a affected [prop e] (sheet/style-errors sh a)]
-                (str a " " (name prop) " style: " (pretty-err e))))]
+                (str a " " (name prop) " style: " (pretty-err e)))
+              ;; a value that computed fine but can't be rendered safely — the
+              ;; renderer drops it, so say so rather than leave it invisible
+              (for [a affected [prop e] (css-errors sh a)]
+                (str a " " (name prop) " style: " e)))]
     (when (seq visible)
       (d*/patch-elements! gen (render-cells sh visible view)))
     (signals! gen {:err (if (seq errs) (str/join "; " errs) "")})
