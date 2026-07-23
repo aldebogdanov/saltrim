@@ -1207,7 +1207,10 @@
                 ;; slice, slate wordmark — softer neutrals than the old grey/blue.
                 ":root{--bg:#fefefe;--panel:#f4f6f8;--line:#c7ccd1;--grid:#e2e6ea;"
                 "--fg:#3a4149;--muted:#7a828b;--accent:#2f8fd8;--accent2:#9ec9ee;"
-                "--accent-bg:#eaf4fc;--lime:#7cc62e;--danger:#c0392b;--radius:4px;}"
+                ;; …and a pale wash of each alert colour, mixed the same way
+                ;; --accent-bg is for --accent (a toast tints its whole card).
+                "--accent-bg:#eaf4fc;--lime:#7cc62e;--lime-bg:#f2f9e8;"
+                "--danger:#c0392b;--danger-bg:#fdeeec;--radius:4px;}"
                 ;; toolbar: two rows. row 1 = picker/new/share/identity,
                 ;; row 2 = cell-ref + formula bar. .tool/.btn unify the inputs
                 ;; and buttons that used to repeat the same inline style string.
@@ -1260,19 +1263,30 @@
                 ;; solid colour: messages carry emoji (🌿 for a branch, 🕘 for a
                 ;; revision) and a green-on-green 🌿 was simply invisible. Dark
                 ;; text on the page colour keeps every glyph readable whatever
-                ;; the message says.
-                ".toast{pointer-events:auto;max-width:26rem;background:var(--bg);"
-                "color:var(--fg);border:1px solid var(--line);border-left:4px solid var(--muted);"
-                "border-radius:6px;padding:.55rem .8rem;font:13px sans-serif;cursor:pointer;"
+                ;; the message says. What DOES carry the colour: a pale wash of
+                ;; it behind the text, the whole 1px border, and a 6px rule down
+                ;; the left — enough that err and info are told apart at a
+                ;; glance, all of it still far too light to swallow a glyph.
+                ;;
+                ;; The width is what stops a message like "…e.g. (+ (or $B5 0)
+                ;; 1)" wrapping its last "1)" onto a line of its own: at 26rem
+                ;; that one needed two lines, at 30rem it fits on one.
+                ;; `text-wrap:pretty` is insurance for the messages still long
+                ;; enough to wrap — it asks the engine not to leave a runt last
+                ;; line. (Unsupported engines ignore it; it never breaks.)
+                ".toast{pointer-events:auto;max-width:30rem;background:var(--bg);"
+                "color:var(--fg);border:1px solid var(--line);border-left:6px solid var(--muted);"
+                "border-radius:6px;padding:.55rem .85rem;font:13px/1.4 sans-serif;cursor:pointer;"
+                "text-wrap:pretty;"
                 "box-shadow:0 2px 10px rgba(0,0,0,.18);animation:toastin .18s ease-out;}"
-                ".toast.err{border-left-color:var(--danger);}"
+                ".toast.err{background:var(--danger-bg);border-color:var(--danger);}"
                 ;; ONE animation on an info card, not an entrance plus a
                 ;; lifetime: `animationend` is what removes the node, and a
                 ;; second animation would fire it early. So the fade-in is the
                 ;; first 4% of the same keyframes. (The rule overrides the
                 ;; shorthand above, so an err card keeps the bare entrance and
                 ;; never auto-dismisses.)
-                ".toast.info{border-left-color:var(--lime);"
+                ".toast.info{background:var(--lime-bg);border-color:var(--lime);"
                 "animation:toastlife 5s ease-out forwards;}"
                 "@keyframes toastin{from{opacity:0;transform:translateX(12px);}}"
                 "@keyframes toastlife{0%{opacity:0;transform:translateX(12px);}"
