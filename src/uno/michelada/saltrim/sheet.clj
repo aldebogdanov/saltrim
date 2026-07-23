@@ -505,7 +505,7 @@
     (do (set-style! sheet addr prop (or src ""))
         [addr])))
 
-(declare insert-line! delete-line!)
+(declare insert-line! delete-line! remove-line! restore-line!)
 
 (defn undo-step
   "Apply one undo (`dir` = :undo) or redo (:redo) over `stacks`. See section note.
@@ -524,11 +524,19 @@
         (let [entry (peek fs) fs' (pop fs)]
           (cond
             (:op entry)
-            (let [{:keys [op axis at]} entry
-                  f (if (= dir :undo)
-                      (if (= op :insert) delete-line! insert-line!)
-                      (if (= op :insert) insert-line! delete-line!))]
-              (f sheet axis at)
+            ;; A structural step. An INSERT is its own inverse either way (the
+            ;; line it adds is blank). A DELETE is not: redoing it must re-capture
+            ;; the line, because undoing it again has to put the same content
+            ;; back — restoring only the geometry would silently drop the row.
+            (let [{:keys [op axis at cells]} entry
+                  entry (if (= dir :undo)
+                          (do (if (= op :insert)
+                                (delete-line! sheet axis at)
+                                (restore-line! sheet axis at cells))
+                              entry)
+                          (if (= op :insert)
+                            (do (insert-line! sheet axis at) entry)
+                            (assoc entry :cells (remove-line! sheet axis at))))]
               {:stacks (assoc stacks from fs' to (conj ts entry)) :affected :all})
 
             (= (src-of sheet (:addr entry) (:prop entry)) (chk entry))
@@ -650,9 +658,13 @@
 
 (defn- reshape!
   "Insert (delta +1) or delete (delta -1) a line at index `at` on `axis`
-   (:row|:col). Rebuilds the cell graph from the document with addresses + refs
-   shifted. Returns the sheet."
-  [{:keys [cols rows] :as sheet} axis at delta]
+   (:row|:col). Rebuilds the cell graph from the document with addresses shifted
+   and each source rewritten by `rw`. Returns the sheet.
+
+   `rw` is a parameter because inserting and deleting need DIFFERENT reference
+   rules: an insert can only move the cell a reference points at, a delete can
+   destroy it (see `formula/delete-shift`)."
+  [{:keys [cols rows] :as sheet} axis at delta rw]
   (let [remap (fn [a] (let [{:keys [ci ri]} (addr/parse a)]
                         (cond
                           (and (= axis :col) (>= ci at)) (addr/make (max 0 (+ ci (long delta))) ri)
@@ -662,7 +674,6 @@
                         (and (neg? delta)
                              (or (and (= axis :col) (= ci at))
                                  (and (= axis :row) (= ri at))))))
-        rw    (fn [s] (formula/insert-shift s axis at delta))
         in-grid? (fn [a] (let [{:keys [ci ri]} (addr/parse a)]
                            (and (< ci c/MAX-COLS) (< ri c/MAX-ROWS))))
         doc'  (into {} (for [[a {:keys [value style]}] (document sheet)
@@ -682,13 +693,62 @@
 (defn insert-line!
   "Insert a blank row/column at index `at` on `axis` (:row|:col): cells at index
    >= at shift one further, formula references follow, axis sizes shift."
-  [sheet axis at] (reshape! sheet axis at 1))
+  [sheet axis at] (reshape! sheet axis at 1 #(formula/insert-shift % axis at 1)))
 
 (defn delete-line!
-  "Remove the row/column at index `at` on `axis` — the inverse of `insert-line!`.
-   (Assumes nothing references the removed line, which holds when undoing the
-   insert of a freshly-blank line.)"
-  [sheet axis at] (reshape! sheet axis at -1))
+  "Remove the row/column at index `at` — the exact inverse of `insert-line!`, for
+   UNDOING an insert. The removed line is blank by construction there, so nothing
+   can reference it and references simply shift back. To delete a line a user has
+   filled, use `remove-line!`, which turns references to it into #REF! instead of
+   silently re-pointing them."
+  [sheet axis at] (reshape! sheet axis at -1 #(formula/insert-shift % axis at -1)))
+
+(defn- rewrites?
+  "Would `rw` change any source in this document entry?"
+  [rw {:keys [value style]}]
+  (or (and value (not= value (rw value)))
+      (boolean (some (fn [[_ raw]] (not= raw (rw raw))) style))))
+
+(defn delete-undo-snapshot
+  "Everything a delete of line `at` on `axis` would destroy or rewrite, keyed by
+   the address each cell has RIGHT NOW: the cells on the line itself, plus every
+   other cell whose formula the rewrite touches.
+
+   Both halves matter. `reshape!` drops the line outright, so without the first
+   an undo would re-open the gap and leave it empty. And `delete-shift` is not
+   invertible — nothing can turn `(deleted-ref \"A3\")` back into `$A3`, or grow
+   `$A1:A2` back to `$A1:A3` — so without the second an undo would put the row
+   back while every formula that referenced it stayed broken. That is the worse
+   failure of the two: the row is visibly back, so the damage looks repaired."
+  [sheet axis at]
+  (let [rw #(formula/delete-shift % axis at)]
+    (into {} (for [[a props] (document sheet)
+                   :when (or (= (long at) (let [{:keys [ci ri]} (addr/parse a)]
+                                            (if (= axis :col) ci ri)))
+                             (rewrites? rw props))]
+               [a props]))))
+
+(defn remove-line!
+  "DELETE the row/column at index `at` on `axis`, as a user means it: its cells
+   are removed, everything after it shifts back, and every reference to a cell
+   that no longer exists becomes #REF! rather than quietly reading whichever cell
+   slid into its place. Ranges that merely straddle the line shrink.
+
+   Returns the `delete-undo-snapshot` taken before the change, so the caller can
+   record an undo entry that restores the sheet rather than just its shape."
+  [sheet axis at]
+  (let [captured (delete-undo-snapshot sheet axis at)]
+    (reshape! sheet axis at -1 #(formula/delete-shift % axis at))
+    captured))
+
+(defn restore-line!
+  "Undo a `remove-line!`: re-open the gap, which shifts every surviving cell back
+   to the address it had, then reload the snapshot over the top — restoring both
+   the deleted line and the formulas whose references the delete rewrote."
+  [sheet axis at snapshot]
+  (insert-line! sheet axis at)
+  (load-document! sheet snapshot)
+  sheet)
 
 ;; --- per-sheet definitions: a chunk LIBRARY (user functions; ROADMAP #2) --
 ;;

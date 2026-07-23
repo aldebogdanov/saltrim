@@ -112,6 +112,9 @@
     (is (not (str/includes? html "id=\"c_C2\"")) "a covered cell is not rendered")
     (is (not (str/includes? html "id=\"c_D2\"")) "a covered cell is not rendered")
     (is (str/includes? html "id=\"c_E2\"") "the cell past the block is still rendered")
-    (is (str/includes? html (str "width:" (dec (* 3 dcw)) "px"))
+    ;; a cell now fills its WHOLE slot (the grid lines are their own layer under
+    ;; it), so the anchor covers three full columns rather than stopping a pixel
+    ;; short of the third
+    (is (str/includes? html (str "width:" (* 3 dcw) "px"))
         "the anchor spans three columns wide")
     (is (str/includes? html "class=\"cell merged\"") "the anchor is flagged merged")))

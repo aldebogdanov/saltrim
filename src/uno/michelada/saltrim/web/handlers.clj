@@ -24,8 +24,8 @@
             [uno.michelada.saltrim.web.geom :refer [block-of clamp-view in-window? known-formula-error? pretty-err qparam url-decode url-encode window]]
             [uno.michelada.saltrim.web.state :refer [accessible-rec can-read? def-editor-of edit-lock locked-by-other? now owner-of save-rec! session-view sessions* set-session-view! sheets* sid-re unload-sheet!]]
             [uno.michelada.saltrim.web.sse :refer [patch-inner! read-signals signals! sse sse-opts webkit-ua?]]
-            [uno.michelada.saltrim.web.render :refer [border-prop border-props cells-html colhead-html css-errors denied-page graph-svg import-error-html import-report-html login-page merge-result-html meta-html page prop-allowed? render-cells rowhead-html self-html share-html]]
-            [uno.michelada.saltrim.web.collab :refer [broadcast! broadcast-deflib-except! broadcast-presence! broadcast-window! ensure-session! evict-deleted! push-deflib! reap-session! render-window!]]))
+            [uno.michelada.saltrim.web.render :refer [border-prop border-props cells-html colhead-html css-errors denied-page graph-svg gridlines-html import-error-html import-report-html login-page merge-result-html meta-html page prop-allowed? render-cells rowhead-html self-html share-html]]
+            [uno.michelada.saltrim.web.collab :refer [broadcast! broadcast-deflib-except! broadcast-presence! broadcast-window! ensure-session! evict-branch-deleted! evict-deleted! push-deflib! reap-session! render-window!]]))
 
 (defn- log-err!
   "Server-side CLI visibility for a handler failure — the toast reaches only
@@ -174,13 +174,19 @@
 
 (defn- record-structural!
   "Push a structural undo entry (a whole row/col insert/delete) — undone/redone as
-   ONE step by sheet/undo-step. Clears redo, like record-edit!."
-  [sid op axis at]
-  (when (@sessions* sid)
-    (swap! sessions* update sid
-           (fn [s] (-> s
-                       (update :undo #(vec (take-last UNDO-CAP (conj (or % []) {:op op :axis axis :at at}))))
-                       (assoc :redo []))))))
+   ONE step by sheet/undo-step. Clears redo, like record-edit!. A DELETE carries
+   the line it removed (`cells`), since undoing it has to restore the content and
+   not just re-open the gap."
+  ([sid op axis at] (record-structural! sid op axis at nil))
+  ([sid op axis at cells]
+   (when (@sessions* sid)
+     (swap! sessions* update sid
+            (fn [s] (-> s
+                        (update :undo #(vec (take-last UNDO-CAP
+                                                       (conj (or % [])
+                                                             (cond-> {:op op :axis axis :at at}
+                                                               cells (assoc :cells cells))))))
+                        (assoc :redo [])))))))
 
 (defn- handle-undo* [req dir]
   (with-access req
@@ -516,6 +522,7 @@
         (sse req (fn [gen]
                    (try
                      (let [[cis ris] (window sh view)]
+                       (patch-inner! gen "#gridlines" (gridlines-html sh cis ris))
                        (patch-inner! gen "#cells"   (cells-html sh cis ris))
                        (patch-inner! gen "#colhead" (colhead-html sh cis))
                        (patch-inner! gen "#rowhead" (rowhead-html sh ris))
@@ -588,6 +595,51 @@
                   (signals! gen {:err ""})
                   (catch Throwable e
                     (log-err! "/insert" e)
+                    (signals! gen {:err (pretty-err (.getMessage e))})))))))))))
+
+(defn handle-deleteline
+  "Delete the row/column the active cell ($sel) is on. `$deletedir` ∈ row|col.
+
+   `sheet/remove-line!` shifts everything after it back and turns references to
+   the removed cells into #REF! (a reference that silently re-points at whichever
+   cell slid into the slot would keep computing, and be wrong). The removed line
+   is captured into the structural undo entry — restoring the geometry without
+   its content would be a silent data loss. Re-renders the whole window, like
+   /insert."
+  [req]
+  (with-access req
+    (fn [uid sheet-id rec {:keys [sid sel deletedir]} gen]
+      (ensure-session! sid sheet-id (:branch rec) uid (:token rec))
+      (let [sh (:sh rec)]
+        (cond
+          (not= :read-write (:level rec))
+          (signals! gen {:err "read-only access — you can't edit this sheet"})
+          (not (addr/valid? sel))
+          (signals! gen {:err "select a cell first"})
+          :else
+          (let [{:keys [ci ri]} (addr/parse sel)
+                [axis at] (case (str deletedir)
+                            "row" [:row ri]
+                            "col" [:col ci]
+                            [nil nil])]
+            (if-not axis
+              (signals! gen {:err ""})
+              (locking (edit-lock (:room rec))
+                (try
+                  (let [cells (sheet/remove-line! sh axis at)]
+                    (sheet/settle! sh)
+                    (record-structural! sid :delete axis at cells)
+                    (save-rec! (:room rec) uid)
+                    (render-window! gen sid (:room rec) sh (session-view sid))
+                    (broadcast-window! sid (:room rec) sh)
+                    ;; no cell count here: `cells` is the undo SNAPSHOT, which
+                    ;; also covers formulas elsewhere that the delete rewrote, so
+                    ;; counting it would claim a row held cells it never had
+                    (signals! gen {:info (str "deleted " (if (= axis :row) "row " "column ")
+                                              (if (= axis :row) (inc ri) (addr/idx->col ci))
+                                              " — Ctrl/⌘+Z to restore")}))
+                  (catch Throwable e
+                    (log-err! "/deleteline" e)
                     (signals! gen {:err (pretty-err (.getMessage e))})))))))))))
 
 ;; --- merged cells ----------------------------------------------------------
@@ -1011,10 +1063,13 @@
             (do
               (db/delete-branch! sheet-id branch)
               ;; discard the in-memory engine for this room so its eventual unload
-              ;; can't re-save the deleted cells; sessions still here get denied on
-              ;; their next request and reload to main.
+              ;; can't re-save the deleted cells
               (when-let [{:keys [sh]} (@sheets* (:room rec))] (sheet/close! sh))
               (swap! sheets* dissoc (:room rec))
+              ;; collaborators used to be left on a branch that no longer existed,
+              ;; collecting "no access" toasts. Tell them by name instead — and
+              ;; make the move to main their explicit click, not our redirect.
+              (evict-branch-deleted! (:room rec) sid)
               (signals! gen {:err "" :branchpanel false :goto base})))
           (signals! gen {:err ""}))))))
 

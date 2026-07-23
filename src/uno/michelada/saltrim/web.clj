@@ -12,11 +12,12 @@
             [jsonista.core :as json]
             [uno.michelada.saltrim.auth :as auth]
             [uno.michelada.saltrim.util :as util :refer [timed]]
+            [uno.michelada.saltrim.xlsx :as xlsx]
             [mount.core :refer [defstate]]
             [uno.michelada.saltrim.mcp :refer [handle-mcp]]
             [uno.michelada.saltrim.web.state :refer [SWEEP-MS sessions* sheets*]]
             [uno.michelada.saltrim.web.collab :refer [sweep!]]
-            [uno.michelada.saltrim.web.handlers :refer [auth-routes handle-branch handle-cell handle-clear handle-copy handle-cut handle-defadd handle-defdel handle-deflock handle-defsave handle-defunlock handle-delete-sheet handle-export handle-flatten handle-graph handle-agentkey handle-import handle-insert handle-merge handle-mergecells handle-paste handle-presence handle-props handle-redo handle-root handle-session-end handle-share handle-size handle-stream handle-style handle-undo handle-unmergecells handle-view handle-viewat]])
+            [uno.michelada.saltrim.web.handlers :refer [auth-routes handle-branch handle-cell handle-clear handle-copy handle-cut handle-defadd handle-defdel handle-deflock handle-defsave handle-defunlock handle-delete-sheet handle-deleteline handle-export handle-flatten handle-graph handle-agentkey handle-import handle-insert handle-merge handle-mergecells handle-paste handle-presence handle-props handle-redo handle-root handle-session-end handle-share handle-size handle-stream handle-style handle-undo handle-unmergecells handle-view handle-viewat]])
   (:gen-class))
 
 (defn- app [req]
@@ -95,6 +96,7 @@
     [:post "/paste"]      (handle-paste req)
     [:post "/size"]       (handle-size req)
     [:post "/insert"]     (handle-insert req)
+    [:post "/deleteline"] (handle-deleteline req)
     [:post "/agentkey"]     (handle-agentkey req)
     [:post "/mergecells"]   (handle-mergecells req)
     [:post "/unmergecells"] (handle-unmergecells req)
@@ -159,6 +161,17 @@
       (cond-> resp
         (map? resp) (update :headers #(merge security-headers %))))))
 
+(def MAX-BODY
+  "Largest request body http-kit will accept.
+
+   It has to sit ABOVE `xlsx/max-bytes`, the .xlsx upload cap the import modal
+   actually tells the user about. http-kit's own default is 8 MiB — exactly
+   `max-bytes` — so an oversized workbook was rejected by the server with a bare
+   413 BEFORE the handler ran, and the friendly \"file too large (max 8 MB)\"
+   message was unreachable. The headroom also covers multipart framing, which is
+   part of the body but not part of the file."
+  (+ xlsx/max-bytes (* 4 1024 1024)))
+
 (defn port
   "HTTP port — SALTRIM_PORT env or 8080."
   []
@@ -188,7 +201,7 @@
                                            wrap-keyword-params
                                            wrap-cookies
                                            wrap-security-headers)
-                                       {:port (port)})]
+                                       {:port (port) :max-body MAX-BODY})]
                   (util/log "  serving http://localhost:" (port) "·"
                             (if-let [ps (seq (keys (auth/providers)))]
                               (str "auth: " (str/join ", " (map name ps))) "auth: none")

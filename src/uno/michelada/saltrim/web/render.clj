@@ -206,10 +206,13 @@
            :data-raw raw
            :title note                     ; the comment itself, on hover
            :data-sty (when (seq srcs) (json/write-value-as-string srcs))
+           ;; the cell fills its WHOLE slot (it used to stop a pixel short, which
+           ;; is what left a gap between two cells sharing a bg) and the grid
+           ;; lines are painted beneath it — see `gridlines-html`
            :style (str (format "left:%dpx;top:%dpx;width:%dpx;height:%dpx"
                                (- (axis-x sh ci) (axis-x sh cbase))
                                (- (axis-y sh ri) (axis-y sh rbase))
-                               (dec (long w)) (dec (long h)))
+                               (long w) (long h))
                        (cell-style-decls sh a))}
      disp]))
 
@@ -221,6 +224,36 @@
                        :let  [a (addr/make ci ri)]
                        :when (not (contains? hidden a))]
                    (cell-input sh a ci ri cb rb (get anchors a)))))))
+
+(defn gridlines-html
+  "The grid itself, as its OWN layer under the cells: one thin div per column and
+   per row boundary of the rendered window.
+
+   The lines used to be four borders on each cell, and each cell was drawn one
+   pixel smaller than its slot — so between two neighbours sat a cell border, a
+   one-pixel gap showing the page through, and the next cell's border. Invisible
+   on an empty grid; on two adjacent cells sharing a `bg` it was a three-pixel
+   scar through what should be one block of colour.
+
+   Now a cell fills its whole slot and paints over the lines beneath it: two
+   coloured neighbours meet seamlessly, and an unstyled (transparent) cell lets
+   the same lines through as before. The band is reproduced exactly — a 3px
+   element whose left/right (or top/bottom) border is the grid colour and whose
+   middle pixel is transparent, which is pixel-for-pixel what the two borders and
+   the gap used to draw. Each boundary is drawn once instead of twice, so this is
+   also ~1/17th of the elements the per-cell borders needed."
+  [sh cis ris]
+  (let [xb (axis-x sh (first cis))
+        yb (axis-y sh (first ris))
+        ;; every rendered column's left edge, plus the far edge of the last one
+        xs (map #(- (axis-x sh %) xb) (concat cis [(inc (last cis))]))
+        ys (map #(- (axis-y sh %) yb) (concat ris [(inc (last ris))]))
+        w  (last xs)
+        h  (last ys)]
+    (str (h/html
+          (concat
+           (for [x xs] [:div {:class "gl gv" :style (format "left:%dpx;height:%dpx;" (- (long x) 2) h)}])
+           (for [y ys] [:div {:class "gl gh" :style (format "top:%dpx;width:%dpx;" (- (long y) 2) w)}]))))))
 
 (defn colhead-html [sh cis]
   (let [xb (axis-x sh (first cis))]
@@ -309,6 +342,11 @@
       ;; cell area (clipped; translated in X+Y)
       [:div {:id "cellclip" :style (format "%sleft:%dpx;top:%dpx;right:%dpx;bottom:%dpx;"
                                            clip GUT HDR BAR BAR)}
+       ;; the grid itself, UNDER the cells: an unstyled (transparent) cell lets it
+       ;; through, a styled one paints over it edge to edge. Translated with the
+       ;; cells, so it scrolls with them.
+       [:div {:id "gridlines" :style "position:absolute;left:0;top:0;will-change:transform;"}
+        (h/raw (gridlines-html sh cis ris))]
        [:div {:id "cells" :style "position:absolute;left:0;top:0;will-change:transform;"}
         (h/raw (cells-html sh cis ris))]
        ;; multi-cell selection highlight — drawn CLIENT-side by app.cljs from its
@@ -440,10 +478,15 @@
              "a small corner flag and shows the text on hover. The .xlsx importer leaves its audit trail "
              "as comments."]
 
-            [:div {:style h3} "Insert rows / columns"]
+            [:div {:style h3} "Insert / delete rows and columns"]
             [:p {:style p} "The " [:span {:style kbd} "insert"] " buttons (format row) add a blank row/column "
              "next to the selected cell. Cells shift and formula references follow the shift; it's one "
              [:span {:style kbd} "Ctrl/⌘+Z"] " to undo."]
+            [:p {:style p} "The " [:span {:style kbd} "delete"] " buttons remove the row/column the selected "
+             "cell is on. Cells after it shift back, and ranges that crossed it lose exactly that one cell — "
+             "but a formula that pointed " [:b "at"] " a deleted cell becomes "
+             [:span {:style kbd} "#REF!"] " rather than quietly reading whichever cell moved into its place. "
+             "One " [:span {:style kbd} "Ctrl/⌘+Z"] " restores the whole line, values and styling included."]
 
             [:div {:style h3} "Merge cells"]
             [:p {:style p} "Select a range and press " [:span {:style kbd} "⛶ merge"] " (format row): the "
@@ -1058,6 +1101,34 @@
                             "text-decoration:none;color:var(--fg);font:12px monospace;")}
             (str "🕘 " (fmt-ts inst))])])]]))
 
+(defn- branch-gone-html
+  "Shown when the owner deletes the branch you are on ($branchgone = its name).
+
+   Deliberately a BLOCKING modal with one button, not a redirect. Dropping
+   someone onto main automatically is how they keep typing and edit main by
+   accident — the branch they believed they were on is gone and nothing said so.
+   Here the move is their own click. No click-outside dismiss, no ✕: while it is
+   up the page still shows the stale branch, and every write already 403s (their
+   $branch names a branch that no longer exists), so nothing can leak to main."
+  [main-href]
+  [:div {:data-show "$branchgone != ''"
+         :style (str "position:fixed;inset:0;z-index:70;background:rgba(0,0,0,.45);"
+                     "display:flex;align-items:center;justify-content:center;padding:1rem;")}
+   [:div {:style (str "background:var(--bg);border:1px solid var(--line);border-radius:8px;"
+                      "box-shadow:0 8px 32px rgba(0,0,0,.3);max-width:26rem;width:100%;"
+                      "padding:1.1rem 1.3rem;font:13px sans-serif;color:var(--fg);")}
+    [:h2 {:style "margin:0 0 .5rem;font:600 15px sans-serif;"} "This branch was deleted"]
+    [:p {:style "color:var(--muted);margin:.2rem 0 .5rem;"}
+     "The owner deleted "
+     [:strong {:data-text "'🌿 ' + $branchgone"}]
+     ". What you see here is no longer saved anywhere, and edits are refused."]
+    [:p {:style "color:var(--muted);margin:.2rem 0 .9rem;"}
+     "Continue on " [:strong "🌿 main"] " — a different branch, so check where you "
+     "are before typing."]
+    [:div {:style "display:flex;justify-content:flex-end;"}
+     [:a {:class "btn primary" :href main-href :style "text-decoration:none;"}
+      "Go to 🌿 main"]]]])
+
 (defn- graph-modal-html
   "The 🕸 dependency-graph modal shell, toggled by $graphpanel. Its #graphview
    inner is server-rendered by /graph when the modal opens (so it's always
@@ -1160,11 +1231,34 @@
                 ;; default cell/editor box = this SHEET's default axis sizes (a
                 ;; sized column/row overrides inline per cell). Server-rendered so
                 ;; changing the sheet default reflows the grid on reload.
-                (let [dw (dec (sheet/default-col-w sh)) dh (dec (sheet/default-row-h sh))]
-                  (format (str ".cell{position:absolute;width:%dpx;height:%dpx;"
-                               "box-sizing:border-box;border:1px solid var(--grid);"
-                               "padding:2px 4px;font:13px monospace;overflow:hidden;"
-                               "white-space:nowrap;background:var(--bg);}"
+                ;; the grid, as its own layer under the cells (see gridlines-html).
+                ;; A 3px band whose outer pixels are the grid colour and whose
+                ;; middle is transparent — pixel-for-pixel what two cell borders
+                ;; either side of a 1px gap used to draw.
+                ".gl{position:absolute;box-sizing:border-box;}"
+                ".gv{top:0;width:3px;border-left:1px solid var(--grid);"
+                "border-right:1px solid var(--grid);}"
+                ".gh{left:0;height:3px;border-top:1px solid var(--grid);"
+                "border-bottom:1px solid var(--grid);}"
+                (let [dw (sheet/default-col-w sh) dh (sheet/default-row-h sh)
+                      ew (dec dw) eh (dec dh)]
+                  (format (str
+                               ;; A cell fills its WHOLE slot and is TRANSPARENT, so
+                               ;; the lines beneath show through an unstyled one and
+                               ;; a `bg` paints edge to edge — two coloured
+                               ;; neighbours meet with no seam. The padding is
+                               ;; 1px more than it looks: it absorbs the border the
+                               ;; cell no longer draws, so text lands on exactly the
+                               ;; pixel it always did.
+                               ".cell{position:absolute;width:%dpx;height:%dpx;"
+                               "box-sizing:border-box;"
+                               "padding:3px 5px 4px 5px;font:13px monospace;overflow:hidden;"
+                               "white-space:nowrap;background:transparent;}"
+                               ;; a merge covers boundaries that are still drawn
+                               ;; beneath it, so the anchor is opaque and keeps a
+                               ;; box of its own around the whole block
+                               ".cell.merged{background:var(--bg);"
+                               "border:1px solid var(--grid);padding:2px 4px;}"
                                ;; commented cell: a small corner flag (the comment
                                ;; text itself is the cell's hover title).
                                ".cell.noted::after{content:'';position:absolute;top:0;right:0;"
@@ -1173,7 +1267,10 @@
                                "box-sizing:border-box;border:1px solid var(--accent);"
                                "padding:2px 4px;font:13px monospace;outline:none;z-index:6;"
                                "user-select:text;-webkit-user-select:text;}")
-                          dw dh dw dh))
+                          ;; the cell is a whole slot; the editor keeps the old
+                          ;; inset box, so its accent border reads as a frame
+                          ;; INSIDE the cell rather than over the grid line
+                          dw dh ew eh))
                 ;; selection / editing OVERLAY (#self), server-rendered. Literal %
                 ;; in the gradients -> kept OUT of the format call above.
                 ;; calm "you are here" selection box:
@@ -1234,6 +1331,9 @@
              :data-signals:bname "''"            ; new-branch name (fork modal)
              :data-signals:branchact "''"        ; fork | delete | merge-preview/apply
              :data-signals:branchpanel "false"   ; 🌿 modal open?
+             ;; set (to its name) when the owner deletes the branch you are on —
+             ;; raises a blocking modal instead of redirecting you onto main
+             :data-signals:branchgone "''"
              ;; merge (PR B): source branch + the space-separated set of conflict
              ;; keys ("addr|prop") the owner chose to take from source.
              :data-signals:mergefrom "''"
@@ -1262,6 +1362,7 @@
              ;; LIVE by app.cljs so selection-wide actions (clear / style / …) use it
              :data-signals:selcells "''"
              :data-signals:insertdir "''"   ; top|bottom|left|right (insert blank row/col)
+             :data-signals:deletedir "''"   ; row|col (delete the line the cursor is on)
              :data-signals:rzcmd "''"
              ;; definitions library (ƒ modal)
              :data-signals:defspanel "false"
@@ -1320,6 +1421,9 @@
       (when-not asof? (h/raw (agentkey-html (auth/agent-key-info uid))))
       (when-not asof? (history-modal storage-id sname branch revisions link-token owner?))
       (when-not asof? (graph-modal-html))
+      ;; only reachable on a non-main branch — main is never deleted
+      (when (and (not asof?) (not= branch db/MAIN))
+        (branch-gone-html (sheet-href storage-id sname db/MAIN link-token owner?)))
       ;; ── toolbar row 1: sheet management + sharing + identity ───────────
       [:div {:class "toolrow"}
        (sheet-picker uid storage-id sname)
@@ -1437,6 +1541,16 @@
        [:button {:class "btn" :title "insert row below" :data-on:click "$insertdir='bottom', @post('/insert')"} "⤓ row"]
        [:button {:class "btn" :title "insert column left" :data-on:click "$insertdir='left', @post('/insert')"} "⇤ col"]
        [:button {:class "btn" :title "insert column right" :data-on:click "$insertdir='right', @post('/insert')"} "⇥ col"]
+       ;; delete the row/column the active cell sits on. Separated from the
+       ;; inserts by a rule: these DESTROY cells (undoably), the others don't.
+       [:span {:style "border-left:1px solid var(--grid);margin:0 .2rem;align-self:stretch;"}]
+       [:span {:style "font:11px sans-serif;color:var(--muted);"} "delete"]
+       [:button {:class "btn" :style "color:var(--danger);"
+                 :title "delete this row — cells after it shift up, references to it become #REF! (Ctrl/⌘+Z restores)"
+                 :data-on:click "$deletedir='row', @post('/deleteline')"} "⌫ row"]
+       [:button {:class "btn" :style "color:var(--danger);"
+                 :title "delete this column — cells after it shift left, references to it become #REF! (Ctrl/⌘+Z restores)"
+                 :data-on:click "$deletedir='col', @post('/deleteline')"} "⌫ col"]
        ;; merge / unmerge the selection into one big cell (top-left keeps its
        ;; address; the swallowed cells are hidden but keep their data)
        [:span {:style "border-left:1px solid var(--grid);margin:0 .2rem;align-self:stretch;"}]

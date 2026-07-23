@@ -175,13 +175,21 @@ the comment when you hover it. Comments are also where the `.xlsx` importer
 leaves its audit trail, and they travel into an exported workbook as the Excel
 cell comment.
 
-### Insert rows & columns
+### Insert & delete rows and columns
 
 In the format row (**🎨**), the **insert** buttons add a blank row or column next
 to the selected cell — **⤒ row** above, **⤓ row** below, **⇤ col** left, **⇥ col**
 right. Existing cells shift out of the way and **formula references follow the
 shift** (a range that the new line falls inside grows to include it). An insert
 is a single **Undo** step (Ctrl/⌘+Z puts everything back).
+
+The **delete** buttons — **⌫ row**, **⌫ col** — remove the row or column the
+selected cell is on. Cells after it shift back, and a range that crossed the line
+loses exactly the one cell that went. A formula that pointed **at** a deleted cell
+becomes **`#REF!`**, naming what it lost, rather than quietly re-pointing at
+whichever cell moved into that slot — a formula that still computes and is wrong
+is worse than one that stops. Deleting is also a single **Undo** step, and it
+restores the whole line: values, formulas and styling.
 
 ### Merge cells
 

@@ -556,6 +556,87 @@
           (str/replace #"\$([A-Za-z]+[0-9]+)(?!:)"
                        (fn [[_ a]] (str "$" (b a))))))))
 
+;; A DELETE is not an insert with a negative delta. Inserting a line can only
+;; move the cell a reference points at; deleting one can DESTROY it, and the two
+;; call for opposite treatment of a reference whose coordinate is exactly the
+;; deleted line:
+;;
+;;   coord  < at   the target is before the line          -> unchanged
+;;   coord == at   the target is GONE                     -> see below
+;;   coord  > at   the target slid back one               -> shift by -1
+;;
+;; For a scalar ref the answer is the spreadsheet's oldest error: `#REF!`. Left
+;; to `insert-shift`'s `>= at` rule it would instead shift to `at - 1` and
+;; silently read a DIFFERENT cell — a formula that still computes and is quietly
+;; wrong, which is the worst outcome available.
+;;
+;; A RANGE just gets shorter, and its two ends are NOT symmetric:
+;;
+;;   start  s -> s   when s <= at, else s-1   (a start on the line stays put; it
+;;                                             now names the cell that slid in)
+;;   end    e -> e-1 when e >= at, else e     (an end on the line steps back; the
+;;                                             range's last real cell is at-1)
+;;
+;; So A1:A3 minus row 3 is A1:A2, while A3:A5 minus row 3 is A3:A4 — each loses
+;; exactly the one cell that was deleted. When the new end lands before the new
+;; start the range covered nothing but the deleted line, and it is `#REF!` too.
+;; Endpoints are ordered before the rule is applied and put back in the order
+;; they were written, so a range typed "backwards" (B5:A1) still works.
+
+(defn- ref-error
+  "The source text a destroyed reference is rewritten to. A call, so it parses
+   and compiles like anything else and raises at evaluation with the address it
+   lost — the cell shows #ERR and the toast names what was deleted."
+  [what]
+  (str "(deleted-ref \"" what "\")"))
+
+(defn- coord-of [a axis]
+  (let [{:keys [ci ri]} (addr/parse a)] (if (= axis :col) ci ri)))
+
+(defn- with-coord
+  "`a` with its `axis` coordinate replaced by `n`."
+  [a axis n]
+  (let [{:keys [ci ri]} (addr/parse a)]
+    (if (= axis :col) (addr/make (max 0 (long n)) ri) (addr/make ci (max 0 (long n))))))
+
+(defn delete-shift
+  "Rewrite cell references in formula `src` for the DELETION of the line at index
+   `at` on `axis` (:row|:col). References to cells that no longer exist become
+   `#REF!` errors rather than silently re-pointing at their neighbours; ranges
+   shrink by exactly the one cell removed. Non-formula text / nil pass through.
+   See the section note above."
+  [src axis at]
+  (if (nil? src)
+    src
+    (let [at    (long at)
+          range-rw
+          (fn [tag a b]
+            (let [ca (coord-of a axis) cb (coord-of b axis)
+                  lo (min ca cb)       hi (max ca cb)
+                  lo' (if (<= lo at) lo (dec lo))
+                  hi' (if (>= hi at) (dec hi) hi)]
+              (if (< hi' lo')
+                (ref-error (str a ":" b))          ; the range was only that line
+                (let [c->n (fn [c] (if (= c lo) lo' hi'))]
+                  (str tag (with-coord a axis (c->n ca))
+                       ":" (with-coord b axis (c->n cb)))))))
+          cell-rw
+          (fn [tag a]
+            (let [c (coord-of a axis)]
+              (cond
+                (= c at) (ref-error a)              ; the cell itself is gone
+                (> c at) (str tag (with-coord a axis (dec c)))
+                :else    (str tag a))))]
+      (-> src
+          (str/replace #"#cells\s+([A-Za-z]+[0-9]+):([A-Za-z]+[0-9]+)"
+                       (fn [[_ a b]] (range-rw "#cells " a b)))
+          (str/replace #"#cell\s+([A-Za-z]+[0-9]+)"
+                       (fn [[_ a]] (cell-rw "#cell " a)))
+          (str/replace #"\$([A-Za-z]+[0-9]+):([A-Za-z]+[0-9]+)"
+                       (fn [[_ a b]] (range-rw "$" a b)))
+          (str/replace #"\$([A-Za-z]+[0-9]+)(?!:)"
+                       (fn [[_ a]] (cell-rw "$" a)))))))
+
 ;; --- SCI sandbox + stdlib ----------------------------------------------
 ;; SCI runs the user expression in a curated, side-effect-free subset of
 ;; clojure.core (real lexical scope, NO host interop the user can reach). On top
@@ -652,6 +733,10 @@
    ;; `#(...)` — see `desugar-fn-literals`. A macro, so `%` is resolved on the
    ;; FORM and a `%` inside a string literal stays data.
    FN-LITERAL (with-meta fn-literal-macro {:sci/macro true})
+   ;; what a reference is rewritten to when the row/column it pointed at is
+   ;; deleted (see `delete-shift`) — always throws, naming what was lost
+   'deleted-ref (fn [what]
+                  (throw (ex-info (str "#REF! — " what " was deleted") {:ref what})))
    ;; I/O (see no-io): clear "not available" instead of an opaque cast crash
    'println no-io 'print no-io 'prn no-io 'pr no-io 'printf no-io
    'newline no-io 'flush no-io 'read no-io 'read-line no-io})

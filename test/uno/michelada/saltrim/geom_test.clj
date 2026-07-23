@@ -103,3 +103,16 @@
           (str "clamp-view on " (pr-str bad)))))
   (testing "the clamped view still renders"
     (is (seq (first (geom/window *sh* (geom/clamp-view {:r0 1e18 :c0 "x"})))))))
+
+(deftest pretty-err-translates-the-blank-cell-mistake
+  ;; referencing a still-empty cell in arithmetic is the first mistake everyone
+  ;; makes, and the JVM's own words for it name nothing the user can act on
+  (let [raw "Cannot invoke \"Object.getClass()\" because \"x\" is null"]
+    (is (not= raw (geom/pretty-err raw)))
+    (is (re-find #"empty cell" (geom/pretty-err raw)))
+    (is (re-find #"\(or \$B5 0\)" (geom/pretty-err raw)) "and points at the fix"))
+  (testing "the other translations still fire"
+    (is (= "divide by zero" (geom/pretty-err "java.lang.ArithmeticException: Divide by zero")))
+    (is (= "circular reference" (geom/pretty-err "circular reference A1 -> B1"))))
+  (testing "an unrecognized message is passed through untouched"
+    (is (= "something else entirely" (geom/pretty-err "something else entirely")))))
