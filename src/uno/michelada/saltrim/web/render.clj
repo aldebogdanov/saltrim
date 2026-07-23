@@ -434,10 +434,15 @@
              "a small corner flag and shows the text on hover. The .xlsx importer leaves its audit trail "
              "as comments."]
 
-            [:div {:style h3} "Insert rows / columns"]
+            [:div {:style h3} "Insert / delete rows and columns"]
             [:p {:style p} "The " [:span {:style kbd} "insert"] " buttons (format row) add a blank row/column "
              "next to the selected cell. Cells shift and formula references follow the shift; it's one "
              [:span {:style kbd} "Ctrl/⌘+Z"] " to undo."]
+            [:p {:style p} "The " [:span {:style kbd} "delete"] " buttons remove the row/column the selected "
+             "cell is on. Cells after it shift back, and ranges that crossed it lose exactly that one cell — "
+             "but a formula that pointed " [:b "at"] " a deleted cell becomes "
+             [:span {:style kbd} "#REF!"] " rather than quietly reading whichever cell moved into its place. "
+             "One " [:span {:style kbd} "Ctrl/⌘+Z"] " restores the whole line, values and styling included."]
 
             [:div {:style h3} "Merge cells"]
             [:p {:style p} "Select a range and press " [:span {:style kbd} "⛶ merge"] " (format row): the "
@@ -1256,6 +1261,7 @@
              ;; LIVE by app.cljs so selection-wide actions (clear / style / …) use it
              :data-signals:selcells "''"
              :data-signals:insertdir "''"   ; top|bottom|left|right (insert blank row/col)
+             :data-signals:deletedir "''"   ; row|col (delete the line the cursor is on)
              :data-signals:rzcmd "''"
              ;; definitions library (ƒ modal)
              :data-signals:defspanel "false"
@@ -1431,6 +1437,16 @@
        [:button {:class "btn" :title "insert row below" :data-on:click "$insertdir='bottom', @post('/insert')"} "⤓ row"]
        [:button {:class "btn" :title "insert column left" :data-on:click "$insertdir='left', @post('/insert')"} "⇤ col"]
        [:button {:class "btn" :title "insert column right" :data-on:click "$insertdir='right', @post('/insert')"} "⇥ col"]
+       ;; delete the row/column the active cell sits on. Separated from the
+       ;; inserts by a rule: these DESTROY cells (undoably), the others don't.
+       [:span {:style "border-left:1px solid var(--grid);margin:0 .2rem;align-self:stretch;"}]
+       [:span {:style "font:11px sans-serif;color:var(--muted);"} "delete"]
+       [:button {:class "btn" :style "color:var(--danger);"
+                 :title "delete this row — cells after it shift up, references to it become #REF! (Ctrl/⌘+Z restores)"
+                 :data-on:click "$deletedir='row', @post('/deleteline')"} "⌫ row"]
+       [:button {:class "btn" :style "color:var(--danger);"
+                 :title "delete this column — cells after it shift left, references to it become #REF! (Ctrl/⌘+Z restores)"
+                 :data-on:click "$deletedir='col', @post('/deleteline')"} "⌫ col"]
        ;; merge / unmerge the selection into one big cell (top-left keeps its
        ;; address; the swallowed cells are hidden but keep their data)
        [:span {:style "border-left:1px solid var(--grid);margin:0 .2rem;align-self:stretch;"}]
