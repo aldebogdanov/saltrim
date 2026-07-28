@@ -30,8 +30,7 @@
   "The loaded record for a (storage id, branch); loads from the db lazily, else
    creates a fresh private sheet owned by `owner`. Registers the SHEET (not the
    branch) in the DB — branch existence is handled by db/branch-exists?/fork.
-   On a sheet's first registration the legacy :public flag becomes a capability
-   link; any pre-link :everyone grant is upgraded too (one-shot)."
+   Any pre-link `:everyone` grant is upgraded to a capability link (one-shot)."
   [id branch owner]
   (let [room [id branch]]
     (or (when-let [rec (@sheets* room)]
@@ -43,12 +42,10 @@
         (let [loaded   (store/load-record id branch)
               rec      (or loaded {:sh (sheet/create-sheet) :owner owner})
               [o n]    (store/split-id id)
-              owner    (or (:owner rec) o)
-              new?     (db/ensure-sheet! id owner n)]
-          (when (and new? (:public rec)) (db/set-link-level! id :read-write))
+              owner    (or (:owner rec) o)]
+          (db/ensure-sheet! id owner n)
           (db/migrate-everyone->link! id)       ; upgrade legacy public grants
-          (let [rec (-> rec (dissoc :public) (assoc :owner owner
-                                                    :at (System/currentTimeMillis)))]
+          (let [rec (assoc rec :owner owner :at (System/currentTimeMillis))]
             (swap! sheets* assoc room rec)
             rec)))))
 

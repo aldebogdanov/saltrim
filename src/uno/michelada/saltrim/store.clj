@@ -86,10 +86,10 @@
 
 (defn load-record
   "Rebuild a sheet from the db for `branch` (default `db/MAIN`):
-   {:sh sheet :owner uid|nil :public false}, or nil when that branch has no
-   content yet (caller then creates a fresh empty one). Owner is derived from the
-   id; public/sharing live in the ACL, not here. Definitions are applied BEFORE
-   cells so formulas compile against them."
+   {:sh sheet :owner uid|nil}, or nil when that branch has no content yet
+   (caller then creates a fresh empty one). Owner is derived from the id;
+   sharing lives entirely in the ACL (`db/access-level`), not here. Definitions
+   are applied BEFORE cells so formulas compile against them."
   ([id] (load-record id db/MAIN))
   ([id branch]
    (when (and (valid-id? id) (db/sheet-has-content? id branch))
@@ -102,7 +102,7 @@
        (when dcw (sheet/set-default-col-w! s dcw))
        (when drh (sheet/set-default-row-h! s drh))
        (sheet/settle! s)
-       {:sh s :owner (first (split-id id)) :public false}))))
+       {:sh s :owner (first (split-id id))}))))
 
 (defn load-record-asof
   "A READ-ONLY snapshot of (id, branch) AS OF transaction `tx`: cells reconstructed
