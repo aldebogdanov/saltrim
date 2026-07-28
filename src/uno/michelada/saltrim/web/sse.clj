@@ -126,6 +126,14 @@
 ;; So this is fire-and-forget. Nothing server-side tracks a card, times it, or
 ;; ever has to take it back — no timers, no per-session bookkeeping, and no
 ;; client code beyond the two Datastar expressions above.
+;;
+;; THREE kinds now. `:warn` (gold) is an ASSERTION violation — a statement about
+;; the data rather than about an operation, so it is neither a failure (`:err`,
+;; red) nor a confirmation (`:info`, green). Like an error it does not
+;; auto-dismiss: the number is still wrong when the animation would have ended.
+;; A `:warn` card also carries the ADDRESS it is about (`data-addr`), which
+;; app.cljs reads to scroll there — a violation is usually outside the rendered
+;; window, so naming a cell you cannot see would be half an answer.
 
 (defonce ^:private toast-n (java.util.concurrent.atomic.AtomicLong. 0))
 
@@ -135,36 +143,41 @@
 
 (defn- toast-html
   "One card. The message is ordinary hiccup content, so it is HTML-escaped —
-   it routinely carries user text (a formula, a sheet name, an exception)."
-  [kind msg]
+   it routinely carries user text (a formula, a sheet name, an exception).
+   `addr` (optional) marks the cell the card is about."
+  [kind msg addr]
   (str (h/html
         [:li (cond-> {:id            (str "toast" (.incrementAndGet toast-n))
                       :class         (str "toast " (name kind))
-                      :title         "click to dismiss"
+                      :title         (if addr "click to go to the cell" "click to dismiss")
                       :data-on:click "el.remove()"}
-               (= :info kind) (assoc :data-on:animationend "el.remove()"))
+               (= :info kind) (assoc :data-on:animationend "el.remove()")
+               addr           (assoc :data-addr addr))
          msg])))
 
 (defn toast!
-  "Append a `:err` / `:info` card to the page's toast list."
-  [gen kind msg]
-  (d*/patch-elements! gen (toast-html kind msg)
-                      {d*/selector toast-list d*/patch-mode d*/pm-append}))
+  "Append a card to the page's toast list. `addr` (optional, `:warn`) is the cell
+   the message is about — app.cljs scrolls there when the card is clicked."
+  ([gen kind msg] (toast! gen kind msg nil))
+  ([gen kind msg addr]
+   (d*/patch-elements! gen (toast-html kind msg addr)
+                       {d*/selector toast-list d*/patch-mode d*/pm-append})))
 
 (defn signals!
-  "Patch signals — except `:err` and `:info`, which are not signals at all any
-   more: a non-blank one raises its own toast card (see above) and never reaches
-   the client as a value. A BLANK one is a no-op, where it used to clear the
-   slot; there is no slot to clear, and a card belongs to whoever it was sent to.
+  "Patch signals — except `:err`, `:warn` and `:info`, which are not signals at
+   all any more: a non-blank one raises its own toast card (see above) and never
+   reaches the client as a value. A BLANK one is a no-op, where it used to clear
+   the slot; there is no slot to clear, and a card belongs to whoever it was sent
+   to.
 
    This stays the one choke point every handler patches through, so all ~90 call
    sites keep passing `{:err …}` / `{:info …}` exactly as before."
   [gen m]
-  (doseq [kind [:err :info]
+  (doseq [kind [:err :warn :info]
           :let  [msg (str (get m kind))]
           :when (not (str/blank? msg))]
     (toast! gen kind msg))
-  (let [sigs (dissoc m :err :info)]
+  (let [sigs (dissoc m :err :warn :info)]
     ;; an all-toast call has no signals left to send — but a caller that
     ;; deliberately passed nothing (the /stream open flush) still gets its patch
     (when (or (seq sigs) (empty? m))

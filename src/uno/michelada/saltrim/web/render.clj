@@ -113,7 +113,12 @@
   [:label :comment])
 
 (defn prop-allowed? [p]
-  (or (contains? style-css p) (some #{p} value-props) (some #{p} meta-props)))
+  (or (contains? style-css p) (some #{p} value-props) (some #{p} meta-props)
+      ;; `:assert` rides the same per-property path but is NOT in `meta-props`,
+      ;; so it stays out of the style-bar dropdown (it has its own input) while
+      ;; still being writable through /style — which is what lets undo, paste and
+      ;; the 3-way merge move it like any other prop.
+      (= sheet/assert-prop p)))
 
 ;; --- CSS value safety ----------------------------------------------------
 ;;
@@ -168,6 +173,13 @@
   (str "$stylesrc=c.dataset.sty?(JSON.parse(c.dataset.sty)"
        "[$styleprop==='border'?$borderside.split(',')[0]:$styleprop]||''):''"))
 
+(def ^:private assert-read-js
+  "Datastar expression: load the selected cell's ASSERTION into the ⊨ box (`c` =
+   that cell's element, already in scope at every call site). Same shape as
+   `style-read-js` — the cell's `data-sty` already carries every prop it has, so
+   nothing extra rides on the wire for this."
+  "$assertsrc=c.dataset.sty?(JSON.parse(c.dataset.sty)['assert']||''):''")
+
 (def style-bar-props
   "The prop dropdown's entries: every writable prop, with the four border sides
    collapsed behind the single `border` pseudo-prop (the side dropdown picks
@@ -196,6 +208,9 @@
         raw  (or (sheet/raw sh a) disp)
         srcs (sheet/style-srcs sh a)       ; {prop raw} -> echoed into the style bar
         note (let [c (sheet/style-value sh a :comment)] (when (string? c) (not-empty c)))
+        ;; a failing assertion marks the cell (bottom-left wedge — `:comment`
+        ;; owns the top-right one, and a cell can carry both)
+        bad  (sheet/assert-violation sh a)
         ;; a merge anchor spans its rectangle; otherwise one cell (override OR the
         ;; sheet default). width/height always emitted so geometry is fully
         ;; data-driven: a default-size change re-renders and applies live.
@@ -204,9 +219,12 @@
                 [(col-w sh ci) (row-h sh ri)])]
     [:div {:id (cell-id a)
            :class (str "cell" (when note " noted") (when span " merged")
+                       (when bad " badassert")
                        (when (= sheet/layer-over (get srcs sheet/layer-prop)) " over"))
            :data-raw raw
-           :title note                     ; the comment itself, on hover
+           ;; both can be present: the comment is what the cell is FOR, the
+           ;; violation what is wrong with it right now
+           :title (not-empty (str/join "\n" (remove nil? [note (when bad (str "⚠ " bad))])))
            :data-sty (when (seq srcs) (json/write-value-as-string srcs))
            ;; the cell fills its WHOLE slot (it used to stop a pixel short, which
            ;; is what left a gap between two cells sharing a bg) and the grid
@@ -519,7 +537,18 @@
             [:div {:style h3} "Dependency graph"]
             [:p {:style p} "The " [:span {:style kbd} "🕸"] " button draws how cells feed each other "
              "(an arrow points from a cell to the cells that use it); click a node to select it. "
-             "Set a cell's " [:span {:style kbd} "label"] " (style row) to name its node."])))
+             "Set a cell's " [:span {:style kbd} "label"] " (style row) to name its node."]
+
+            [:div {:style h3} "Assertions"]
+            [:p {:style p} "The " [:span {:style kbd} "⊨"] " button on the formula row gives the selected "
+             "cell a claim about its own value — " [:span {:style kbd} "=(< $val 100)"] ", "
+             [:span {:style kbd} "=(some? $val)"] " to require it be filled in. It is checked every time "
+             "the sheet recomputes, so a cell can start failing because something it depends on changed, "
+             "not because anyone touched it."]
+            [:p {:style p} "An assertion never blocks an edit — it reports. The cell gets a red corner mark, "
+             "a gold message appears the moment it starts failing (click it to jump there), and a "
+             [:span {:style kbd} "⚠"] " counter in the toolbar lists everything currently failing, including "
+             "cells far outside the screen. Blank the box to remove the claim."])))
 
 (defn- help-sections-b []
   (let [h3 help-h3 p help-p kbd help-kbd]
@@ -1169,6 +1198,48 @@
      "Name a cell (style row → " [:span {:style "font-family:monospace;"} "label"] ") for a friendlier node."]
     [:div {:id "graphview" :style "overflow:auto;max-height:64vh;"}]]])
 
+(defn violations-html
+  "The ⚠ panel's inner list: every failing assertion, sheet-wide.
+
+   This exists because the per-cell wedge cannot answer \"is anything wrong\" —
+   only the rendered window is in the DOM (a few hundred cells out of a possible
+   million), so a violation is usually somewhere you are not looking. It is also
+   what survives a reload, where the toast that first announced it is long gone.
+
+   Each row carries `data-addr`; app.cljs delegates a click on it to the same
+   jump that the address box performs, so a row takes you to the cell."
+  [sh]
+  (let [viols (sheet/assert-violations sh)]
+    (str (h/html
+          (if (empty? viols)
+            [:p {:style "color:var(--muted);margin:.3rem 0;"} "Every assertion holds."]
+            [:ul {:style "list-style:none;margin:0;padding:0;"}
+             (for [[a msg] viols]
+               [:li {:class "violrow" :data-addr a :title "go to this cell"
+                     :style (str "padding:.4rem .5rem;border-bottom:1px solid var(--line);"
+                                 "cursor:pointer;display:flex;gap:.5rem;align-items:baseline;")}
+                [:span {:style "font:600 12px monospace;color:var(--accent);min-width:3.5rem;"} a]
+                [:span msg]])])))))
+
+(defn- violations-modal-html
+  "The ⚠ modal shell, toggled by $violpanel; its #violview inner is re-rendered
+   by /violations on open (and pushed on change), so it is never stale."
+  [sh]
+  [:div {:data-show "$violpanel" :data-on:click "$violpanel=false"
+         :style (str "position:fixed;inset:0;z-index:50;background:rgba(0,0,0,.35);"
+                     "display:flex;align-items:flex-start;justify-content:center;padding:8vh 1rem;")}
+   [:div {:data-on:click "evt.stopPropagation()"
+          :style (str "background:var(--bg);border:1px solid var(--line);border-radius:8px;"
+                      "box-shadow:0 8px 32px rgba(0,0,0,.25);max-width:40rem;width:100%;"
+                      "padding:1rem 1.1rem;font:13px sans-serif;color:var(--fg);")}
+    [:div {:style "display:flex;align-items:center;margin-bottom:.4rem;"}
+     [:h2 {:style "margin:0;font:600 15px sans-serif;flex:1;"} "Assertions"]
+     [:button {:class "btn" :data-on:click "$violpanel=false" :title "close"} "✕"]]
+    [:p {:style "color:var(--muted);margin:.2rem 0 .5rem;"}
+     "Cells whose claim about themselves does not currently hold. Click one to go to it. "
+     "Set a claim with the " [:span {:style "font-family:monospace;"} "⊨"] " button on the formula row."]
+    [:div {:id "violview" :style "overflow:auto;max-height:64vh;"} (h/raw (violations-html sh))]]])
+
 (defn page [sh storage-id sname branch at uid link-token]
   ;; one session id seeds BOTH $sid (sent on /stream, registers the session) and
   ;; #ctl's data-sid (read by the unload beacon) — they must be the same value.
@@ -1210,7 +1281,11 @@
                 ;; …and a pale wash of each alert colour, mixed the same way
                 ;; --accent-bg is for --accent (a toast tints its whole card).
                 "--accent-bg:#eaf4fc;--lime:#7cc62e;--lime-bg:#f2f9e8;"
-                "--danger:#c0392b;--danger-bg:#fdeeec;--radius:4px;}"
+                "--danger:#c0392b;--danger-bg:#fdeeec;"
+                ;; gold = an assertion violation: a statement about the DATA,
+                ;; not about an operation that failed, so it is deliberately
+                ;; neither the red of an error nor the green of a confirmation.
+                "--gold:#d19b12;--gold-bg:#fdf6e3;--radius:4px;}"
                 ;; toolbar: two rows. row 1 = picker/new/share/identity,
                 ;; row 2 = cell-ref + formula bar. .tool/.btn unify the inputs
                 ;; and buttons that used to repeat the same inline style string.
@@ -1280,6 +1355,14 @@
                 "text-wrap:pretty;"
                 "box-shadow:0 2px 10px rgba(0,0,0,.18);animation:toastin .18s ease-out;}"
                 ".toast.err{background:var(--danger-bg);border-color:var(--danger);}"
+                ;; an assertion violation: gold, and like an error it does NOT
+                ;; auto-dismiss — the number is still wrong when the animation
+                ;; would have ended. It carries a cell, so it also gets a
+                ;; pointer affordance for "click to go there".
+                ".toast.warn{background:var(--gold-bg);border-color:var(--gold);}"
+                ".btn.viol{background:var(--gold-bg);border-color:var(--gold);color:var(--fg);}"
+                ".violrow:hover{background:var(--accent-bg);}"
+                ".toast.warn[data-addr]{text-decoration-color:var(--gold);}"
                 ;; ONE animation on an info card, not an entrance plus a
                 ;; lifetime: `animationend` is what removes the node, and a
                 ;; second animation would fire it early. So the fade-in is the
@@ -1350,6 +1433,11 @@
                                ;; text itself is the cell's hover title).
                                ".cell.noted::after{content:'';position:absolute;top:0;right:0;"
                                "border-top:5px solid var(--accent);border-left:5px solid transparent;}"
+                               ;; cell whose assertion currently fails: the same
+                               ;; flag idea in the OPPOSITE corner, so a cell can
+                               ;; carry a comment and a violation at once.
+                               ".cell.badassert::before{content:'';position:absolute;bottom:0;left:0;"
+                               "border-bottom:5px solid var(--danger);border-right:5px solid transparent;}"
                                "#editor{position:absolute;width:%dpx;height:%dpx;"
                                "box-sizing:border-box;border:1px solid var(--accent);"
                                "padding:2px 4px;font:13px monospace;outline:none;z-index:6;"
@@ -1450,6 +1538,14 @@
                                               (str/join "," (map name (:all border-sides))))
              ;; collapsible toolbar sections (formula bar stays; others toggle)
              :data-signals:fmtbar "false"
+             ;; ⊨ assertion lever: the row's visibility + the selected cell's claim
+             :data-signals:assertbar "false"
+             :data-signals:assertsrc "''"
+             ;; how many cells currently FAIL their assertion, sheet-wide. Seeded
+             ;; server-side so a reload still tells you, and re-pushed to the whole
+             ;; room on every change — a peer's edit can break your assertion.
+             :data-signals:nviol (str (count (sheet/assert-violations sh)))
+             :data-signals:violpanel "false"
              ;; current multi-selection as space-separated "TL:BR" ranges, kept
              ;; LIVE by app.cljs so selection-wide actions (clear / style / …) use it
              :data-signals:selcells "''"
@@ -1507,6 +1603,7 @@
       (when-not asof? (h/raw (agentkey-html (auth/agent-key-info uid))))
       (when-not asof? (history-modal storage-id sname branch revisions link-token owner?))
       (when-not asof? (graph-modal-html))
+      (when-not asof? (violations-modal-html sh))
       ;; only reachable on a non-main branch — main is never deleted
       (when (and (not asof?) (not= branch db/MAIN))
         (branch-gone-html (sheet-href storage-id sname db/MAIN link-token owner?)))
@@ -1533,6 +1630,14 @@
                     :data-on:click "$fmtbar = !$fmtbar" :title "format / style controls"} "🎨"]
           [:button {:class "btn" :data-on:click "$defspanel=true" :title "sheet definitions (reusable functions)"} "ƒ"]
           [:button {:class "btn" :data-on:click "$graphpanel=true, @post('/graph')" :title "dependency graph"} "🕸"]
+          ;; Only shown when something IS failing: a permanent "0 problems" badge
+          ;; is furniture people stop seeing, and the whole job of this button is
+          ;; to be noticed. It is also the only surface that survives a reload —
+          ;; the toast that first reported the violation is long gone by then.
+          [:button {:class "btn viol" :data-show "$nviol > 0"
+                    :data-on:click "$violpanel=true, @post('/violations')"
+                    :title "cells whose assertion does not hold"}
+           "⚠ " [:span {:data-text "$nviol"}]]
           (when owner?
             [:button {:class "btn" :data-on:click "$propspanel=true" :title "sheet properties"} "⚙"])
           [:button {:class "btn" :data-on:click "$histpanel=true" :title "history — view an earlier revision"} "🕘"]
@@ -1586,6 +1691,16 @@
                  :data-on:blur "$cell=$sel, @post('/cell'), $edit=false, @post('/presence')"
                  :style "flex:1;"})]
        [:button {:class "btn" :title "big editor" :data-on:click "$big=$v, $bigwhat='v', $bigedit=true"} "⤢"]
+       ;; ASSERTION lever: a claim about the selected cell's own value, checked
+       ;; on every recompute. It lives here rather than in the 🎨 style row
+       ;; because it is about the DATA, not its presentation — and it is a lever
+       ;; rather than a permanent field because most cells never carry one, and a
+       ;; third always-on row would cost every sheet the vertical space.
+       [:span {:class "grp"}
+        [:button {:class "btn" :title "assertion — a claim about this cell, e.g. =(> $val 0). Flags the cell when it stops holding; never blocks an edit."
+                  :data-on:click (str "$assertbar = !$assertbar;"
+                                      "const c=document.getElementById('c_'+$sel);"
+                                      "c && (" assert-read-js ")")} "⊨"]]
        ;; flatten: server computes the inlined+simplified source of the selected
        ;; formula cell and opens it in the big editor — Apply there posts /cell.
        ;; `strict` modifies THIS action only, so the two share one .grp frame.
@@ -1594,6 +1709,19 @@
                   :data-on:click "@post('/flatten')"} "⧉"]
         [:label {:class "opt" :title "strict: only simplify rules that preserve error behavior exactly (skip e.g. (+ x 0) → x, which turns a blank-ref error into a blank)"}
          [:input {:type "checkbox" :data-bind:flatstrict ""}] "strict"]]])
+      ;; the lever's input: hidden until ⊨ opens it, and pre-filled from the
+      ;; selected cell (`data-sty` already carries every prop the cell has).
+      (when-not asof?
+       [:div {:class "toolrow" :data-show "$assertbar"}
+        [:span {:style "font:11px sans-serif;color:var(--muted);"} "⊨ assert"]
+        [:input (merge no-autofill
+                 {:id "assertbox" :class "tool mono" :data-bind:assertsrc ""
+                  :placeholder "=(> $val 0) — a claim about this cell; blank removes it"
+                  :data-on:keydown "evt.key==='Enter' && @post('/assert')"
+                  :style "flex:1;"})]
+        [:button {:class "btn" :title "apply to the selected cell" :data-on:click "@post('/assert')"} "set"]
+        [:button {:class "btn" :title "remove the assertion from the selected cell"
+                  :data-on:click "$assertsrc='', @post('/assert')"} "clear"]])
       ;; ── toolbar row 3: style of the selected cell (collapsible) ────────
       ;; prop dropdown + a literal-or-=formula source, applied to $sel on Enter
       ;; (like the formula bar — no separate button). $val is the cell's own
@@ -1704,7 +1832,7 @@
              :data-on:sr-select__window
              (str "const c=document.getElementById('c_'+evt.detail.addr);"
                   "$sel=evt.detail.addr; $v=c?(c.dataset.raw||''):'';"
-                  "c ? (" style-read-js ") : ($stylesrc='');"
+                  "c ? (" style-read-js ", " assert-read-js ") : ($stylesrc='', $assertsrc='');"
                   "$edit=false; $celledit=false; @post('/presence')")
              ;; start editing in-cell: load the cell's source into $v, take the edit
              ;; lock, and reveal the floating editor (app.cljs already positioned it)

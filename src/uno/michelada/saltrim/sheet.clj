@@ -479,6 +479,74 @@
   [sheet addr]
   (= layer-over (get (style-srcs sheet addr) layer-prop)))
 
+;; --- assertions ---------------------------------------------------------
+;;
+;; A cell can carry a claim about its own value — `=(> $val 0)` — that is checked
+;; on every recompute. It rides the same per-property plumbing as a style (one
+;; more prop, compiled by `compile-style`, `$val` bound to the owner's value), so
+;; it is reactive, persisted, branched, merged, as-of'd and undoable for free.
+;;
+;; An assertion FLAGS, it never rejects a write. Excel-style validation refuses
+;; the input, which is the wrong model here: this engine is reactive, so a cell
+;; goes invalid because something ELSE changed — there is no keystroke at the
+;; failing cell to refuse, and in a shared sheet the person who typed may not be
+;; the person watching. So a violation is reported, and the number stays.
+
+(def assert-prop
+  "The prop holding a cell's assertion — a formula over its own `$val`. Like
+   `:merge`/`:layer` it is a metadata prop on the ordinary cellprop path, and
+   like them it is NOT in the style-bar dropdown: it has its own input, because
+   it is a claim about the data rather than a way of showing it."
+  :assert)
+
+(defn assert-violation
+  "nil when `addr` carries no assertion, or it currently HOLDS. Otherwise a
+   message saying how it failed.
+
+   Deliberately not `style-value`: that stringifies, and `false` would come back
+   as the (truthy, non-empty) string \"false\" — every failing assertion would
+   read as passing. This derefs the spin raw.
+
+   Truthy holds; `false`/`nil` fails; a formula that THROWS also fails, rather
+   than being swallowed — an assertion you cannot evaluate is not one you may
+   assume. A literal (no leading `=`) can never be false, so it is reported as
+   the mistake it is instead of passing forever."
+  [{:keys [rt styles] :as sheet} addr]
+  (when-let [{:keys [kind raw spin]} (get-in @styles [addr assert-prop])]
+    (case kind
+      :literal (str "not a formula — write =(…), e.g. =(> $val 0): " (str/trim (str raw)))
+      :formula (if-let [culprit (degraded? sheet)]
+                 (wedged-msg culprit)
+                 (binding [ec/*execution-context* rt]
+                   (try (let [v (deref spin EVAL-TIMEOUT-MS ::timeout)]
+                          (cond
+                            (= ::timeout v) (:error (wedge! sheet {:addr addr :prop assert-prop}))
+                            v               nil          ; holds
+                            :else           (str "does not hold: " (str/trim (str raw)))))
+                        (catch NullPointerException _
+                          ;; nil reached an operator that can't take it, and on a
+                          ;; formula over `$val` that is nearly always the cell
+                          ;; simply being empty. The raw NPE ("Cannot invoke
+                          ;; Object.getClass() because x is null") tells the user
+                          ;; nothing, so say what happened and how to say what
+                          ;; they meant — `(some? $val)` if the assertion IS that
+                          ;; the cell is filled in.
+                          (str "could not be checked: the cell is empty"
+                               " — use =(some? $val) to require a value,"
+                               " or give it a default like =(> (or $val 0) 0)"))
+                        (catch Exception e
+                          (str "could not be checked: " (.getMessage e)))))))))
+
+(defn assert-violations
+  "{addr msg} for every cell whose assertion currently fails. The sheet-wide
+   answer to \"is anything wrong\", which per-cell marks cannot give: only the
+   rendered window is on screen, and a violation is usually somewhere else."
+  [{:keys [styles] :as sheet}]
+  (into (sorted-map)
+        (keep (fn [addr]
+                (when-let [msg (assert-violation sheet addr)] [addr msg])))
+        (keys @styles)))
+
 (defn parse-span
   "\"<rows>x<cols>\" -> [rows cols] (both positive), or nil for a blank/garbage/
    1×1 span (a 1×1 merge is a no-op, so it never counts as a merge)."

@@ -95,9 +95,19 @@ visual of the copied range.
   engine (type `'123` for literal text). Deferred: SUMIF/COUNTIF criteria,
   approximate VLOOKUP, 3D refs, named ranges, merged regions, .xls legacy
   (see TECHDEBT).
-- **Logic audit / assertions** — per-cell assertions (`=(assert …)`) that flag
-  violations; reuses the formula path + reactive recompute. (SCI already shipped,
-  so `let`/`fn` are available.)
+- **Logic audit / assertions** ✅ SHIPPED *(branch `feat/assertions`)* — a cell
+  can carry a claim about its own value (`=(> $val 0)`), checked on every
+  recompute. It is an `:assert` prop on the ordinary cellprop path, so it
+  persists, branches, merges, time-travels and undoes for free; `$val` binds like
+  it does for a style formula. Truthy holds; `false`/`nil`/THROWS all fail (an
+  assertion you cannot evaluate is not one you may assume), and a literal without
+  `=` is reported as the mistake it is rather than passing forever. It FLAGS and
+  never rejects a write — the engine is reactive, so a cell goes invalid because
+  something *else* changed and there is no keystroke to refuse. Surfaced three
+  ways: a gold `:warn` toast on the pass→fail TRANSITION only (coalesced into one
+  summary past 3 cells, broadcast to the whole room since a peer's edit can break
+  your cell, click to scroll there), a bottom-left wedge on the cell, and a `⚠ n`
+  counter + panel that survives a reload. `⊨` on the formula row sets one.
 
 ## Strategic (the boss fight)
 - **Cells → Datahike** ✅ SHIPPED *(branch `feat/db-sheet-storage`)* — sheet
