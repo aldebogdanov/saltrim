@@ -49,6 +49,37 @@
             (swap! sheets* assoc room rec)
             rec)))))
 
+;; --- assertion violations -------------------------------------------------
+;; An assertion is a STATE, not an event: a cell does not "violate" once, it IS
+;; violating until someone fixes it. Reporting on every evaluation would mean ten
+;; identical cards for one unchanged problem, because editing anything upstream
+;; re-checks it. So the room remembers which cells were failing, and only a
+;; TRANSITION is news.
+;;
+;; The set lives on the room (not the session) because it is a property of the
+;; sheet: every session in the room sees the same violations, and a peer's edit
+;; is exactly the case where you need to hear about it.
+
+(defn violations
+  "The addresses currently known to be failing in `room` ({addr msg})."
+  [room]
+  (get-in @sheets* [room :violations] {}))
+
+(defn refresh-violations!
+  "Re-check `room`'s assertions and store the result. Returns
+   `{:now {addr msg} :new {addr msg} :fixed #{addr}}` — `:new` is what just
+   started failing (the only thing worth a toast), `:fixed` what just stopped."
+  [room sh]
+  (let [before (violations room)
+        now    (sheet/assert-violations sh)]
+    (when (@sheets* room)
+      (swap! sheets* assoc-in [room :violations] now))
+    {:now   now
+     ;; a cell already failing for a DIFFERENT reason counts as news again: the
+     ;; message is what the user acts on, so a changed one is a changed problem
+     :new   (into (sorted-map) (remove (fn [[a m]] (= m (get before a)))) now)
+     :fixed (into (sorted-set) (remove (set (keys now))) (keys before))}))
+
 (defn save-rec!
   "Persist a loaded room's content to the db (branch-scoped), authored by
    `author` uid (the acting user — recorded per changed cell for per-user undo).

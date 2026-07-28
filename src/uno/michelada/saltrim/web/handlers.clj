@@ -24,8 +24,8 @@
             [uno.michelada.saltrim.web.geom :refer [block-of clamp-view in-window? known-formula-error? pretty-err qparam url-decode url-encode window]]
             [uno.michelada.saltrim.web.state :refer [accessible-rec can-read? def-editor-of edit-lock locked-by-other? now owner-of save-rec! session-view sessions* set-session-view! sheets* sid-re unload-sheet!]]
             [uno.michelada.saltrim.web.sse :refer [patch-inner! read-signals signals! sse sse-opts webkit-ua?]]
-            [uno.michelada.saltrim.web.render :refer [border-prop border-props cells-layer-html colhead-html css-errors denied-page graph-svg import-error-html import-report-html login-page merge-result-html meta-html page prop-allowed? render-cells rowhead-html self-html share-html]]
-            [uno.michelada.saltrim.web.collab :refer [broadcast! broadcast-deflib-except! broadcast-presence! broadcast-window! ensure-session! evict-branch-deleted! evict-deleted! push-deflib! reap-session! render-window!]]))
+            [uno.michelada.saltrim.web.render :refer [border-prop border-props cells-layer-html colhead-html css-errors denied-page graph-svg import-error-html import-report-html login-page merge-result-html meta-html page prop-allowed? render-cells rowhead-html self-html share-html violations-html]]
+            [uno.michelada.saltrim.web.collab :refer [broadcast! broadcast-deflib-except! broadcast-presence! broadcast-window! ensure-session! evict-branch-deleted! evict-deleted! push-deflib! reap-session! render-window! report-violations!]]))
 
 (defn- log-err!
   "Server-side CLI visibility for a handler failure — the toast reaches only
@@ -150,7 +150,13 @@
     (when (seq visible)
       (d*/patch-elements! gen (render-cells sh visible view)))
     (signals! gen {:err (if (seq errs) (str/join "; " errs) "")})
-    (broadcast! sid room sh affected)))
+    (broadcast! sid room sh affected)
+    ;; Re-check assertions AFTER the cells are pushed. Not scoped to `affected`:
+    ;; an assertion is about a cell's own value, but that value can be a formula
+    ;; reading half the sheet, so an edit here can break a claim anywhere. The
+    ;; report only speaks on a TRANSITION, and it goes to the whole room —
+    ;; including the editor, whose own edit this was.
+    (report-violations! room sh)))
 
 ;; --- per-session undo/redo --------------------------------------------------
 ;; Each session (≈ a tab) keeps a stack of the edits IT made; the selective-undo
@@ -773,6 +779,55 @@
               (catch Throwable e
                 (log-err! "/celllayer" e)
                 (signals! gen {:err (pretty-err (.getMessage e))})))))))))
+
+(defn handle-assert
+  "Set (or clear, when blank) the ASSERTION on the selected cell — a claim about
+   its own value, e.g. `=(> $val 0)`, checked on every recompute.
+
+   Single-cell on purpose, unlike `/style`: a claim usually belongs to one cell,
+   and stamping the same `$val` predicate across a rectangle is much more often a
+   mistake than an intent. It writes through the same `set-style!` path as any
+   other prop, so undo, paste, branch merge and as-of carry it for free.
+
+   The write always SUCCEEDS, even when the new assertion immediately fails —
+   that is the whole model: an assertion reports, it never refuses. The report
+   comes from `push-changes!`, which re-checks the sheet."
+  [req]
+  (with-access req
+    (fn [uid sheet-id rec {:keys [sid sel assertsrc]} gen]
+      (ensure-session! sid sheet-id (:branch rec) uid (:token rec))
+      (let [sh  (:sh rec)
+            src (str assertsrc)]
+        (cond
+          (not= :read-write (:level rec))
+          (signals! gen {:err "read-only access — you can't edit this sheet"})
+          (not (addr/valid? sel))
+          (signals! gen {:err "select a cell first"})
+          :else
+          (locking (edit-lock (:room rec))
+            (try
+              (let [before (get (sheet/style-srcs sh sel) sheet/assert-prop)]
+                (sheet/set-style! sh sel sheet/assert-prop src)
+                (record-edit! sid sel sheet/assert-prop before
+                              (get (sheet/style-srcs sh sel) sheet/assert-prop)))
+              (sheet/settle! sh)
+              (save-rec! (:room rec) uid)
+              (push-changes! gen sid (:room rec) sh [sel])
+              (catch Throwable e
+                (log-err! "/assert" e)
+                ;; a MALFORMED assertion (bad syntax) is an error like any other
+                ;; bad formula — distinct from a well-formed one that is false
+                (signals! gen {:err (str sel " assertion: " (pretty-err (.getMessage e)))})))))))))
+
+(defn handle-violations
+  "Re-render the ⚠ panel's list for the requesting session. The panel is opened
+   from a count that is already live, but the LIST is rendered on demand so it
+   can never show a violation that has since been fixed."
+  [req]
+  (with-access req
+    (fn [uid sheet-id rec {:keys [sid]} gen]
+      (ensure-session! sid sheet-id (:branch rec) uid (:token rec))
+      (patch-inner! gen "#violview" (violations-html (:sh rec))))))
 
 (defn handle-agentkey
   "Mint/rotate or revoke the signed-in user's ACCOUNT agent key (the MCP

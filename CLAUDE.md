@@ -375,5 +375,19 @@ nil editor-sid = every session sees it live) and return COMPUTED values so the
 agent gets the reactive feedback loop. Tool descriptions push FORMULAS over
 pasted numbers. Caps: `MAX-READ-CELLS` 2000 (truncates, not errors),
 `MAX-WRITE-CELLS` 1000. Spike: `spikes/08-mcp-transport.clj`.
-Cheap win left: cell assertions (`=(assert …)`). See `TECHDEBT.md` for
-deferred items.
+**Cell assertions** are DONE: a cell carries a claim about its own value
+(`:assert` prop, `$val` bound like a style formula, `sheet/assert-violation` /
+`assert-violations`). Truthy holds; `false`/`nil`/throw fail; a literal (no `=`)
+is reported as a mistake, since it could never be false. It FLAGS, never rejects
+— reactivity means a cell breaks because something ELSE changed, so there is no
+keystroke to refuse. An assertion is a STATE but a toast is an EVENT, so
+`state/refresh-violations!` diffs against the room's previous set and only a
+TRANSITION speaks (`collab/report-violations!`, hooked into BOTH edit seams:
+`push-changes!` for per-cell edits and `broadcast-window!` for structural ones —
+editing a `def` can change every value on the sheet). Gold `:warn` is a third
+toast kind, no auto-dismiss, one card per cell up to `MAX-WARN-CARDS` (3) then a
+summary; it carries `data-addr`, and a delegated CAPTURE-phase click listener in
+`app.cljs` scrolls there (`jump!`) — capture because the card's own
+`data-on:click` removes it first. `⚠ n` (`$nviol`) + the `/violations` panel are
+what survive a reload and what cover the ~99.9% of the sheet the window never
+renders. See `TECHDEBT.md` for deferred items.

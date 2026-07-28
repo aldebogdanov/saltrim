@@ -554,6 +554,22 @@
     (when-let [ab ($ "addrbox")]
       (.addEventListener ab "keydown"
                          (fn [e] (when (= "Enter" (.-key e)) (.preventDefault e) (jump! (cur-sel))))))
+    ;; Anything carrying a `data-addr` navigates to that cell when clicked: an
+    ;; assertion toast, a row of the ⚠ panel. Scrolling there is the point — a
+    ;; violation is almost always OUTSIDE the rendered window, so merely selecting
+    ;; it (which the server could do on its own) would name a cell you still
+    ;; cannot see. One delegated listener on the document covers every such
+    ;; element, including ones patched in later, with nothing to re-bind.
+    ;;
+    ;; CAPTURE phase deliberately: a toast card also carries
+    ;; `data-on:click="el.remove()"`, and in the bubble phase the node can already
+    ;; be detached by the time this runs.
+    (.addEventListener js/document "click"
+                       (fn [e]
+                         (when-let [t (some-> (.-target e) (.closest "[data-addr]"))]
+                           (when-let [a (.getAttribute t "data-addr")]
+                             (jump! a))))
+                       #js {:capture true})
     (drag-thumb! "vbar" "vthumb" true)
     (drag-thumb! "hbar" "hthumb" false)
     ;; a resized window needs a different NUMBER of cells, not just a re-transform

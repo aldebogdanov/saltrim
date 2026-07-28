@@ -3,13 +3,14 @@
    per-room broadcasts (cells, presence, window, definitions) + the /stream push
    generator. reap<->broadcast are mutually recursive, so they live together."
   (:require
+            [clojure.string :as str]
             [uno.michelada.saltrim.auth :as auth]
             [uno.michelada.saltrim.sheet :as sheet]
             [uno.michelada.saltrim.store :as store]
             [starfederation.datastar.clojure.api :as d*]
             [uno.michelada.saltrim.web.geom :refer [in-window? window]]
-            [uno.michelada.saltrim.web.state :refer [ROOM-IDLE-MS SESSION-TTL-MS color-for now sessions* sessions-on sheet-rec sheets* sid-re touch! unload-sheet!]]
-            [uno.michelada.saltrim.web.sse :refer [patch-inner! signals! webkit-flush!]]
+            [uno.michelada.saltrim.web.state :refer [ROOM-IDLE-MS SESSION-TTL-MS color-for now refresh-violations! sessions* sessions-on sheet-rec sheets* sid-re touch! unload-sheet!]]
+            [uno.michelada.saltrim.web.sse :refer [patch-inner! signals! toast! webkit-flush!]]
             [uno.michelada.saltrim.web.render :refer [cells-layer-html colhead-html deflib-html meta-html peers-html render-cells rowhead-html self-html]]))
 
 (defn- register-session! [sid sheet-id branch uid token]
@@ -130,6 +131,50 @@
              (when (:webkit? s) (webkit-flush! sid))
              (catch Throwable _ nil))))))
 
+;; --- assertion violations ----------------------------------------------
+
+(def ^:private MAX-WARN-CARDS
+  "How many individual violation cards one action may raise before they are
+   collapsed into a single summary. One edit can flip a whole column of
+   dependents at once, and fifty cards that do not auto-dismiss would bury the
+   sheet. Three keeps the common case precise (each card names its cell and
+   scrolls there) without that risk."
+  3)
+
+(defn report-violations!
+  "Announce an assertion change to EVERY session in `room` — the editor
+   included, since it is their own edit they need to hear about, and peers
+   because a violation they are looking at may be one someone else caused.
+
+   Only transitions are announced (`refresh-violations!` does the diffing), so a
+   problem that was already there stays quiet. `$nviol` rides along on every
+   call: it is the live count behind the ⚠ button, which is how a violation
+   OUTSIDE the rendered window — the usual case on a real sheet — stays visible
+   at all, and how one survives a reload."
+  [room sh]
+  (let [{:keys [now new fixed]} (refresh-violations! room sh)
+        cards (cond
+                (empty? new) nil
+                (<= (count new) MAX-WARN-CARDS)
+                (mapv (fn [[a m]] [(str "⚠ " a " " m) a]) new)
+                :else
+                [[(str "⚠ " (count new) " cells now fail their assertion: "
+                       (str/join ", " (take MAX-WARN-CARDS (keys new)))
+                       ", …") nil]])
+        ;; only worth saying when the sheet actually goes clean — "3 fixed, 9 to
+        ;; go" is noise while you are working through them
+        done? (and (seq fixed) (empty? now))]
+    (doseq [[sid s] @sessions*]
+      (when (and (= room (:room s)) (:gen s))
+        (try
+          (d*/lock-sse! (:gen s)
+            (doseq [[msg addr] cards] (toast! (:gen s) :warn msg addr))
+            (when done? (toast! (:gen s) :info "✓ all assertions hold again"))
+            (signals! (:gen s) {:nviol (count now)}))
+          (when (:webkit? s) (webkit-flush! sid))
+          (catch Throwable _ (reap-session! sid)))))
+    now))
+
 ;; --- presence (collaborator cursors + edit locks) ----------------------
 
 (defn broadcast-presence!
@@ -164,7 +209,15 @@
     (when (and (not= sid editor-sid) (= room (:room s)) (:gen s))
       (try (d*/lock-sse! (:gen s) (render-window! (:gen s) sid room sh (:view s)))
            (when (:webkit? s) (webkit-flush! sid))
-           (catch Throwable _ (reap-session! sid))))))
+           (catch Throwable _ (reap-session! sid)))))
+  ;; This is the STRUCTURAL-edit seam — insert/delete a line, merge cells, resize,
+  ;; edit the sheet's definitions, apply a branch merge — where `push-changes!`
+  ;; covers the per-cell edits. Between them they cover every path that can change
+  ;; a value, so assertions are re-checked from both. A plain scroll calls
+  ;; `render-window!` WITHOUT this, so it stays out. Redefining a function is the
+  ;; case that makes this matter: it can change what every formula on the sheet
+  ;; computes without touching a single cell.
+  (report-violations! room sh))
 
 (defn push-deflib! [gen sid room]
   (patch-inner! gen "#deflib" (deflib-html sid room)))
