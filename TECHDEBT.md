@@ -159,11 +159,10 @@ REMAINING:
   `:public` into a grant; `accessible-rec` queries `db/access-level`; `handle-
   share` toggles the grant. Sheet ids stay `<owner>__<name>` strings (the uuid
   switch was NOT needed and is deferred).
-  **Now dead code:** that one-shot migration reads `(:public rec)`, but since the
-  file store was retired `store/load-record` hardcodes `:public false`, so the
-  branch can never fire. The legacy flag it migrated only ever lived in the
-  `data/*.edn` files that are no longer read. Both the field and the migration
-  can go.
+  The one-shot `:public` → link migration is **REMOVED**: it read `(:public rec)`,
+  which `store/load-record` has hardcoded to `false` since the file store was
+  retired, so it could never fire. `migrate-everyone->link!` (a DB-grant upgrade,
+  not a file one) stays — an old database can still hold an `:everyone` grant.
 - **Read-only tier + direct user grants — DONE (Datahike step 2b).** Public is
   now a level (`:everyone`/`:read` view OR `:read-write` edit), and owners can
   grant **direct per-user shares** (`:user` kind; resolved by name in dev /
