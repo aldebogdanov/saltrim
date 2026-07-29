@@ -49,6 +49,7 @@
             [org.replikativ.spindel.effects.track :refer [track]]
             [org.replikativ.spindel.effects.await :refer [await]]
             [uno.michelada.saltrim.addr :as addr]
+            [uno.michelada.saltrim.excel :as excel]
             [uno.michelada.saltrim.runtime :as rt]))
 
 ;; --- parse --------------------------------------------------------------
@@ -669,7 +670,11 @@
 
 (def stdlib
   "Predefined functions merged into clojure.core for every formula sandbox.
-   Grouped by category; all pure, none shadowing a clojure.core name."
+   Grouped by category; all pure, none shadowing a clojure.core name.
+
+   Excel's library is deliberately NOT here — it lives behind `xl/` (see the
+   `excel` ns), because the language a formula is written in is Clojure. What
+   Excel has and we want gets a proper Clojure name in this map instead."
   {;; math
    'abs abs
    'ceil    (fn [x] (long (Math/ceil (double x))))
@@ -742,13 +747,15 @@
    'newline no-io 'flush no-io 'read no-io 'read-line no-io})
 
 (defn new-ctx
-  "A fresh per-sheet SCI context: the stdlib merged into clojure.core, then the
+  "A fresh per-sheet SCI context: the stdlib merged into clojure.core, Excel's
+   library under the `xl` alias (interop only — see the `excel` ns), then the
    sheet's user `defs` (a string of top-level forms, e.g. (defn …)) evaluated
    into its namespace, so cells in that sheet can call them. Throws if `defs`
    doesn't evaluate — the caller surfaces it and leaves the sheet unchanged.
    `defs` may be nil/blank (just the stdlib)."
   [defs]
-  (let [ctx (sci/init {:namespaces {'clojure.core stdlib}})]
+  (let [ctx (sci/init {:namespaces {'clojure.core stdlib
+                                    'xl excel/sci-ns}})]
     (when-not (str/blank? defs)
       (sci/eval-string* ctx defs))
     ctx))

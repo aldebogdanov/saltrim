@@ -91,6 +91,36 @@ date over ISO `yyyy-MM-dd` strings (`today`, `year`, `month`, `day`,
 `excel-truthy`, `xmin`, `xmax`, `xround`, `xdate`, `xvlookup`) that the .xlsx
 importer targets.
 
+### Excel interop (`xl/`)
+
+Formulas are Clojure — that doesn't change. But a spreadsheet you **import**
+may call functions SaltRim has no native equivalent for, and rather than freeze
+those cells into dead numbers, they stay live as `xl/` calls:
+
+```clojure
+=(xl/PMT 0.08 10 -1000)      ; 149.03 — as imported from Excel
+```
+
+Around 410 of Excel's functions are reachable that way — financial,
+statistical, text, lookup, engineering, matrix, database. The full list is in
+the **ƒ** panel, folded under *Excel interop*. The prefix is deliberate: seeing
+`xl/` in a cell tells you it came from a spreadsheet, and it maps straight back
+on export. **Prefer the plain stdlib when writing your own formulas.**
+
+Two conventions differ inside `xl/`, and both fail loudly rather than guessing:
+
+- **A range arrives as a column.** Functions wanting a *table* need a reshape:
+  `=(xl/VLOOKUP $A1 (xl/as-rows 2 $B1:C9) 2 false)`.
+- **Dates are Excel serial numbers**, not ISO strings:
+  `=(xl/YEAR (xl/date->serial $A1))`, and `xl/serial->date` back.
+- **Errors keep their spreadsheet names** — dividing by zero reports `#DIV/0!`,
+  not a stack trace.
+
+Functions that only make sense inside Excel's own engine are absent: `IF`,
+`IFERROR`, `MAP`, `REDUCE` and friends (use Clojure's `if`, `if-error`, `map`,
+`reduce`), the volatile `NOW`/`TODAY`/`RAND`, and the handful Excel itself
+leaves unimplemented.
+
 **Empty cells** read as `nil`. The aggregate stdlib functions (`sum`, `mean`,
 `median`, `product`, `variance`, `stdev`) **ignore blanks**, so a roomy range over
 a partially-filled column just works — `=(sum $B1:B20)` sums whatever rows you've
