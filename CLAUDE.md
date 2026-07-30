@@ -375,6 +375,33 @@ nil editor-sid = every session sees it live) and return COMPUTED values so the
 agent gets the reactive feedback loop. Tool descriptions push FORMULAS over
 pasted numbers. Caps: `MAX-READ-CELLS` 2000 (truncates, not errors),
 `MAX-WRITE-CELLS` 1000. Spike: `spikes/08-mcp-transport.clj`.
+**Excel interop** is IN (`excel` ns): ~410 Excel functions behind an **`xl/`
+namespace** — `(xl/PMT 0.08 10 -1000)`, never bare. **The formula language is
+Clojure; Excel is a BOUNDARY, not a second language** (the user rejected merging
+them into the bare namespace — no `=(AVERAGE $A1:A5)`). `xl/` exists so an
+IMPORTED formula whose function we lack stays LIVE instead of demoting to a dead
+cached number, and so EXPORT can map it back exactly; the prefix also makes
+"this came from a spreadsheet" visible in the cell. What Excel has and we WANT
+gets a proper Clojure name in the native stdlib instead — kebab-cased terms of
+art (`pmt`, `irr`, `norm-dist`, `eomonth`, `percentile`, `stdev-p`), Excel's
+positional signature, but SaltRim's conventions (ISO date strings, nil-blanks
+skipped, throws not error values). They
+come from **rechentafel** (`org.replikativ/rechentafel`, Apache-2.0, PINNED) — but
+ONLY its function pack: its evaluator is pull-based dirty/topo recalc, the
+opposite of Spindel, and is never called. `excel/call` is the whole seam:
+`->rv`/`<-rv` translate plain SaltRim values (nil = Excel's BLANK, not 0;
+integral doubles narrow to Long) to/from Excel's tagged maps, and an Excel error
+VALUE becomes an `ex-info` named the way a user knows it (`#DIV/0!`) → the cell's
+`{:error …}`. Inside `xl/` the names stay Excel's own (uppercase, dotted), so a
+translated formula reads like its source. NOT exposed, each for a reason: evaluator-bound fns
+(`IF`/`IFERROR`/`MAP`/… — Clojure has them), VOLATILE fns (no recalc sweep, so
+they would freeze), and upstream's `#N/A` stubs for what POI leaves unimplemented
+(detected by the `na-stub` closure's class; pinned by a test so upstream drift
+FAILS instead of leaking silent `#N/A`s). A flat range is handed over as a
+COLUMN (shape is lost at read time) — rectangles take `(xl/as-rows w …)`, and
+Excel serial dates take `xl/date->serial`/`xl/serial->date` (the native stdlib
+takes ISO strings; only `xl/` speaks serials). Spike: `spikes/09-excel-function-pack.clj`;
+evaluation of what else to take from rechentafel: `doc/rechentafel-evaluation.md`.
 **Cell assertions** are DONE: a cell carries a claim about its own value
 (`:assert` prop, `$val` bound like a style formula, `sheet/assert-violation` /
 `assert-violations`). Truthy holds; `false`/`nil`/throw fail; a literal (no `=`)

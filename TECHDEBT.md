@@ -558,3 +558,61 @@ the longest plausible formula or comment, small enough to bound index growth and
 stay inside backend value limits. That needs numbers from a real sheet, plus a
 decision about what the app does when a write exceeds it (refuse at the UI, with
 a message, rather than throw at save).
+
+## Excel interop (`xl/`) — deferred pieces
+
+The Excel library (`excel` ns, ~410 functions borrowed from rechentafel) landed
+behind an `xl/` namespace, for import/export interop only — the formula language
+stays Clojure. Four known seams are open. None of them silently lies; they
+either work or fail loudly.
+
+- **The native translation layer is not written yet.** What Excel has and we
+  actually want should get a proper Clojure name in `formula/stdlib` — kebab-cased
+  terms of art (`pmt`, `irr`, `npv`, `norm-dist`, `eomonth`, `networkdays`,
+  `percentile`, `stdev-p`), Excel's positional signature, but SaltRim's
+  conventions: ISO date strings rather than 1900 serials, nil-blanks skipped,
+  throws rather than error values. Roughly 120-160 functions once curated. Until
+  that lands, `xl/` is doing double duty as both the interop boundary and the
+  only way to reach those capabilities, which is not what it is for. Watch for
+  collisions with what is already there (`round` vs Excel's 2-arg `ROUND`, the
+  existing `xround`/`xmin`/`xmax`/`xvlookup` importer helpers, and clojure.core
+  names like `find`/`replace`) — the existing names must not change meaning
+  under formulas already saved in people's sheets.
+
+- **Errors are messages, not values.** An Excel function that fails throws an
+  `ex-info` whose message is the spreadsheet name (`#DIV/0!`, `#N/A`) and whose
+  `ex-data` carries `{:excel-error :div0}`. The cell renders that as its
+  `{:error …}`, so the user sees the right word — but a *formula* still cannot
+  branch on it, because SaltRim has no error VALUE. Making the taxonomy real
+  (`#DIV/0! #VALUE! #REF! #NAME? #NUM! #N/A` as first-class values that
+  propagate) would give a genuine `IFNA` (today's `if-error` catches everything,
+  including real bugs), give cell assertions something precise to test, and fold
+  in the existing `deleted-ref` → `#REF!` case, which already reaches for this
+  taxonomy informally. The `ex-data` is already carrying the code for it.
+
+- **Ranges have no shape.** A SaltRim range expands to a FLAT row-major vector,
+  so `$A1:A3` and `$A1:C1` are indistinguishable once read. The adapter picks
+  the useful default — a flat argument becomes a single COLUMN, which is what
+  `SUM`/`SORT`/`UNIQUE`/`FILTER` need — and anything wanting a rectangle takes
+  an explicit `(as-rows w …)`. That is why the native `xvlookup` needs its width
+  argument too. Giving ranges a real shape (a vector of rows, or a flat vector
+  plus `{:rows :cols}`) is the actual fix and would make `VLOOKUP`, `INDEX`,
+  `MATCH`, `MMULT`, `TRANSPOSE` and binop broadcasting work without ceremony —
+  but it changes the runtime shape every existing formula sees, so it needs its
+  own PR and a migration story, not a drive-by.
+
+- **Volatile functions are excluded, and our own `today` has the bug they
+  would have.** `NOW`/`TODAY`/`RAND`/`RANDARRAY`/`RANDBETWEEN` are not exposed:
+  they depend on nothing, and SaltRim has no recalc sweep, so their value would
+  freeze at the cell's last structural rebuild and then differ across branches,
+  merges and as-of views. The native `today` in `formula/stdlib` is exactly that
+  bug already — a sheet open across midnight, or reloaded from the db months
+  later, shows a stale date. Needs a volatility policy (recompute on load? a
+  coarse timer? an explicit "as of" input cell?) before any of them are safe. If
+  `RAND` ever lands, seed it per sheet — a non-deterministic cell makes 3-way
+  merge meaningless.
+
+Also open, smaller: `TEXT` with a date mask returns the serial's digits rather
+than a formatted date (upstream implements the numeric masks only), and the
+`excel` ns is JVM-only — rechentafel is `.cljc`, so a future client-side formula
+preview could use the same pack if the adapter were written portably.

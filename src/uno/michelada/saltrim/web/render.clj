@@ -9,6 +9,7 @@
             [uno.michelada.saltrim.addr :as addr]
             [uno.michelada.saltrim.auth :as auth]
             [uno.michelada.saltrim.db :as db]
+            [uno.michelada.saltrim.excel :as excel]
             [uno.michelada.saltrim.fmt :as fmt]
             [uno.michelada.saltrim.graph :as graph]
             [uno.michelada.saltrim.merge :as mrg]
@@ -728,7 +729,27 @@
               "Built-in functions (read-only)"]
              (for [[cat names] stdlib-reference]
                [:p {:style (str p "margin-left:.4rem;")}
-                [:b cat] ": " [:span {:style kbd} names]])]]]))))
+                [:b cat] ": " [:span {:style kbd} names]])]
+            ;; Excel interop. Deliberately second, deliberately folded, and
+            ;; deliberately not called a stdlib: formulas are Clojure, and this
+            ;; is the boundary for what comes out of (and goes back into) .xlsx.
+            [:details {:style "margin-top:.4rem;"}
+             [:summary {:style "font:600 13px sans-serif;cursor:pointer;color:var(--muted);"}
+              (str "Excel interop — " (count excel/exposed-names) " functions under xl/")]
+             [:p {:style (str p "margin-left:.4rem;color:var(--muted);")}
+              "For imported spreadsheets. Excel's own functions, reached with an "
+              [:span {:style kbd} "xl/"] " prefix — " [:span {:style kbd} "=(xl/PMT 0.08 10 -1000)"]
+              " — so an imported formula stays live and reads as what it is. "
+              "Prefer the Clojure stdlib above when writing your own."]
+             [:p {:style (str p "margin-left:.4rem;color:var(--muted);")}
+              "Ranges arrive as a column; reshape with "
+              [:span {:style kbd} "xl/as-rows"] " when a function wants a table: "
+              [:span {:style kbd} "=(xl/VLOOKUP $A1 (xl/as-rows 2 $B1:C9) 2 false)"]
+              ". Dates here are Excel serials, not ISO strings: "
+              [:span {:style kbd} "=(xl/YEAR (xl/date->serial $A1))"] "."]
+             (for [[cat names] excel/catalog]
+               [:p {:style (str p "margin-left:.4rem;")}
+                [:b cat] ": " [:span {:style kbd} (str/join " " names)]])]]]))))
 
 (defn- props-html
   "Owner-only Sheet properties modal, toggled by $propspanel. Today: the sheet's

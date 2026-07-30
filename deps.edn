@@ -49,6 +49,15 @@
         ;; computed values + presentation. Only the workbook writer is used.
         org.apache.poi/poi-ooxml {:mvn/version "5.5.1"}
 
+        ;; rechentafel — a pure-Clojure Excel formula interpreter. We use ONLY its
+        ;; function pack (`rechentafel.functions` + `rechentafel.fn.*`): ~470
+        ;; POI-cross-validated Excel functions, callable standalone with no
+        ;; workbook and no evaluator. Its own engine (pull-based dirty/topo
+        ;; recalc) is deliberately NOT used — SaltRim's reactive Spindel graph is
+        ;; the opposite model. See doc/rechentafel-evaluation.md. Apache-2.0, so
+        ;; we depend rather than vendor. Young library: PIN the version.
+        org.replikativ/rechentafel {:mvn/version "0.1.5"}
+
         ;; Logging backend for POI (it logs through log4j-api). Without an impl,
         ;; POI prints "Log4j2 could not find a logging implementation …" and falls
         ;; back to a SimpleLogger. Pinned to the log4j-api version POI pulls;
