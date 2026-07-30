@@ -382,10 +382,8 @@ them into the bare namespace — no `=(AVERAGE $A1:A5)`). `xl/` exists so an
 IMPORTED formula whose function we lack stays LIVE instead of demoting to a dead
 cached number, and so EXPORT can map it back exactly; the prefix also makes
 "this came from a spreadsheet" visible in the cell. What Excel has and we WANT
-gets a proper Clojure name in the native stdlib instead — kebab-cased terms of
-art (`pmt`, `irr`, `norm-dist`, `eomonth`, `percentile`, `stdev-p`), Excel's
-positional signature, but SaltRim's conventions (ISO date strings, nil-blanks
-skipped, throws not error values). They
+gets a proper Clojure name in the native stdlib instead — that is the `stdlib`
+ns (below), NOT this one. They
 come from **rechentafel** (`org.replikativ/rechentafel`, Apache-2.0, PINNED) — but
 ONLY its function pack: its evaluator is pull-based dirty/topo recalc, the
 opposite of Spindel, and is never called. `excel/call` is the whole seam:
@@ -402,6 +400,26 @@ COLUMN (shape is lost at read time) — rectangles take `(xl/as-rows w …)`, an
 Excel serial dates take `xl/date->serial`/`xl/serial->date` (the native stdlib
 takes ISO strings; only `xl/` speaks serials). Spike: `spikes/09-excel-function-pack.clj`;
 evaluation of what else to take from rechentafel: `doc/rechentafel-evaluation.md`.
+**The stdlib is its own ns** (`uno.michelada.saltrim.stdlib`, moved out of
+`formula`) and has two halves. HAND-WRITTEN: the functions whose semantics we
+chose (blank-skipping aggregates, ISO date helpers, the `x*` excel-compat shims
+the importer targets, the I/O refusals). BORROWED: ~230 of Excel's, delegating
+to `excel/call` but TRANSLATED — kebab-cased terms of art (`pmt`, `irr`,
+`norm-dist`, `eomonth`, `percentile`, `stdev-p`; dots become dashes, and the two
+that collide with clojure.core get a prefix: `FIND`→`str-find`,
+`SEARCH`→`str-search`), and **ISO date strings in AND out** (`stdlib/date-shape`
+names which arg positions are dates — scalars, columns and optional holiday
+lists all convert — and whether the result is one; only `xl/` speaks serials).
+Curated, not dumped: left out are what Clojure does better (SORT/UNIQUE/FILTER/
+IF), what needs 2D ranges (MMULT/TRANSPOSE/LINEST), the `*A` text-coercion
+variants, the `D*` family and Excel's legacy duplicate spellings — all still
+reachable as `xl/NAME`. **Nothing already in a saved formula changed meaning**:
+`round`/`ceil`/`floor` stay 1-arg (Excel's are `xround`/`ceiling-math`/
+`floor-math`/`mround`), `min`/`max` stay clojure.core's (`xmin`/`xmax` skip
+blanks). A test pins that: no name shadows clojure.core beyond the documented
+allowlist, and every borrowed name still exists upstream. `formula/stdlib` =
+`lib/stdlib` + the `#(…)` fn-literal macro (which stays with the desugaring).
+The ƒ panel's reference is GENERATED from `stdlib/catalog-syms`, so it can't drift.
 **Cell assertions** are DONE: a cell carries a claim about its own value
 (`:assert` prop, `$val` bound like a style formula, `sheet/assert-violation` /
 `assert-violations`). Truthy holds; `false`/`nil`/throw fail; a literal (no `=`)

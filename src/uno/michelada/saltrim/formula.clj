@@ -50,7 +50,8 @@
             [org.replikativ.spindel.effects.await :refer [await]]
             [uno.michelada.saltrim.addr :as addr]
             [uno.michelada.saltrim.excel :as excel]
-            [uno.michelada.saltrim.runtime :as rt]))
+            [uno.michelada.saltrim.runtime :as rt]
+            [uno.michelada.saltrim.stdlib :as lib]))
 
 ;; --- parse --------------------------------------------------------------
 
@@ -638,113 +639,20 @@
           (str/replace #"\$([A-Za-z]+[0-9]+)(?!:)"
                        (fn [[_ a]] (cell-rw "$" a)))))))
 
-;; --- SCI sandbox + stdlib ----------------------------------------------
+
+;; --- SCI sandbox ----------------------------------------------------------
 ;; SCI runs the user expression in a curated, side-effect-free subset of
 ;; clojure.core (real lexical scope, NO host interop the user can reach). On top
-;; we merge a spreadsheet stdlib (math / stats / text / date): plain host fns
-;; exposed by name, callable bare from any formula. Names are chosen NOT to
-;; shadow clojure.core (so map/reduce/str/… keep their meaning). Each sheet gets
-;; its OWN context (isolation) built from this base plus the sheet's user `defs`
-;; — see `new-ctx` (ROADMAP item 2: per-sheet namespace + functions).
-
-(defn- ld ^java.time.LocalDate [s] (java.time.LocalDate/parse (str s)))
-
-;; SCI's core exposes the print/read family, but its *out*/*in* are unbound, so
-;; calling them crashes with an opaque cast (SciUnbound -> Writer). They're also
-;; meaningless here: a formula is PURE and recomputes reactively (no console, and
-;; it would re-fire on every dependency change). Override them to fail clearly.
-(defn- no-io [& _]
-  (throw (ex-info "I/O isn't available in formulas — the sandbox is pure (no console)" {})))
-
-(defn- nums
-  "Keep only the numbers in a cell collection, so aggregates IGNORE blank cells
-   (which resolve to nil) — matching a spreadsheet's SUM/AVERAGE-skip-blanks."
-  [c] (filter number? c))
-
-(defn- mean* [c] (let [c (nums c)] (if (seq c) (/ (double (reduce + 0 c)) (count c)) 0)))
-(defn- var* [c]
-  (let [c (nums c) n (count c)]
-    (if (zero? n) 0
-        (let [m (/ (double (reduce + 0 c)) n)]
-          (/ (reduce + (map #(let [d (- % m)] (* d d)) c)) n)))))
+;; we merge the spreadsheet stdlib (`lib/stdlib` — see the `stdlib` ns), plus
+;; the one entry that has to live here because `formula` owns the desugaring:
+;; `#(…)` fn literals. Each sheet gets its OWN context (isolation) built from
+;; this base plus the sheet's user `defs` — see `new-ctx`.
 
 (def stdlib
-  "Predefined functions merged into clojure.core for every formula sandbox.
-   Grouped by category; all pure, none shadowing a clojure.core name.
-
-   Excel's library is deliberately NOT here — it lives behind `xl/` (see the
-   `excel` ns), because the language a formula is written in is Clojure. What
-   Excel has and we want gets a proper Clojure name in this map instead."
-  {;; math
-   'abs abs
-   'ceil    (fn [x] (long (Math/ceil (double x))))
-   'floor   (fn [x] (long (Math/floor (double x))))
-   'round   (fn [x] (Math/round (double x)))
-   'sqrt    (fn [x] (Math/sqrt (double x)))
-   'pow     (fn [b e] (Math/pow (double b) (double e)))
-   'exp     (fn [x] (Math/exp (double x)))
-   'ln      (fn [x] (Math/log (double x)))
-   'log10   (fn [x] (Math/log10 (double x)))
-   'sign    (fn [x] (long (Math/signum (double x))))
-   'sum     (fn [c] (reduce + 0 (nums c)))
-   'product (fn [c] (reduce * 1 (nums c)))
-   ;; stats — all skip blank (nil) cells, like a spreadsheet
-   'mean   mean*
-   'avg    mean*
-   'median (fn [c] (let [s (vec (sort (nums c))) n (count s)]
-                     (cond (zero? n) 0
-                           (odd? n)  (nth s (quot n 2))
-                           :else (/ (+ (nth s (dec (quot n 2))) (nth s (quot n 2))) 2.0))))
-   'variance var*
-   'stdev    (fn [c] (Math/sqrt (double (var* c))))
-   ;; text
-   'upper        str/upper-case
-   'lower        str/lower-case
-   'trim         str/trim
-   'join         (fn ([c] (str/join c)) ([sep c] (str/join sep c)))
-   'split        (fn [s sep] (vec (str/split (str s) (re-pattern (java.util.regex.Pattern/quote (str sep))))))
-   'str-replace  (fn [s a b] (str/replace (str s) (str a) (str b)))
-   'starts-with? (fn [s p] (str/starts-with? (str s) (str p)))
-   'ends-with?   (fn [s p] (str/ends-with? (str s) (str p)))
-   'includes?    (fn [s p] (str/includes? (str s) (str p)))
-   'blank?       (fn [s] (str/blank? (str s)))
-   ;; date (ISO yyyy-MM-dd strings)
-   'today        (fn [] (str (java.time.LocalDate/now)))
-   'year         (fn [s] (.getYear (ld s)))
-   'month        (fn [s] (.getMonthValue (ld s)))
-   'day          (fn [s] (.getDayOfMonth (ld s)))
-   'days-between (fn [a b] (.between java.time.temporal.ChronoUnit/DAYS (ld a) (ld b)))
-   ;; excel-compat — Excel-semantics helpers the .xlsx importer targets, and
-   ;; useful on their own. `xmin`/`xmax` skip blank (nil) cells like the other
-   ;; aggregates (core min/max would throw); `excel-truthy` is Excel's 0=false;
-   ;; `xround` rounds half AWAY FROM ZERO like Excel's ROUND (Math/round would
-   ;; give -2.5 -> -2, Excel says -3); `xvlookup` is an exact-match VLOOKUP
-   ;; over one of our row-major flat ranges (`w` = the table width in columns).
-   'if-error     (fn [thunk fallback] (try (thunk) (catch Throwable _ fallback)))
-   'excel-truthy (fn [x] (cond (nil? x)     false
-                               (number? x)  (not (zero? x))
-                               (boolean? x) x
-                               :else        true))
-   'xmin  (fn [c] (let [n (nums c)] (when (seq n) (apply min n))))
-   'xmax  (fn [c] (let [n (nums c)] (when (seq n) (apply max n))))
-   'xround (fn [x n]
-             (let [r (.setScale (java.math.BigDecimal. (str (double x))) (int n)
-                                java.math.RoundingMode/HALF_UP)]
-               (if (pos? (int n)) (double r) (long (.longValueExact (.setScale r 0))))))
-   'xdate (fn [y m d] (format "%04d-%02d-%02d" (long y) (long m) (long d)))
-   'xvlookup (fn [k table w col]
-               (some (fn [row] (when (= k (first row)) (nth row (dec (long col)))))
-                     (partition (long w) table)))
-   ;; `#(...)` — see `desugar-fn-literals`. A macro, so `%` is resolved on the
-   ;; FORM and a `%` inside a string literal stays data.
-   FN-LITERAL (with-meta fn-literal-macro {:sci/macro true})
-   ;; what a reference is rewritten to when the row/column it pointed at is
-   ;; deleted (see `delete-shift`) — always throws, naming what was lost
-   'deleted-ref (fn [what]
-                  (throw (ex-info (str "#REF! — " what " was deleted") {:ref what})))
-   ;; I/O (see no-io): clear "not available" instead of an opaque cast crash
-   'println no-io 'print no-io 'prn no-io 'pr no-io 'printf no-io
-   'newline no-io 'flush no-io 'read no-io 'read-line no-io})
+  "Everything callable bare in a formula: the standard library, plus the
+   `#(…)` fn-literal macro (a macro so `%` is resolved on the FORM, leaving a
+   `%` inside a string literal as data — see `desugar-fn-literals`)."
+  (assoc lib/stdlib FN-LITERAL (with-meta fn-literal-macro {:sci/macro true})))
 
 (defn new-ctx
   "A fresh per-sheet SCI context: the stdlib merged into clojure.core, Excel's

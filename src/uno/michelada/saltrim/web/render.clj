@@ -14,6 +14,7 @@
             [uno.michelada.saltrim.graph :as graph]
             [uno.michelada.saltrim.merge :as mrg]
             [uno.michelada.saltrim.sheet :as sheet]
+            [uno.michelada.saltrim.stdlib :as lib]
             [uno.michelada.saltrim.store :as store]
             [uno.michelada.saltrim.version :as version]
             [uno.michelada.saltrim.constants :refer [CW RH GUT HDR OVER BAR]]
@@ -689,12 +690,17 @@
 
 (def ^:private stdlib-reference
   "Read-only reference of the built-in functions (always available, can't be
-   edited), grouped by category."
-  [["math"  "sum product abs ceil floor round sqrt pow exp ln log10 sign"]
-   ["stats" "mean avg median variance stdev"]
-   ["text"  "upper lower trim join split str-replace starts-with? ends-with? includes? blank?"]
-   ["date"  "today year month day days-between  (ISO yyyy-MM-dd strings)"]
-   ["excel-compat" "if-error excel-truthy xmin xmax xround xdate xvlookup  (Excel semantics — the .xlsx importer targets these)"]])
+   edited), grouped by category. The hand-written groups are spelled out here;
+   the borrowed ones come from `stdlib/catalog-syms`, so the panel cannot drift
+   from what is actually installed."
+  (concat
+   [["core math"  "sum product abs ceil floor round sqrt pow exp ln log10 sign  ·  pi as-rows"]
+    ["core stats" "mean avg median variance stdev"]
+    ["core text"  "upper lower trim join split str-replace starts-with? ends-with? includes? blank?"]
+    ["core date"  "today year month day days-between  (ISO yyyy-MM-dd strings)"]
+    ["excel-compat" "if-error excel-truthy xmin xmax xround xdate xvlookup  (Excel semantics — the .xlsx importer targets these)"]]
+   (for [[cat syms] lib/catalog-syms]
+     [cat (str/join " " syms)])))
 
 (defn- defs-html
   "The definitions LIBRARY modal, toggled by $defspanel. The editable library
@@ -737,10 +743,10 @@
              [:summary {:style "font:600 13px sans-serif;cursor:pointer;color:var(--muted);"}
               (str "Excel interop — " (count excel/exposed-names) " functions under xl/")]
              [:p {:style (str p "margin-left:.4rem;color:var(--muted);")}
-              "For imported spreadsheets. Excel's own functions, reached with an "
-              [:span {:style kbd} "xl/"] " prefix — " [:span {:style kbd} "=(xl/PMT 0.08 10 -1000)"]
-              " — so an imported formula stays live and reads as what it is. "
-              "Prefer the Clojure stdlib above when writing your own."]
+              "The long tail, for imported spreadsheets: Excel's own names behind an "
+              [:span {:style kbd} "xl/"] " prefix — " [:span {:style kbd} "=(xl/DSUM …)"]
+              " — so a formula we don't translate natively still stays live. "
+              "Anything listed above is already here under a Clojure name; use that instead."]
              [:p {:style (str p "margin-left:.4rem;color:var(--muted);")}
               "Ranges arrive as a column; reshape with "
               [:span {:style kbd} "xl/as-rows"] " when a function wants a table: "

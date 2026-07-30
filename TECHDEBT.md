@@ -566,18 +566,24 @@ behind an `xl/` namespace, for import/export interop only — the formula langua
 stays Clojure. Four known seams are open. None of them silently lies; they
 either work or fail loudly.
 
-- **The native translation layer is not written yet.** What Excel has and we
-  actually want should get a proper Clojure name in `formula/stdlib` — kebab-cased
-  terms of art (`pmt`, `irr`, `npv`, `norm-dist`, `eomonth`, `networkdays`,
-  `percentile`, `stdev-p`), Excel's positional signature, but SaltRim's
-  conventions: ISO date strings rather than 1900 serials, nil-blanks skipped,
-  throws rather than error values. Roughly 120-160 functions once curated. Until
-  that lands, `xl/` is doing double duty as both the interop boundary and the
-  only way to reach those capabilities, which is not what it is for. Watch for
-  collisions with what is already there (`round` vs Excel's 2-arg `ROUND`, the
-  existing `xround`/`xmin`/`xmax`/`xvlookup` importer helpers, and clojure.core
-  names like `find`/`replace`) — the existing names must not change meaning
-  under formulas already saved in people's sheets.
+- **The native translation layer is DONE** (`stdlib` ns, ~230 borrowed
+  functions under kebab-cased Clojure names, ISO dates at the boundary). What it
+  consciously left out, and would be worth revisiting:
+  - **2D-shaped functions** — `MMULT`, `MINVERSE`, `MDETERM`, `TRANSPOSE`,
+    `LINEST`, `LOGEST`, `TREND`, `GROWTH` all take and/or return rectangles, and
+    a SaltRim range is flat. They stay `xl/`-only until ranges carry a shape
+    (next item).
+  - **Times of day.** `HOUR`/`MINUTE`/`SECOND`/`TIME`/`TIMEVALUE` are not
+    translated because SaltRim has no time-of-day convention — dates are ISO
+    `yyyy-MM-dd` strings with no clock part. Adding one is a design decision
+    (ISO-8601 datetime strings? a separate type?), not a translation.
+  - **`CEILING`/`FLOOR` proper** are absent: our `ceil`/`floor` are 1-arg and
+    must stay that way, so Excel's round-to-a-multiple pair is exposed under its
+    modern names `ceiling-math`/`floor-math`. Slightly surprising if you came
+    from Excel; the alternative was changing what `floor` means.
+  - **`EVEN`/`ODD`** are absent on purpose — as functions returning rounded
+    integers they sit one character away from clojure.core's `even?`/`odd?`
+    predicates, which is a footgun for the sake of two rarely-used roundings.
 
 - **Errors are messages, not values.** An Excel function that fails throws an
   `ex-info` whose message is the spreadsheet name (`#DIV/0!`, `#N/A`) and whose
