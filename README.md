@@ -83,13 +83,49 @@ Formulas that depend on other cells recompute automatically when those cells
 change. Circular references are rejected. Errors show as `#ERR` in the cell and
 a toast message describing what went wrong.
 
-A **stdlib** is available bare in every formula: math (`sum`, `product`, `round`,
-`sqrt`, `pow`, `sign`, …), stats (`mean`/`avg`, `median`, `variance`, `stdev`),
-text (`upper`, `lower`, `trim`, `join`, `split`, `str-replace`, `includes?`, …),
-date over ISO `yyyy-MM-dd` strings (`today`, `year`, `month`, `day`,
-`days-between`), and excel-compat helpers with Excel semantics (`if-error`,
-`excel-truthy`, `xmin`, `xmax`, `xround`, `xdate`, `xvlookup`) that the .xlsx
-importer targets.
+A **stdlib** is available bare in every formula. The core of it is
+hand-written: math (`sum`, `product`, `round`, `sqrt`, `pow`, `sign`, …), stats
+(`mean`/`avg`, `median`, `variance`, `stdev`), text (`upper`, `lower`, `trim`,
+`join`, `split`, `str-replace`, `includes?`, …), dates over ISO `yyyy-MM-dd`
+strings (`today`, `year`, `month`, `day`, `days-between`), and excel-compat
+helpers (`if-error`, `excel-truthy`, `xmin`, `xmax`, `xround`, `xdate`,
+`xvlookup`) that the .xlsx importer targets.
+
+On top of that sit **~230 functions borrowed from Excel's library** and given
+Clojure names — the numerics a spreadsheet is expected to have, without the
+spreadsheet:
+
+```clojure
+=(pmt 0.08 10 -1000)              ; 149.03 — a loan payment
+=(irr $B1:B9)                     ; and the rest of the financial pack
+=(norm-dist $A1 40 1.5 true)      ; distributions, regression, rank
+=(percentile $A1:A99 0.9)
+=(eomonth $A1 1)                  ; "2026-08-31" — dates in, dates out
+=(vlookup $A1 (as-rows 2 $B1:C9) 2 false)
+=(convert 1 "lbm" "kg")
+```
+
+Names are the terms of art, kebab-cased: Excel's dots become dashes
+(`STDEV.P` → `stdev-p`, `T.DIST.2T` → `t-dist-2t`), and the two whose Excel
+name clojure.core already owns get a prefix (`FIND` → `str-find`,
+`SEARCH` → `str-search`). The full list is in the **ƒ** panel.
+
+Three things worth knowing:
+
+- **Dates are ISO strings**, not Excel serial numbers — in *and* out.
+  `=(eomonth "2026-07-29" 1)` gives `"2026-08-31"`, and a whole column of dates
+  works too: `=(xirr $B1:B9 $C1:C9)`.
+- **A range is a flat vector.** Functions wanting a table take a reshape:
+  `(as-rows 2 $B1:C9)`.
+- **Nothing that already worked changed.** `round` is still 1-arg (Excel's
+  2-arg rounding is `xround`), `ceil`/`floor` are still 1-arg (round-to-a-multiple
+  is `ceiling-math` / `floor-math` / `mround`), and `min`/`max` are still
+  Clojure's (`xmin`/`xmax` skip blanks).
+
+What's deliberately *not* borrowed: anything Clojure already does better
+(`SORT`, `UNIQUE`, `FILTER`, `IF` → `sort`, `distinct`, `filter`, `if`), the
+`AVERAGEA`-style text-coercion variants, the database `D*` family, and Excel's
+legacy duplicate spellings. Those remain reachable as `xl/…`.
 
 ### Excel interop (`xl/`)
 
@@ -101,11 +137,12 @@ those cells into dead numbers, they stay live as `xl/` calls:
 =(xl/PMT 0.08 10 -1000)      ; 149.03 — as imported from Excel
 ```
 
-Around 410 of Excel's functions are reachable that way — financial,
-statistical, text, lookup, engineering, matrix, database. The full list is in
-the **ƒ** panel, folded under *Excel interop*. The prefix is deliberate: seeing
-`xl/` in a cell tells you it came from a spreadsheet, and it maps straight back
-on export. **Prefer the plain stdlib when writing your own formulas.**
+Around 410 of Excel's functions are reachable that way — the ~230 already
+carrying Clojure names above, plus the long tail we chose not to translate
+(matrix, database, the legacy spellings). The full list is in the **ƒ** panel,
+folded under *Excel interop*. The prefix is deliberate: seeing `xl/` in a cell
+tells you it came from a spreadsheet, and it maps straight back on export.
+**When writing your own formulas, use the Clojure name.**
 
 Two conventions differ inside `xl/`, and both fail loudly rather than guessing:
 
