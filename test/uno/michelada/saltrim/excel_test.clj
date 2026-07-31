@@ -118,6 +118,6 @@
     (let [s (sh/create-sheet)]
       (sh/set-cell! s "A1" "0")
       (sh/set-cell! s "B1" "=(xl/MOD 1 $A1)")
-      (is (= {:error "#DIV/0!"} (v s "B1")))
+      (is (= {:error "#DIV/0!" :code :div0} (v s "B1")))
       (sh/set-cell! s "A1" "3")
       (is (= 1 (v s "B1")) "recovers when the dependency changes"))))

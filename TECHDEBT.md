@@ -559,6 +559,26 @@ stay inside backend value limits. That needs numbers from a real sheet, plus a
 decision about what the app does when a write exceeds it (refuse at the UI, with
 a message, rather than throw at save).
 
+## Errors as VALUES (so a guard can catch a propagated one)
+
+`errors` classifies a failure and the cell shows its code, and `if-error` /
+`if-na` / `error-type` let a formula branch — but only on a failure raised by
+the expression they wrap. An error arriving from a REFERENCED cell cannot be
+caught: `formula/compile` hoists every ref out of the body and awaits it before
+the body runs (the CPS breakpoints must be literal), so the exception reaches
+the cell before any guard exists. `(if-error (/ $A1 $B1) 0)` works;
+`(if-error $A1 0)` over an already-broken A1 does not. `errors-test`
+(`propagation-is-not-catchable`) pins the current behaviour so this cannot
+change silently.
+
+Excel does not have this problem because an error there is a VALUE that flows
+through every operator, first-error-wins. Matching that means cells returning
+`{:error …}` instead of throwing, and every operator becoming error-aware —
+otherwise `(+ <error> 1)` is a ClassCastException and `#NUM!` degrades to
+`#VALUE!`, losing the original cause. That is a formula-runtime change, not a
+patch: it touches the compiler, the stdlib, the aggregates (do they skip errors
+like blanks?) and `simplify`. Worth doing, worth its own design pass.
+
 ## Excel interop (`xl/`) — deferred pieces
 
 The Excel library (`excel` ns, ~410 functions borrowed from rechentafel) landed

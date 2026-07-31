@@ -9,6 +9,7 @@
             [uno.michelada.saltrim.addr :as addr]
             [uno.michelada.saltrim.auth :as auth]
             [uno.michelada.saltrim.db :as db]
+            [uno.michelada.saltrim.errors :as errors]
             [uno.michelada.saltrim.excel :as excel]
             [uno.michelada.saltrim.fmt :as fmt]
             [uno.michelada.saltrim.graph :as graph]
@@ -47,7 +48,9 @@
   (let [v    (sheet/value sh a)
         mask (sheet/style-value sh a :format)]   ; nil / string / {:error}
     (cond (nil? v) ""
-          (map? v) "#ERR"
+          ;; an error shows WHICH failure it is (#DIV/0!, #N/A, …); the message
+          ;; behind it rides the tooltip — see `cell-html`
+          (map? v) (errors/label v)
           (string? mask) (fmt/apply-mask mask v)
           :else (str v))))
 
@@ -210,6 +213,9 @@
         raw  (or (sheet/raw sh a) disp)
         srcs (sheet/style-srcs sh a)       ; {prop raw} -> echoed into the style bar
         note (let [c (sheet/style-value sh a :comment)] (when (string? c) (not-empty c)))
+        ;; the detail behind an error label — a cast failure's Java sentence, say.
+        ;; Nothing for a plain Excel error, whose message IS the label already.
+        why  (errors/detail (sheet/value sh a))
         ;; a failing assertion marks the cell (bottom-left wedge — `:comment`
         ;; owns the top-right one, and a cell can carry both)
         bad  (sheet/assert-violation sh a)
@@ -226,7 +232,7 @@
            :data-raw raw
            ;; both can be present: the comment is what the cell is FOR, the
            ;; violation what is wrong with it right now
-           :title (not-empty (str/join "\n" (remove nil? [note (when bad (str "⚠ " bad))])))
+           :title (not-empty (str/join "\n" (remove nil? [note why (when bad (str "⚠ " bad))])))
            :data-sty (when (seq srcs) (json/write-value-as-string srcs))
            ;; the cell fills its WHOLE slot (it used to stop a pixel short, which
            ;; is what left a gap between two cells sharing a bg) and the grid
@@ -483,6 +489,22 @@
              [:span {:style kbd} "=(sum $B1:B20)"] " works even with empty rows. In plain arithmetic "
              "wrap a maybe-blank cell to treat it as zero: " [:span {:style kbd} "=(+ (or $B5 0) 1)"] "."]
 
+            [:div {:style h3} "When a cell fails"]
+            [:p {:style p} "A broken cell shows WHICH failure it is — "
+             [:span {:style kbd} "#DIV/0!"] ", " [:span {:style kbd} "#VALUE!"] ", "
+             [:span {:style kbd} "#N/A"] ", " [:span {:style kbd} "#REF!"] ", "
+             [:span {:style kbd} "#NAME?"] ", " [:span {:style kbd} "#NUM!"] " — with the details on "
+             "hover. " [:span {:style kbd} "#ERR"] " is the catch-all for anything else, and "
+             [:span {:style kbd} "#TIMEOUT!"] " means a formula never finished. Errors travel: a cell "
+             "reading a broken one breaks the same way."]
+            [:p {:style p} "Formulas can handle a failure instead of showing it: "
+             [:span {:style kbd} "=(if-error (/ $A1 $B1) 0)"] " falls back to 0, "
+             [:span {:style kbd} "if-na"] " catches ONLY a lookup miss (so a real bug still surfaces), "
+             "and " [:span {:style kbd} "error-type"] " / " [:span {:style kbd} "error?"] " let you "
+             "branch: " [:span {:style kbd} "=(if (= :na (error-type (vlookup …))) \"none\" \"ok\")"] ". "
+             "These guard the expression you wrap — they can't catch an error that arrived from "
+             "another cell, which reaches this one before the formula runs."]
+
             [:div {:style h3} "Reusable functions (ƒ)"]
             [:p {:style p} "The " [:span {:style kbd} "ƒ"] " button (top bar) opens this sheet's "
              "definitions library: write your own functions/constants as separate entries and call "
@@ -698,7 +720,8 @@
     ["core stats" "mean avg median variance stdev"]
     ["core text"  "upper lower trim join split str-replace starts-with? ends-with? includes? blank?"]
     ["core date"  "today year month day days-between  (ISO yyyy-MM-dd strings)"]
-    ["excel-compat" "if-error excel-truthy xmin xmax xround xdate xvlookup  (Excel semantics — the .xlsx importer targets these)"]]
+    ["excel-compat" "excel-truthy xmin xmax xround xdate xvlookup  (Excel semantics — the .xlsx importer targets these)"]
+    ["errors" "if-error if-na error-type error?  (catch a failure in the expression; error-type gives :div0 :na :value :ref :name :num)"]]
    (for [[cat syms] lib/catalog-syms]
      [cat (str/join " " syms)])))
 
