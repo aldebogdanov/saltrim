@@ -82,6 +82,7 @@ clojure -T:build cljs         # one-shot :advanced /app.js (needed before -M:web
                               # on a fresh checkout — app.js is gitignored)
 clojure -M:web                # one-shot server on :8080 (open ?s=<sheet-id>)
 clojure -X:test               # engine + addr + store + fmt suites
+clojure -M:bench [sizes…]     # engine benchmarks (in-memory sheets, no db/ports)
 node --check resources/public/app.js
 
 clojure -T:build uber             # compiles /app.js then builds a runnable uberjar

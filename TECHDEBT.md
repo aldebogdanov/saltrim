@@ -559,6 +559,81 @@ stay inside backend value limits. That needs numbers from a real sheet, plus a
 decision about what the app does when a write exceeds it (refuse at the UI, with
 a message, rather than throw at save).
 
+## Sheet load is order-dependent, and the order is a hash order
+
+Found by the benchmark suite. Installing the SAME 300-cell dependency chain
+costs 897 ms in dependency order, 3.9 s in hash-map order, and **111.7 s**
+reversed — 125x between best and worst, on identical cells. At 1000 cells the
+`chain` shape builds in 3.3 s and loads in 32.4 s.
+
+The mechanism is the blank-cell rule doing its job at the worst possible moment.
+A formula whose reference does not exist yet binds a fresh nil-spin; filling
+that blank later is a STRUCTURAL change, so `set-cell!` rebuilds the dependents
+to capture the real node (this is what makes a reference to a not-yet-filled
+cell reactive at all — see the empty-cell note). Install a chain back-to-front
+and every single insert re-triggers that cascade over everything already placed.
+
+`load-document!` iterates the document MAP, so the order is whatever the hash
+gives — and `store/load-record` hands it exactly such a map. Nobody chose this
+order; it is not stable across Clojure versions either. So the time to open a
+sheet is decided by hashing.
+
+Two fixes, either of which would do:
+
+- **Install in dependency order.** The document already contains the formulas,
+  so the dep graph is derivable before anything is installed — topologically
+  sort, then install. Cells in a cycle (impossible today, since cycles are
+  rejected) or with dangling refs go last.
+- **Suppress rebuilds during a bulk load.** Add a bulk mode where `set-cell!`
+  skips the dependent rebuild, then do ONE rebuild pass over the whole sheet at
+  the end. Simpler to reason about, and it also fixes the import path, which has
+  the same shape.
+
+The second is probably the better one: it is order-independent by construction
+rather than merely order-correct, and `load-document!` is explicitly documented
+as order-independent — today that is true of the RESULT but very much not of
+the cost.
+
+## A formula can await at most ~250 cells (JVM 255-argument limit)
+
+Found by the benchmark suite (`clojure -M:bench`), which is why it exists.
+`=(sum $A1:A250)` works; `=(sum $A1:A260)` does not — it fails to COMPILE with
+
+    java.lang.ClassFormatError: Too many arguments in method signature
+
+A range expands statically to one `await` per cell, and Spindel's CPS transform
+nests a continuation per await, each carrying every previously-bound value as a
+method argument. Past ~250 the generated continuation method exceeds the JVM's
+hard cap of 255 arguments. The exact ceiling depends on how many other locals
+the formula has, so it is not a number we can quote — only a region.
+
+Three things make this worse than the raw limit:
+
+- **It throws out of `set-cell!`** rather than becoming a cell error, so the
+  user gets a failure toast about a ClassFormatError instead of "that range is
+  too big". `load-document!` is tolerant and keeps the cell as an error, so the
+  SAME formula crashes when typed and loads quietly when reopened — the sheet
+  is in a state the editor cannot reproduce.
+- **Every configured cap is far above it**: `MAX-DYN-RANGE` is 10 000 and the
+  importer's `max-range-cells` is 4 096. Both promise ranges an order of
+  magnitude larger than the engine can actually compile, so a .xlsx with
+  `SUM(A1:A1000)` — utterly ordinary — imports and then fails.
+- `=(sum $A1:A1000)` is not an exotic formula. This is a real ceiling on real
+  spreadsheets.
+
+The cheap mitigation is a guard: reject a range wider than the safe limit at
+compile time with a message naming the limit, and lower `MAX-DYN-RANGE` /
+`max-range-cells` to match. That turns a crash into an explanation but does not
+raise the ceiling.
+
+The actual fix is for a range reference to compile to ONE await of a collection
+rather than N awaits of cells — the runtime would resolve the whole range in a
+single breakpoint. That changes the dependency graph's shape (a range edge
+instead of N cell edges), which touches `formula/compile`, `runtime/lookup`,
+`sheet/deps`, the graph view and the dynamic-ref cycle check. Worth doing: it
+lifts the ceiling AND shrinks the per-cell dep bookkeeping that `star`/
+`aggregate` shapes show as the dominant build cost.
+
 ## Errors as VALUES (so a guard can catch a propagated one)
 
 `errors` classifies a failure and the cell shows its code, and `if-error` /
