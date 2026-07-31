@@ -34,6 +34,7 @@
    the way a spreadsheet user knows it (`#NUM!`, `#DIV/0!`), and the sheet layer
    renders that as the cell's `{:error …}`."
   (:require [clojure.string :as str]
+            [uno.michelada.saltrim.errors :as errors]
             [uno.michelada.saltrim.excel :as excel]))
 
 ;; --- hand-written ----------------------------------------------------------
@@ -61,6 +62,54 @@
     (if (zero? n) 0
         (let [m (/ (double (reduce + 0 c)) n)]
           (/ (reduce + (map #(let [d (- % m)] (* d d)) c)) n)))))
+
+;; --- error branching -------------------------------------------------------
+;; Excel's IFERROR / IFNA / ERROR.TYPE, as macros so the guarded expression is
+;; not evaluated before it can be guarded. They expand to a call on the host fn
+;; OBJECT below rather than a name, so the sandbox gains no helper vars — and to
+;; a host `try`, because SCI's own `catch` cannot resolve a class name.
+;;
+;; WHAT THEY CATCH — and this is the sharp edge: a failure raised while
+;; evaluating the expression ITSELF. `(if-error (/ $A1 $B1) 0)` catches the
+;; division. `(if-error $A1 0)` where A1 is already `#NUM!` does NOT: cell
+;; references are hoisted out of the body and awaited before it runs (the CPS
+;; breakpoints have to be literal — see SPEC), so a referenced cell's error
+;; arrives before any guard here can see it. Excel propagates errors as VALUES
+;; through every operator, which is what would be needed to close that gap; see
+;; TECHDEBT.
+
+(defn- catch-error [thunk fallback]
+  (try (thunk) (catch Throwable _ (fallback))))
+
+(defn- catch-na [thunk fallback]
+  (try (thunk)
+       (catch Throwable e
+         (if (= :na (errors/classify e)) (fallback) (throw e)))))
+
+(defn- caught-code [thunk]
+  (try (thunk) nil (catch Throwable e (errors/classify e))))
+
+(defn- unthunk
+  "The .xlsx importer emits `(if-error (fn [] EXPR) fallback)` — it had to, back
+   when `if-error` was an ordinary function. Those formulas are saved in real
+   sheets, so a zero-arg `fn` wrapper is unwrapped rather than double-wrapped."
+  [expr]
+  (if (and (seq? expr) (= 'fn (first expr))
+           (vector? (second expr)) (empty? (second expr)))
+    (cons 'do (drop 2 expr))
+    expr))
+
+(defn- if-error-macro [_&form _&env expr fallback]
+  (list catch-error (list 'fn [] (unthunk expr)) (list 'fn [] fallback)))
+
+(defn- if-na-macro [_&form _&env expr fallback]
+  (list catch-na (list 'fn [] (unthunk expr)) (list 'fn [] fallback)))
+
+(defn- error-type-macro [_&form _&env expr]
+  (list caught-code (list 'fn [] (unthunk expr))))
+
+(defn- error?-macro [_&form _&env expr]
+  (list 'some? (list caught-code (list 'fn [] (unthunk expr)))))
 
 (def hand-written
   "The functions SaltRim implements itself — the ones whose semantics we chose
@@ -110,7 +159,10 @@
    ;; `xround` rounds half AWAY FROM ZERO like Excel's ROUND (Math/round would
    ;; give -2.5 -> -2, Excel says -3); `xvlookup` is an exact-match VLOOKUP
    ;; over one of our row-major flat ranges (`w` = the table width in columns).
-   'if-error     (fn [thunk fallback] (try (thunk) (catch Throwable _ fallback)))
+   'if-error     (with-meta if-error-macro {:sci/macro true})
+   'if-na        (with-meta if-na-macro {:sci/macro true})
+   'error-type   (with-meta error-type-macro {:sci/macro true})
+   'error?       (with-meta error?-macro {:sci/macro true})
    'excel-truthy (fn [x] (cond (nil? x)     false
                                (number? x)  (not (zero? x))
                                (boolean? x) x

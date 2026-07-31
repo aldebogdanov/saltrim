@@ -80,16 +80,17 @@ literal all work.
 `(quote x)`. Nested `#()` is rejected, same as in Clojure.)
 
 Formulas that depend on other cells recompute automatically when those cells
-change. Circular references are rejected. Errors show as `#ERR` in the cell and
-a toast message describing what went wrong.
+change. Circular references are rejected. A cell that fails shows which failure
+it was (`#DIV/0!`, `#N/A`, …) plus a toast describing it — see
+[When a cell fails](#when-a-cell-fails).
 
 A **stdlib** is available bare in every formula. The core of it is
 hand-written: math (`sum`, `product`, `round`, `sqrt`, `pow`, `sign`, …), stats
 (`mean`/`avg`, `median`, `variance`, `stdev`), text (`upper`, `lower`, `trim`,
 `join`, `split`, `str-replace`, `includes?`, …), dates over ISO `yyyy-MM-dd`
 strings (`today`, `year`, `month`, `day`, `days-between`), and excel-compat
-helpers (`if-error`, `excel-truthy`, `xmin`, `xmax`, `xround`, `xdate`,
-`xvlookup`) that the .xlsx importer targets.
+helpers (`excel-truthy`, `xmin`, `xmax`, `xround`, `xdate`, `xvlookup`) that the
+.xlsx importer targets.
 
 On top of that sit **~230 functions borrowed from Excel's library** and given
 Clojure names — the numerics a spreadsheet is expected to have, without the
@@ -126,6 +127,42 @@ What's deliberately *not* borrowed: anything Clojure already does better
 (`SORT`, `UNIQUE`, `FILTER`, `IF` → `sort`, `distinct`, `filter`, `if`), the
 `AVERAGEA`-style text-coercion variants, the database `D*` family, and Excel's
 legacy duplicate spellings. Those remain reachable as `xl/…`.
+
+### When a cell fails
+
+A broken cell shows **which** failure it is, not a blanket `#ERR`:
+
+| | |
+|---|---|
+| `#DIV/0!` | divided by zero |
+| `#VALUE!` | wrong type — text where a number was needed |
+| `#N/A` | a lookup found nothing |
+| `#REF!` | the referenced cell was deleted |
+| `#NAME?` | no such function or name |
+| `#NUM!` | a number outside the function's domain |
+| `#TIMEOUT!` | the formula never finished |
+| `#ERR` | anything else |
+
+Hover the cell for the detail behind the label. Errors travel: a cell reading a
+broken one breaks the same way, keeping the original code.
+
+Formulas can handle a failure instead of displaying it:
+
+```clojure
+=(if-error (/ $A1 $B1) 0)                              ; fall back
+=(if-na (vlookup $A1 (as-rows 2 $B1:C9) 2 false) "—")  ; ONLY a lookup miss
+=(if (= :na (error-type (vlookup …))) "none" "ok")     ; branch on the code
+=(error? (/ $A1 $B1))                                  ; predicate
+```
+
+`if-na` is the careful one: it catches a miss and lets a genuine bug through,
+where `if-error` swallows everything.
+
+These guard **the expression you wrap**. They can't catch an error arriving from
+another cell — references are resolved before the formula body runs, so the
+error reaches the cell first. (Excel can, because there an error is a value that
+flows through operators; doing the same here is a bigger change, tracked in
+`TECHDEBT.md`.)
 
 ### Excel interop (`xl/`)
 
