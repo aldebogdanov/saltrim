@@ -96,6 +96,18 @@ On top of that sit **~230 functions borrowed from Excel's library** and given
 Clojure names — the numerics a spreadsheet is expected to have, without the
 spreadsheet:
 
+A **stdlib** is available bare in every formula. The core of it is
+hand-written: math (`sum`, `product`, `round`, `sqrt`, `pow`, `sign`, …), stats
+(`mean`/`avg`, `median`, `variance`, `stdev`), text (`upper`, `lower`, `trim`,
+`join`, `split`, `str-replace`, `includes?`, …), dates over ISO `yyyy-MM-dd`
+strings (`today`, `year`, `month`, `day`, `days-between`), and excel-compat
+helpers (`if-error`, `excel-truthy`, `xmin`, `xmax`, `xround`, `xdate`,
+`xvlookup`) that the .xlsx importer targets.
+
+On top of that sit **~230 functions borrowed from Excel's library** and given
+Clojure names — the numerics a spreadsheet is expected to have, without the
+spreadsheet:
+
 ```clojure
 =(pmt 0.08 10 -1000)              ; 149.03 — a loan payment
 =(irr $B1:B9)                     ; and the rest of the financial pack
