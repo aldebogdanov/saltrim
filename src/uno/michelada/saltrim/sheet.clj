@@ -5,6 +5,10 @@
    - :registry {addr -> public Spin}      every non-blank cell (lookup / await)
    - :vals     {addr -> SignalRef}         editable input of literal cells
    - :meta     {addr -> {:raw :kind :deps}} document layer (raw text, etc.)
+   - :readers  {addr -> #{addrs}}          :meta's :deps INVERTED, maintained on
+     every write. Not derived state anyone can rebuild lazily: rendering an edit,
+     rebuilding dependents and refusing a cycle all ask 'who reads this cell?',
+     and answering it by scanning :meta made every one of them O(sheet).
 
    Literal cell  = SignalRef (value) + a wrapper Spin (deref (track sig)).
    Formula cell  = Spin compiled from an `=`-expression; refs other cells via
@@ -26,6 +30,7 @@
         vals     (atom {})
         meta     (atom {})
         dyn      (atom {})        ; addr -> #{resolved dynamic-ref targets} (see rt/lookup-dyn)
+        readers  (atom {})        ; addr -> #{addrs whose :deps name it} (inverse of :meta)
         slow     (atom nil)       ; the cell that wedged the sheet, if any (see below)
         styles   (atom {})
         cols     (atom {})        ; ci -> width-px  (sparse; falls back to @dcw)
@@ -36,8 +41,8 @@
         defs     (atom [])        ; library: ordered vector of chunks {:id :src} (persisted)
         rt       (ctx/create-execution-context
                   {:metadata {:registry registry :vals vals :meta meta :dyn dyn}})]
-    {:rt rt :registry registry :vals vals :meta meta :dyn dyn :slow slow
-     :styles styles
+    {:rt rt :registry registry :vals vals :meta meta :dyn dyn :readers readers
+     :slow slow :styles styles
      :cols cols :rows rows :dcw dcw :drh drh :sci sci :defs defs}))
 
 (defn- classify [raw]
@@ -57,13 +62,44 @@
       (re-matches #"[-+]?\d*\.\d+([eE]\d+)?" t) (Double/parseDouble t)
       :else                                     t)))
 
+(defn- reindex-readers!
+  "Point the `:readers` index at `addr`'s NEW dependencies and drop the edges its
+   previous ones held. Must be called in the same breath as the `:meta` write
+   that changes `:deps` — it reads the OLD deps from `:meta`, so it has to run
+   BEFORE that write, and an index that misses an edge is not a slow answer but a
+   wrong one (a dependent that never rebuilds, a cycle that is not refused)."
+  [{:keys [meta readers]} addr new-deps]
+  (let [old (set (get-in @meta [addr :deps]))
+        new (set new-deps)]
+    (when (not= old new)
+      (swap! readers
+             (fn [idx]
+               (as-> idx i
+                 (reduce (fn [m d] (let [s (disj (get m d) addr)]
+                                     (if (seq s) (assoc m d s) (dissoc m d))))
+                         i (remove new old))
+                 (reduce (fn [m d] (update m d (fnil conj #{}) addr))
+                         i (remove old new))))))))
+
 (defn- rdeps
-  "Addresses whose formula references `addr` — statically (:deps) or via a
-   currently-resolved dynamic ref (the :dyn registry)."
-  [meta dyn addr]
+  "Addresses whose formula references `addr` — statically (the maintained
+   `:readers` index) or via a currently-resolved dynamic ref.
+
+   The dynamic half is still a scan, deliberately: `:dyn` holds an entry only for
+   a cell that HAS a dynamic ref, which on almost every sheet is none, and those
+   edges are written from `rt/lookup-dyn` on executor threads, where keeping a
+   second index in step would be a lock to get wrong."
+  [{:keys [readers dyn]} addr]
   (distinct
-   (concat (keep (fn [[a m]] (when (contains? (:deps m) addr) a)) @meta)
+   (concat (get @readers addr)
            (keep (fn [[a ts]] (when (contains? ts addr) a)) @dyn))))
+
+(defn- read-by-anything?
+  "Does any cell currently reference `addr`? Same question as `rdeps`, answered
+   without building the seq — this runs on every install."
+  [{:keys [readers dyn]} addr]
+  (boolean (or (seq (get @readers addr))
+               (some (fn [[_ ts]] (contains? ts addr)) @dyn))))
 
 (defn- would-cycle?
   "Would installing `addr` with `new-deps` create a cycle? True if `addr` is
@@ -72,19 +108,32 @@
    dynamic cycle is refused up front; a cycle a future recompute creates is the
    runtime guard's job, see rt/lookup-dyn). Catches self-ref and indirect
    cycles. Must run BEFORE compile — a cyclic formula deadlocks await into
-   StackOverflowError."
-  [meta dyn addr new-deps]
-  (let [deps-of (fn [c] (if (= c addr)
-                          new-deps            ; installing: OLD dyn edges are void
-                          (into (set (get-in @meta [c :deps])) (get @dyn c))))]
-    (loop [stack (vec new-deps) seen #{}]
-      (if-let [c (peek stack)]
-        (let [stack (pop stack)]
-          (cond
-            (= c addr)  true
-            (seen c)    (recur stack seen)
-            :else       (recur (into stack (deps-of c)) (conj seen c))))
-        false))))
+   StackOverflowError.
+
+   The walk is skipped outright when NOTHING references `addr`, which is the
+   common case and used to be the expensive one. A cycle through `addr` has to
+   come back INTO it, so it needs an edge x -> addr; with no such edge there is
+   nothing to find, whatever the ancestry below looks like. Installing a cell
+   nobody reads yet — a fresh formula, the next cell down a column, every cell of
+   an import in dependency order — is therefore O(1) instead of a walk of its
+   whole ancestry, which was ~65% of the cost of building a deep chain.
+   A self-reference is the one cycle whose in-edge comes from the install itself,
+   so it is checked directly rather than left to the walk."
+  [{:keys [meta dyn] :as sheet} addr new-deps]
+  (let [new-deps (set new-deps)]
+    (or (contains? new-deps addr)
+        (and (read-by-anything? sheet addr)
+             (let [deps-of (fn [c] (if (= c addr)
+                                     new-deps   ; installing: OLD dyn edges are void
+                                     (into (set (get-in @meta [c :deps])) (get @dyn c))))]
+               (loop [stack (vec new-deps) seen #{}]
+                 (if-let [c (peek stack)]
+                   (let [stack (pop stack)]
+                     (cond
+                       (= c addr)  true
+                       (seen c)    (recur stack seen)
+                       :else       (recur (into stack (deps-of c)) (conj seen c))))
+                   false)))))))
 
 (defn- check-addr!
   "Refuse an address the grid can't hold. The engine is the LAST gate before an
@@ -101,7 +150,7 @@
 (defn- write-cell!
   "Local update of one cell. Returns true if addr's PUBLIC spin object was
    created/replaced/removed (structural change -> dependents must rebuild)."
-  [{:keys [registry vals meta dyn sci]} addr raw]
+  [{:keys [registry vals meta dyn sci] :as sheet} addr raw]
   (check-addr! addr)
   (let [prev-kind (get-in @meta [addr :kind])
         old-spin  (get @registry addr)]
@@ -110,6 +159,7 @@
       (do (when old-spin (spin-core/cleanup-spin! old-spin))
           (swap! registry dissoc addr)
           (swap! vals dissoc addr)
+          (reindex-readers! sheet addr nil)
           (swap! meta dissoc addr)
           (swap! dyn dissoc addr)
           true)
@@ -128,6 +178,7 @@
             ;; value (raw said 99, the cell still read 5).
             (reset! vs v)
             (swap! vals assoc addr vs)))
+        (reindex-readers! sheet addr nil)
         (swap! meta assoc addr {:raw raw :kind :literal})
         (swap! dyn dissoc addr)
         (if (= prev-kind :literal)
@@ -138,7 +189,7 @@
 
       :formula
       (let [{:keys [form deps]} (formula/parse (subs (str/trim raw) 1) addr)
-            _  (when (would-cycle? meta dyn addr deps)
+            _  (when (would-cycle? sheet addr deps)
                  (throw (ex-info "circular reference" {:addr addr :deps deps})))
             sp (formula/compile @sci form addr)]
         (when old-spin (spin-core/cleanup-spin! old-spin))
@@ -146,6 +197,7 @@
         ;; keeps the old spin, whose recorded dynamic edges must survive
         (swap! dyn dissoc addr)
         (swap! registry assoc addr sp)
+        (reindex-readers! sheet addr deps)
         (swap! meta assoc addr (cond-> {:raw raw :kind :formula :deps deps}
                                  (formula/dynamic? form) (assoc :dyn? true)))
         true))))
@@ -157,42 +209,28 @@
    live (a later edit of the old target then resumes a stale body slice and
    caches a wrong value — reproduced in spike 07). Structural rebuild is the
    cure, so `set-cell!` rebuilds these even for value-only edits."
-  [meta dyn addr]
+  [{:keys [meta] :as sheet} addr]
   (loop [seen #{addr} frontier [addr] out #{}]
     (if-let [a (peek frontier)]
       (let [frontier (pop frontier)
-            new      (remove seen (rdeps meta dyn a))]
+            new      (remove seen (rdeps sheet a))]
         (recur (into seen new) (into frontier new)
                (into out (filter #(get-in @meta [% :dyn?]) new))))
       out)))
 
-(defn- reverse-edges
-  "The whole reverse-dependency graph in one pass: addr -> #{addrs referencing
-   it}, over static `:deps` plus currently-recorded dynamic edges. `rdeps`
-   answers the same question for ONE address by scanning every cell, which is
-   what a single edit wants and what a bulk load cannot afford (a scan per cell
-   is quadratic in the sheet)."
-  [meta dyn]
-  (let [add (fn [idx a ds] (reduce (fn [m d] (update m d (fnil conj #{}) a)) idx ds))]
-    (as-> {} idx
-      (reduce-kv (fn [m a mm] (add m a (:deps mm))) idx @meta)
-      (reduce-kv (fn [m a ts] (add m a ts)) idx @dyn))))
-
 (defn- stranded-dependents
   "Cells OUTSIDE `loaded` that reach one of them over the reverse graph — the
-   cells a bulk load can leave holding a spin object it just replaced. Computed
-   from one `reverse-edges` index rather than a scan per step.
+   cells a bulk load can leave holding a spin object it just replaced.
 
    Traversal runs THROUGH the loaded cells (they are the starting frontier) so a
    dependent two hops out is found, but they are never reported: a cell the load
    installed has a brand-new spin, and a brand-new spin has captured nothing."
-  [meta dyn loaded]
-  (let [rev (reverse-edges meta dyn)]
-    (loop [frontier (vec loaded) seen (set loaded) out #{}]
-      (if-let [a (peek frontier)]
-        (let [new (remove seen (get rev a))]
-          (recur (into (pop frontier) new) (into seen new) (into out new)))
-        out))))
+  [sheet loaded]
+  (loop [frontier (vec loaded) seen (set loaded) out #{}]
+    (if-let [a (peek frontier)]
+      (let [new (remove seen (rdeps sheet a))]
+        (recur (into (pop frontier) new) (into seen new) (into out new)))
+      out)))
 
 (declare rebuild-styles!)
 
@@ -224,10 +262,10 @@
                   (vswap! visited conj a)
                   (when (write-cell! sheet a r)
                     (vswap! replaced conj a)
-                    (doseq [d (rdeps meta dyn a)]
+                    (doseq [d (rdeps sheet a)]
                       (go d (get-in @meta [d :raw]))))))]
         (go addr raw)
-        (doseq [d (dyn-dependents meta dyn addr)]
+        (doseq [d (dyn-dependents sheet addr)]
           (go d (get-in @meta [d :raw])))
         (rebuild-styles! sheet @replaced)))))
   sheet)
@@ -236,16 +274,14 @@
   "Transitive set of addresses whose formulas reference `addr` (reverse-dep
    closure — static refs plus currently-resolved dynamic ones), excluding
    `addr` itself. These are the cells whose value may change when `addr`
-   changes — the set to re-render."
-  [{:keys [meta dyn]} addr]
-  (let [m @meta d @dyn]
-    (loop [seen #{} frontier [addr]]
-      (if-let [a (first frontier)]
-        (let [ds  (concat (keep (fn [[x mm]] (when (contains? (:deps mm) a) x)) m)
-                          (keep (fn [[x ts]] (when (contains? ts a) x)) d))
-              new (remove #(or (= % addr) (contains? seen %)) (distinct ds))]
-          (recur (into seen new) (into (subvec (vec frontier) 1) new)))
-        seen))))
+   changes — the set to re-render. Every edit calls this, so it walks the
+   `:readers` index rather than rescanning the sheet at each step."
+  [sheet addr]
+  (loop [seen #{} frontier [addr]]
+    (if-let [a (peek frontier)]
+      (let [new (remove #(or (= % addr) (contains? seen %)) (rdeps sheet a))]
+        (recur (into seen new) (into (pop frontier) new)))
+      seen)))
 
 ;; --- runaway formulas ----------------------------------------------------
 ;;
@@ -774,11 +810,14 @@
              (vswap! loaded conj addr)
              (catch Exception e
                (swap! errs conj [addr (.getMessage e)])
+               ;; this REPLACES the meta entry, so the deps it used to declare
+               ;; have to leave the index with it
+               (reindex-readers! sheet addr nil)
                (swap! meta assoc addr {:raw value :kind :error
                                        :err (.getMessage e)
                                        :errcode (errors/classify e)}))))
       ;; 2. the one rebuild pass (see above — empty unless the sheet was warm)
-      (let [stale (cond-> (stranded-dependents meta dyn @loaded)
+      (let [stale (cond-> (stranded-dependents sheet @loaded)
                     warm? (into @loaded))]
         (doseq [a stale :let [raw (get-in @meta [a :raw])] :when raw]
           (try (write-cell! sheet a raw)
@@ -953,6 +992,7 @@
   (reset! (:vals sheet) {})
   (reset! (:meta sheet) {})
   (reset! (:dyn sheet) {})
+  (reset! (:readers sheet) {})
   (reset! (:styles sheet) {}))
 
 (defn- apply-defs!

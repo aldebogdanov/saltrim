@@ -47,26 +47,51 @@ Recorded 2026-08-04 · SaltRim dev · JVM 26.0.1 · macOS · 10 cores.
 
 | shape | n | cells | build | load | edit | read all | build/cell |
 |---|---|---|---|---|---|---|---|
-| chain | 100 | 100 | 23ms | 9.1ms | 2.2ms | 0.4ms | 0.23ms |
-| wide | 100 | 200 | 163ms | 152ms | 0.1ms | 0.3ms | 0.82ms |
-| aggregate | 100 | 101 | 147ms | 144ms | 0.1ms | 0.1ms | 1.46ms |
-| star | 100 | 101 | 7.6ms | 5.8ms | 0.8ms | 0.1ms | 0.08ms |
-| dyn | 100 | 200 | 608ms † | 589ms † | 0.1ms | 0.6ms | 3.04ms † |
-| xl | 100 | 200 | 164ms | 158ms | 0.1ms | 0.2ms | 0.82ms |
-| chain | 1000 | 1000 | 341ms | 33ms | 82ms | 0.9ms | 0.34ms |
-| wide | 1000 | 2000 | 2.02s | 1.77s | 0.5ms | 2.0ms | 1.01ms |
-| aggregate | 1000 | 1001 | 2.04s | 2.01s | 0.4ms | 0.9ms | 2.04ms |
-| star | 1000 | 1001 | 118ms | 30ms | 79ms | 0.9ms | 0.12ms |
-| dyn | 1000 | 2000 | 6.56s † | 6.84s † | 0.5ms | 2.2ms | 3.28ms † |
-| xl | 1000 | 2000 | 1.70s | 1.49s | 0.5ms | 1.6ms | 0.85ms |
+| chain | 100 | 100 | 16ms | 11ms | 0.3ms | 0.3ms | 0.16ms |
+| wide | 100 | 200 | 176ms | 173ms | 0.2ms | 0.3ms | 0.88ms |
+| aggregate | 100 | 101 | 154ms | 153ms | 0.2ms | 0.1ms | 1.52ms |
+| star | 100 | 101 | 6.6ms | 6.5ms | 0.1ms | 0.1ms | 0.07ms |
+| dyn | 100 | 200 | 689ms † | 637ms † | 0.1ms | 0.6ms | 3.45ms † |
+| xl | 100 | 200 | 164ms | 168ms | 0.2ms | 0.3ms | 0.82ms |
+| chain | 1000 | 1000 | 31ms | 35ms | 1.2ms | 1.0ms | 0.03ms |
+| wide | 1000 | 2000 | 1.77s | 1.88s | 0.7ms | 2.0ms | 0.89ms |
+| aggregate | 1000 | 1001 | 2.37s | 2.09s | 0.6ms | 0.9ms | 2.37ms |
+| star | 1000 | 1001 | 30ms | 31ms | 1.3ms | 0.9ms | 0.03ms |
+| dyn | 1000 | 2000 | 6.67s † | 7.85s † | 0.8ms | 2.7ms | 3.33ms † |
+| xl | 1000 | 2000 | 1.48s | 1.57s | 0.7ms | 2.3ms | 0.74ms |
 
 † `dyn` measured alone (`--shapes=dyn 1000`), for the order-sensitivity reason
-above; it reads ~10 s when run sixth in the sweep, on identical code.
+above; it reads ~9-11 s when run sixth in the sweep, on identical code.
+`aggregate` is the other jumpy one — 147-212 ms at n=100 across runs on
+unchanged code — so treat a single-digit-percent move on those two as noise and
+re-measure the shape ALONE before calling it a regression.
 
 **`load` is now at or below `build` on every shape**, which is what it should
 always have been — the same cells, minus the per-cell rebuild a load has no use
 for. Where the two are close (`wide`, `aggregate`, `xl`, `dyn`) the cost is
 compiling formulas, not ordering them.
+
+### Before the reverse index
+
+`build` and `edit` are where this one lands: both used to answer "who reads this
+cell?" by scanning the whole sheet. Same sweep, same machine, base vs branch:
+
+| shape | n | build before | after | edit before | after |
+|---|---|---|---|---|---|
+| chain | 1000 | 394ms | **43ms** | 83ms | **1.3ms** |
+| star | 1000 | 120ms | **30ms** | 84ms | **1.1ms** |
+| chain | 100 | 20ms | 21ms | 1.9ms | **0.3ms** |
+| star | 100 | 8.2ms | 7.2ms | 0.9ms | **0.1ms** |
+| aggregate | 1000 | 1.64s | 1.60s | 0.4ms | 0.5ms |
+| aggregate | 100 | 159ms | 212ms ‡ | 0.1ms | 0.2ms |
+
+‡ Noise, not a regression: measured ALONE the same pair reads 181 ms vs 192 ms,
+and this shape spans 147-212 ms run to run on either branch.
+
+**The edit column is the point.** A write to the root of a 1000-deep chain or a
+1000-wide fan-out is what a collaborator waits for, and it went from ~83 ms to
+~1.2 ms — because the cost was never the recompute, it was finding the
+dependents.
 
 ### Before the deferred rebuild
 
@@ -107,11 +132,11 @@ Reading the table:
 
 - **~0.1-2 ms per cell to install**, depending on shape. The 20 000-cell import
   cap is therefore seconds of engine time, not the minute it used to be.
-- **An edit is cheap when the graph is shallow and wide** — 0.1-0.5 ms for
-  `wide`, `dyn` and `xl` even at 2000 cells, because only the touched
-  dependents recompute. It costs ~100 ms when the edit is at the root of a
-  1000-deep chain or a 1000-wide fan-out. That is the collaboration latency
-  budget, and it is fine.
+- **An edit is cheap, full stop** — ~1 ms even at the root of a 1000-deep chain
+  or a 1000-wide fan-out, where it used to cost ~85 ms. Only the touched
+  dependents recompute, and since the reverse index they are also found rather
+  than searched for. That is the collaboration latency budget and there is
+  nothing left in it to worry about at these sizes.
 - **Reads are free** (~1 ms for 2000 cells): values are already computed, so
   rendering a window is not where time goes.
 - **`dyn` is not quadratic.** The structural rebuild of dynamic dependents on
@@ -120,9 +145,9 @@ Reading the table:
 
 ## What the benchmarks found
 
-Three things so far, all real, none previously known — which is the argument for
-having a benchmark suite at all. Two are fixed; the third is what the second fix
-uncovered underneath.
+Three things so far, all real, none previously known, all now fixed — which is
+the argument for having a benchmark suite at all. Each was uncovered by the one
+before it: the load cascade hid the cycle-detection cost, which hid nothing yet.
 
 ### 1. Opening a sheet can be orders of magnitude slower than typing it — FIXED
 
@@ -180,24 +205,36 @@ The original finding, for the record: the configured limits
 far larger than the engine can compile. Full write-up, including why the fix is
 "a range should be ONE await of a collection", is in `TECHDEBT.md`.
 
-### 3. Cycle detection costs more than installing the formula
+### 3. Cycle detection costs more than installing the formula — FIXED
 
-Visible only once the load cascade (finding 1) was gone. `would-cycle?` walks the forward
-dependency graph from each new reference looking for a way back, and in a chain
-that walk is the whole ancestry — O(depth) per install, O(n²) for the sheet.
-Stubbing it out (`with-redefs`, correctness discarded) on `chain` 1000:
+Visible only once the load cascade (finding 1) was gone. `would-cycle?` walked
+the forward dependency graph from each new reference looking for a way back, and
+in a chain that walk is the whole ancestry — O(depth) per install, O(n²) for the
+sheet. Stubbing it out (`with-redefs`, correctness discarded) on `chain` 1000:
 
 | | with the check | without |
 |---|---|---|
 | build (dependency order) | 332 ms | **117 ms** |
 | load (dependency order) | 237 ms | **31 ms** |
 
-So **~65% of installing a deep chain is cycle checking**, and it is why loading
-in dependency order is now the SLOW order (32 ms vs 10 ms for the same 300
+So **~65% of installing a deep chain was cycle checking**, and it was why loading
+in dependency order had become the SLOW order (32 ms vs 10 ms for the same 300
 cells): arriving after your dependencies means there is an ancestry to walk.
 
-Nothing is wrong with the answer — a cyclic formula still `StackOverflow`s the
-engine, so the check has to stay ahead of `compile`. What is wrong is
-recomputing reachability from scratch on every keystroke when the graph changed
-by one edge. Incremental cycle detection (a maintained topological order) is the
-known fix and a real piece of work; see `TECHDEBT.md`.
+**Fixed**, and not by making the walk faster — by not walking. A cycle through a
+cell has to come back INTO it, so it needs an edge x -> addr; if nothing
+references `addr`, there is nothing to find no matter how deep the ancestry
+below it goes. Installing a cell nobody reads yet is the overwhelmingly common
+case (a fresh formula, the next cell down a column, every cell of an import in
+dependency order) and is now O(1). A self-reference is the one cycle whose
+in-edge comes from the install itself, so it is checked directly.
+
+Answering "does anything reference this?" cheaply is what the `:readers` index
+is for — `:meta`'s `:deps` inverted and maintained on every write. It also
+retired the three other places that scanned the whole sheet for the same answer
+(`rdeps`, `dependents*`, the load's stranded-cell pass), which is where the 60x
+edit improvement came from. `chain` 1000 builds in 31 ms instead of 394 ms.
+
+This is the finding that most argues for the suite: none of it was a bug. Every
+answer was correct before and after. It was 60x of latency hiding behind a
+`keep` over a map.
