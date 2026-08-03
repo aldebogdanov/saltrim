@@ -9,6 +9,12 @@ clojure -M:bench --shapes=chain,star 1000
 Pure in-memory sheets — no database, no server, no ports held, so this is safe
 to run alongside anything else.
 
+**This is a quality gate, not a curiosity.** Every PR touching engine or client
+code runs it alongside `clojure -X:test`, and a regression against the recorded
+table below fails the gate — fix it, or say in the PR what capability bought the
+time. A test suite proves the answer is right; only this proves the sheet still
+opens. All three findings below were invisible to the tests.
+
 ## What is measured
 
 | column | what it costs in the app |
