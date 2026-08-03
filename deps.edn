@@ -73,6 +73,12 @@
   ;; cold-run mains — see spikes/README.md.
   :web {:main-opts ["-m" "uno.michelada.saltrim.web"]}
 
+  ;; Engine benchmarks (bench/). Pure in-memory sheets — no db, no server, no
+  ;; ports held. `clojure -M:bench [sizes…]`; see doc/bench.md for what the
+  ;; numbers mean and the last recorded run.
+  :bench {:extra-paths ["bench"]
+          :main-opts   ["-m" "uno.michelada.saltrim.bench.main"]}
+
   ;; ClojureScript builds /app.js from src (app.cljs + the shared .cljc) with the
   ;; plain CLJS compiler — no node/npm. Dev rebuilds the :simple bundle in-process
   ;; on (start) (see dev/cljs_build.clj + dev/user.clj); the canonical one-shot is

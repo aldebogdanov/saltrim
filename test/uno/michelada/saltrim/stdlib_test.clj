@@ -156,9 +156,9 @@
     (let [s (sheet-with [["B1" "=(dollarde 1.1 0)"]
                          ["B2" "=(fact -1)"]
                          ["B3" "=(vlookup \"zzz\" (as-rows 2 [\"a\" 1]) 2 false)"]])]
-      (is (= {:error "#NUM!"} (v s "B1")))
-      (is (= {:error "#NUM!"} (v s "B2")))
-      (is (= {:error "#N/A"} (v s "B3")) "a miss is #N/A, not nil")))
+      (is (= {:error "#NUM!" :code :num} (v s "B1")))
+      (is (= {:error "#NUM!" :code :num} (v s "B2")))
+      (is (= {:error "#N/A" :code :na} (v s "B3")) "a miss is #N/A, not nil")))
   (testing "a bad date string says so"
     (let [s (sheet-with [["B1" "=(eomonth \"not-a-date\" 1)"]])]
       (is (:error (v s "B1"))))))

@@ -82,6 +82,7 @@ clojure -T:build cljs         # one-shot :advanced /app.js (needed before -M:web
                               # on a fresh checkout — app.js is gitignored)
 clojure -M:web                # one-shot server on :8080 (open ?s=<sheet-id>)
 clojure -X:test               # engine + addr + store + fmt suites
+clojure -M:bench [sizes…]     # engine benchmarks (in-memory sheets, no db/ports)
 node --check resources/public/app.js
 
 clojure -T:build uber             # compiles /app.js then builds a runnable uberjar
@@ -420,6 +421,26 @@ blanks). A test pins that: no name shadows clojure.core beyond the documented
 allowlist, and every borrowed name still exists upstream. `formula/stdlib` =
 `lib/stdlib` + the `#(…)` fn-literal macro (which stays with the desugaring).
 The ƒ panel's reference is GENERATED from `stdlib/catalog-syms`, so it can't drift.
+**Typed cell errors** are DONE (`errors` ns): a failing cell reports
+`{:error msg :code kw}`, not just a message. `errors/classify` places any
+Throwable on a small closed set of Excel's codes — `:excel-error` from
+`excel/call` first, then a `deleted-ref`'s `{:ref …}`, then exception class,
+then stable JDK/SCI message text — and NEVER fails (unknown ⇒ `:error`). The
+CELL now shows the code (`errors/label`: `#DIV/0!` `#VALUE!` `#N/A` `#REF!`
+`#NAME?` `#NUM!` `#TIMEOUT!`, `#ERR` as catch-all) instead of a blanket `#ERR`,
+and `errors/detail` puts the message behind it in the tooltip (blank when the
+message IS the label, so no "#N/A: #N/A"). `sheet/value`, `style-value` and the
+wedge/compile paths all go through it (`meta` gained `:errcode`). Formula-side:
+`if-error` / `if-na` / `error-type` / `error?` are **SCI macros** (lazy, so the
+guarded expression isn't evaluated first) that expand to a call on a host fn
+OBJECT — no helper vars in the sandbox, and a host `try`, because SCI's `catch`
+can't resolve a class name. `if-error` UNWRAPS a `(fn [] …)` first argument: the
+importer emitted that shape when it was a plain function and those formulas are
+saved in real sheets. **THE GAP** (pinned by a test so it can't silently
+change): these guard the expression they wrap, NOT an error arriving from a
+referenced cell — refs are hoisted and awaited before the body runs, so
+`(if-error $A1 0)` over a broken A1 still reports A1's error. Closing that needs
+errors as VALUES flowing through operators (Excel's model) — see TECHDEBT.
 **Cell assertions** are DONE: a cell carries a claim about its own value
 (`:assert` prop, `$val` bound like a style formula, `sheet/assert-violation` /
 `assert-violations`). Truthy holds; `false`/`nil`/throw fail; a literal (no `=`)

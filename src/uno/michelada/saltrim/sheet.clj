@@ -12,6 +12,7 @@
   (:require [clojure.string :as str]
             [uno.michelada.saltrim.addr :as addr]
             [uno.michelada.saltrim.constants :as c]
+            [uno.michelada.saltrim.errors :as errors]
             [uno.michelada.saltrim.formula :as formula]
             [uno.michelada.saltrim.simplify :as simplify]
             [org.replikativ.spindel.signal :as sig]
@@ -266,7 +267,7 @@
   "Record the cell that ran past the timeout, once. Returns its {:error …}."
   [{:keys [slow]} culprit]
   (swap! slow #(or % culprit))
-  {:error (wedged-msg @slow)})
+  (errors/err :timeout (wedged-msg @slow)))
 
 (defn settle!
   "Barrier: wait for the executor to drain. A wedged sheet can never drain (the
@@ -283,22 +284,23 @@
   (ctx/close-context! rt))
 
 (defn value
-  "Current computed value of `addr`, or nil if blank. Errors -> {:error msg}
-   (runtime errors, a compile error recorded when the formula couldn't be built
-   against the sheet's current definitions, or the sheet being wedged by a
-   non-terminating cell — see the runaway-formula note)."
+  "Current computed value of `addr`, or nil if blank. Errors -> a classified
+   `{:error msg :code kw}` (see the `errors` ns): runtime failures, a compile
+   error recorded when the formula couldn't be built against the sheet's current
+   definitions, or the sheet being wedged by a non-terminating cell (see the
+   runaway-formula note)."
   [{:keys [rt registry meta] :as sheet} addr]
   (if-let [culprit (degraded? sheet)]
     ;; nothing in this sheet can compute any more; answer at once rather than
     ;; making every cell in the window wait out the timeout in turn
-    {:error (wedged-msg culprit)}
+    (errors/err :timeout (wedged-msg culprit))
     (if-let [ref (get @registry addr)]
       (binding [ec/*execution-context* rt]
         (try (let [v (deref ref EVAL-TIMEOUT-MS ::timeout)]
                (if (= ::timeout v) (wedge! sheet {:addr addr}) v))
-             (catch Exception e {:error (.getMessage e)})))
+             (catch Exception e (errors/of e))))
       (when-let [err (get-in @meta [addr :err])]
-        {:error err}))))
+        (errors/err (get-in @meta [addr :errcode]) err)))))
 
 (defn raw   [{:keys [meta]} addr] (get-in @meta [addr :raw]))
 (defn kind  [{:keys [meta]} addr] (get-in @meta [addr :kind]))
@@ -393,8 +395,8 @@
         (set-style! sheet a prop raw)))))
 
 (defn style-value
-  "Computed value of style PROP of `addr`: a string, nil (blank/absent), or
-   `{:error msg}` when the property's formula blows up. Errors are surfaced (not
+  "Computed value of style PROP of `addr`: a string, nil (blank/absent), or a
+   classified `{:error msg :code kw}` when the property's formula blows up. Errors are surfaced (not
    swallowed) so a broken style formula is visible — same contract as `value`."
   [{:keys [rt styles] :as sheet} addr prop]
   (when-let [{:keys [kind raw spin]} (get-in @styles [addr prop])]
@@ -404,13 +406,13 @@
       ;; a style formula is user code on the same executor, so it wedges the
       ;; sheet exactly like a value formula does
       :formula (if-let [culprit (degraded? sheet)]
-                 {:error (wedged-msg culprit)}
+                 (errors/err :timeout (wedged-msg culprit))
                  (binding [ec/*execution-context* rt]
                    (try (let [v (deref spin EVAL-TIMEOUT-MS ::timeout)]
                           (if (= ::timeout v)
                             (wedge! sheet {:addr addr :prop prop})
                             (when (some? v) (str v))))
-                        (catch Exception e {:error (.getMessage e)})))))))
+                        (catch Exception e (errors/of e))))))))
 
 (defn style-errors
   "Seq of [prop msg] for `addr`'s style props that currently error (for toast)."
@@ -712,7 +714,9 @@
             (try (set-cell! sheet addr raw)
                  (catch Exception e
                    (swap! errs conj [addr (.getMessage e)])
-                   (swap! meta assoc addr {:raw raw :kind :error :err (.getMessage e)}))))
+                   (swap! meta assoc addr {:raw raw :kind :error
+                                           :err (.getMessage e)
+                                           :errcode (errors/classify e)}))))
           (doseq [[prop raw] (:style props)]
             (try (set-style! sheet addr prop raw)
                  (catch Exception e
