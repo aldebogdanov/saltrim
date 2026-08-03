@@ -251,10 +251,16 @@ REMAINING:
   `clojure -M:web` (e.g. the preview launch config) 404s `app.js` until you run
   `clojure -T:build cljs` once (or start the nREPL). Documented in CLAUDE.md /
   README; revisit if it bites.
-- **No CLJS tests yet.** The shared `addr` cljc is covered on the CLJ side; the
-  fix for `(int char)`/`(int \A)` (bit-or in CLJS) is currently guarded only by
-  the `:advanced` compile + browser verification. A tiny cljs test build (or a
-  `clojure -M` cljc round-trip) would lock the CLJS path down.
+- **No CLJS tests yet — and the quality gate now names them as owed.** The
+  shared `addr`/`constants`/`geom` cljc is covered on the CLJ side only, so the
+  half of it that runs in the browser is guarded by the `:advanced` compile and
+  manual verification. That is exactly where the CLJS-only bugs live: `(int
+  char)` is `bit-or` in CLJS, `.-foo` is renamed under `:advanced` (hence the
+  `aget`/`getAttribute` rule), and `geom/span-count` has to agree with the
+  server's answer cell for cell or the right of the grid goes empty. A cljc test
+  build — the existing `addr`/`geom` tests compiled and run under the plain CLJS
+  compiler, no node/npm beyond `node` itself, which the check step already
+  assumes — would lock that down and become step 2 of the gate in CLAUDE.md.
 - **Datastar (1.0.2) is vendored and self-served** at `resources/public/datastar.js`
   → `/datastar.js`. DONE — it used to load from jsdelivr with the local path as a
   reader comment beside it, which made a CDN outage a blank page and put a

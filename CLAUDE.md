@@ -60,10 +60,22 @@ If the user types `/caveman`, invoke the `caveman` Skill.
 - **Spike risky unknowns first** — as REPL walkthroughs under `spikes/` (eval the
   forms at a dev REPL; see `spikes/README.md`), not cold-run mains. Don't build
   UI on unproven engine assumptions.
-- **Test after engine changes**: `clojure -X:test` (must stay green; `db`/`auth`
-  suites use the `:memory` Datahike backend). Add tests for new engine behavior.
-  The count moves every PR, so don't pin it here — run the suite and read the
-  tail. (It has been ~190 tests / ~930 assertions since the 1.0 audit.)
+- **Quality gate — BOTH halves, every PR that touches engine or client code.**
+  Green tests are half the bar; the other half is that the sheet did not get
+  slower. Run them before opening the PR and put the numbers in it:
+  1. `clojure -X:test` — must stay green. Add tests for new behavior. The count
+     moves every PR, so don't pin it here — run the suite and read the tail.
+     (~250 tests / ~1250 assertions as of the load-order PR.)
+  2. `node --check resources/public/app.js` after any `.cljs`/`.cljc` edit, and
+     the cljs suite once there is one (there isn't yet — adding it is owed).
+  3. `clojure -M:bench` — compare against the recorded table in `doc/bench.md`.
+     **A regression is a FAILING gate, not a footnote.** Find the cause and fix
+     it, or state plainly in the PR what feature bought the time and why it is
+     worth it — a real capability can cost milliseconds, tidier code cannot.
+     If the numbers improve, re-record the table (same machine, note the date).
+  Benchmarks are in the gate because they have already caught three defects
+  nobody knew about (`doc/bench.md`), each invisible to the test suite: tests
+  prove the answer, only the bench proves the sheet still opens.
 - **The client is ClojureScript** (`src/.../app.cljs`, compiled to
   `resources/public/app.js`). The dev REPL `(start)` watch-compiles it on save
   (plain CLJS compiler, no node/npm); for a one-shot use `clojure -T:build cljs`.
