@@ -22,6 +22,15 @@ Each number is the **median of 5 runs after 2 warmups**, on a sheet built fresh
 per run. Absolutes are machine-specific; compare *ratios* across a change, and
 re-record the table below on the same machine when you do.
 
+One caveat, measured rather than assumed: **`build` and `load` are
+order-sensitive.** `dyn` at 1000 costs 6.5 s run on its own
+(`--shapes=dyn 1000`, three runs: 6.55 / 6.56 / 6.84 s) and ~10 s run sixth in a
+full sweep, on byte-identical code — it allocates heavily and inherits whatever
+heap the shape before it left. Forcing a `System/gc` between shapes does NOT fix
+it (10.25 s with, 9.99 s without), so the suite does not pretend to: run a shape
+alone when its absolute number matters, and never compare one shape against its
+neighbours. `edit` and `read` are stable either way.
+
 ## Shapes
 
 Borrowed from rechentafel's bench vocabulary (see
