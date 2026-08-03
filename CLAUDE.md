@@ -412,9 +412,10 @@ cached number, and so EXPORT can map it back exactly; the prefix also makes
 "this came from a spreadsheet" visible in the cell. What Excel has and we WANT
 gets a proper Clojure name in the native stdlib instead — that is the `stdlib`
 ns (below), NOT this one. They
-come from **rechentafel** (`org.replikativ/rechentafel`, Apache-2.0, PINNED) — but
-ONLY its function pack: its evaluator is pull-based dirty/topo recalc, the
-opposite of Spindel, and is never called. `excel/call` is the whole seam:
+come from **rechentafel** (`org.replikativ/rechentafel`, Apache-2.0, PINNED) — its
+function pack AND its formula PARSER (`rechentafel.parser/parse`, which the .xlsx
+importer walks). Its EVALUATOR is never called: pull-based dirty/topo recalc, the
+opposite of Spindel. `excel/call` is the whole seam:
 `->rv`/`<-rv` translate plain SaltRim values (nil = Excel's BLANK, not 0;
 integral doubles narrow to Long) to/from Excel's tagged maps, and an Excel error
 VALUE becomes an `ex-info` named the way a user knows it (`#DIV/0!`) → the cell's
@@ -428,6 +429,16 @@ COLUMN (shape is lost at read time) — rectangles take `(xl/as-rows w …)`, an
 Excel serial dates take `xl/date->serial`/`xl/serial->date` (the native stdlib
 takes ISO strings; only `xl/` speaks serials). Spike: `spikes/09-excel-function-pack.clj`;
 evaluation of what else to take from rechentafel: `doc/rechentafel-evaluation.md`.
+**The .xlsx importer translates from that AST**, not from POI's RPN `Ptg` stream
+(`xlsx/ast->form`, a plain recursive walk; `translate-formula` takes only the
+formula string, no workbook context). The stack machine it replaced had three
+token-order hazards baked in — a single-range `SUM` arriving as `AttrPtg(isSum)`,
+`IF`/`CHOOSE` as a TRAILING `FuncVarPtg`, `IFERROR` as `NameXPxg` + `#external#`
+— and none of them exist for a node that knows its own name and arguments. The
+vocabulary (`fname->form`) is unchanged and is where new function mappings go.
+Every refusal NAMES the construct (`cross-sheet reference to Other`,
+`defined name Tax_Rate`) because that string becomes the cell's audit `:comment`.
+Spike: `spikes/11-excel-ast-import.clj`.
 **The stdlib is its own ns** (`uno.michelada.saltrim.stdlib`, moved out of
 `formula`) and has two halves. HAND-WRITTEN: the functions whose semantics we
 chose (blank-skipping aggregates, ISO date helpers, the `x*` excel-compat shims

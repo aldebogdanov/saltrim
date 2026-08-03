@@ -189,7 +189,23 @@ mappable subset is most of a typical imported sheet.
 
 **Effort:** medium (import rewrite), medium-large (export). **Risk:** medium —
 this is the item where SaltRim's own `formula/unparse` and rechentafel's AST have
-to meet in the middle, and it should be spiked first (`spikes/09-excel-ast.clj`).
+to meet in the middle, and it should be spiked first.
+
+> **Update — B1 shipped** (spike: `spikes/11-excel-ast-import.clj`). The rewrite
+> is behaviour-identical on all 22 translatable formulas in the existing test
+> battery, deletes the stack machine and its three token-order hazards, drops
+> the `FormulaParsingWorkbook`/sheet-index plumbing, and adds `LET` and array
+> constants as new translations.
+>
+> **The "fewer demotions" claim above was optimistic and should be read with
+> this correction.** Cross-sheet refs, whole-column ranges, defined names, table
+> refs and spill refs all still demote. The AST does name each of them precisely
+> — which is why the audit comment now reads `cross-sheet reference to Other`
+> instead of `Ref3DPxg` — but naming a construct is not the same as having
+> somewhere to put it: named regions are item K, spill is item E, a whole column
+> is ~1M cells against a 4096-cell range cap, and a cross-sheet ref has no target
+> because each Excel sheet imports as its own SaltRim sheet. The real wins are
+> the deleted stack machine, the accurate reasons, and B2 becoming reachable.
 
 ### C. Excel's error taxonomy as values, not exceptions
 
@@ -456,7 +472,7 @@ Worth raising with the author, since the collaboration is welcome:
 | 4 | **H** — benchmark shapes for the Spindel engine | S | High info | Answers questions we currently guess at |
 | 5 | **G** — offline POI oracle for the adapter | S–M | High | Reuses POI already on the classpath |
 | 6 | **D** — 2D range shape | M | High | Gates the array/lookup functions; breaking, needs a plan |
-| 7 | **B1** — importer: POI RPN → rechentafel AST | M | High | Fewer demotions, far less sharp code |
+| 7 | **B1** — importer: POI RPN → rechentafel AST | M | High | ✅ DONE. Note: the "fewer demotions" estimate was optimistic — see below |
 | 8 | **B2** — live xlsx export (real formulas) | M–L | Very high | Kills export's #1 documented limitation |
 | 9 | **K** — named regions / table refs | M | Medium | Cheap-win candidate, SaltRim-native design |
 | 10 | **E** — dynamic arrays / spill | L | Very high | Roadmap-grade; blueprint exists; do last |

@@ -10,7 +10,7 @@
             [uno.michelada.saltrim.xlsx :as xlsx])
   (:import [java.io ByteArrayInputStream ByteArrayOutputStream]
            [org.apache.poi.ss.usermodel FillPatternType HorizontalAlignment IndexedColors]
-           [org.apache.poi.xssf.usermodel XSSFEvaluationWorkbook XSSFFormulaEvaluator XSSFWorkbook]))
+           [org.apache.poi.xssf.usermodel XSSFFormulaEvaluator XSSFWorkbook]))
 
 (use-fixtures :each (fn [t] (db/start-mem!) (try (t) (finally (mount/stop)))))
 
@@ -30,17 +30,13 @@
 ;; --- translator --------------------------------------------------------------
 
 (deftest translator
-  (let [wb  (XSSFWorkbook.)
-        _   (.createSheet wb "S1")
-        _   (.createSheet wb "Other")
-        pwb (XSSFEvaluationWorkbook/create wb)
-        t   (fn [f] (xlsx/translate-formula f pwb 0))
+  (let [t   xlsx/translate-formula
         bad (fn [f] (try (t f) nil
                          (catch Exception e
                            (or (:uno.michelada.saltrim.xlsx/unsupported (ex-data e))
                                (.getMessage e)))))]
     (testing "aggregates and ranges"
-      (is (= "=(sum $A1:A3)" (t "SUM(A1:A3)")) "single range rides the AttrPtg-sum path")
+      (is (= "=(sum $A1:A3)" (t "SUM(A1:A3)")))
       (is (= "=(sum (flatten (vector $A1:B2 $C3 5)))" (t "SUM(A1:B2,C3,5)")))
       (is (= "=(mean $B1:B10)" (t "AVERAGE(B1:B10)")))
       (is (= "=(xmin $A1:A9)" (t "MIN(A1:A9)")))
@@ -50,7 +46,7 @@
       (is (= "=(if (excel-truthy $A1) 1 2)" (t "IF(A1,1,2)")))
       (is (= "=(if (> $A1 1) \"yes\" false)" (t "IF(A1>1,\"yes\")")) "2-arg IF: Excel yields FALSE")
       (is (= "=(and (> $A1 1) (excel-truthy $B1))" (t "AND(A1>1,B1)")))
-      (is (= "=(if-error (fn [] (/ $A1 $B1)) 0)" (t "IFERROR(A1/B1,0)")) "future-function NameXPxg path"))
+      (is (= "=(if-error (fn [] (/ $A1 $B1)) 0)" (t "IFERROR(A1/B1,0)"))))
     (testing "operators"
       (is (= "=(/ 50 100.0)" (t "50%")))
       (is (= "=(str $A1 \" x\")" (t "A1&\" x\"")))
@@ -65,10 +61,27 @@
     (testing "VLOOKUP: exact match only, width from the range"
       (is (= "=(xvlookup \"k\" $A1:C10 3 2)" (t "VLOOKUP(\"k\",A1:C10,2,FALSE)")))
       (is (bad "VLOOKUP(\"k\",A1:C10,2)") "approximate (default) match unsupported"))
-    (testing "unsupported -> ex-info for the fallback path"
-      (is (= "Ref3DPxg" (bad "Other!A1")) "cross-sheet")
-      (is (bad "SUM(A:A)") "whole column")
-      (is (bad "TRANSPOSE(A1:B2)") "unknown function"))))
+    (testing "LET becomes a Clojure let"
+      (is (= "=(let [x 1 y 2] (+ (+ x y) $A1))" (t "LET(x,1,y,2,x+y+A1)")))
+      (is (= "=(let [rate_ (/ $A1 100)] (* $B1 rate_))" (t "LET(rate,A1/100,B1*rate)"))
+          "a local that shadows a stdlib fn is renamed, not refused — `rate` is one")
+      (is (= "defined name y" (bad "LET(x,1,y+1)"))
+          "a name with nothing in scope is a DEFINED name, not a local"))
+    (testing "array constants"
+      (is (= "=[1 2 3]" (t "{1,2,3}")) "a single row flattens")
+      (is (= "=[[1 2] [3 4]]" (t "{1,2;3,4}")))
+      (is (= "=(sum [1 2 3])" (t "SUM({1,2,3})"))
+          "already a collection — coll-arg must not wrap it in `vector` again"))
+    (testing "unsupported -> ex-info, and the reason says what it actually was"
+      ;; that string lands in the cell's audit :comment, so a user reads it
+      (is (= "cross-sheet reference to Other" (bad "Other!A1")))
+      (is (= "whole-col reference" (bad "SUM(A:A)")))
+      (is (= "defined name Tax_Rate" (bad "A1*Tax_Rate")))
+      (is (= "structured table reference to Sales" (bad "SUM(Sales[Amount])")))
+      (is (= "spill reference (A1#)" (bad "SUM(A1#)")))
+      (is (= "range intersection" (bad "SUM(A1:A3 B1:B3)")))
+      (is (= "function TRANSPOSE" (bad "TRANSPOSE(A1:B2)")) "unknown function")
+      (is (re-find #"range covers" (bad "SUM(A1:CV5000)")) "over the range cap"))))
 
 ;; --- workbook read -----------------------------------------------------------
 
@@ -118,7 +131,9 @@
       (is (= "=(sum $A1:A2)" (get-in doc ["B1" :value])))
       (is (= "10" (get-in doc ["B3" :value])) "Other!A1*2 cached 10")
       (is (= "XLSX: =Other!A1*2" (get-in doc ["B3" :style :comment])))
-      (is (= ["B3"] (mapv :addr (:fallbacks report)))))
+      (is (= ["B3"] (mapv :addr (:fallbacks report))))
+      (is (= "cross-sheet reference to Other" (:reason (first (:fallbacks report))))
+          "the import report says what it could not translate, not a token class"))
     (testing "styles + masks"
       (is (= {:weight "bold" :bg "#ffff00" :align "center" :format "#,##0.00"}
              (get-in doc ["D1" :style])))
