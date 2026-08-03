@@ -195,8 +195,16 @@ Gotchas learned the hard way:
 - `await`/`track` must appear **literally** in the spin body (CPS breakpoints) —
   not inside a nested `fn`. Ranges expand statically at read time.
 - A cyclic formula **StackOverflows** — `sheet/would-cycle?` rejects before
-  install. That check is O(depth) per install and is now ~65% of the cost of
-  building a deep chain (see TECHDEBT) — don't add work to it.
+  install. It skips the graph walk entirely when NOTHING references the cell
+  (no in-edge ⇒ no way back ⇒ no cycle), which is the common case; a
+  self-reference is checked directly, since its in-edge comes from the install
+  itself. That answer comes from **`:readers`** — `:meta`'s `:deps` INVERTED,
+  maintained by `reindex-readers!` on every write. Any new path that writes
+  `:deps` into `:meta` must call it FIRST (it reads the old deps from `:meta`);
+  a missed edge is not a slow answer but a wrong one — a dependent that never
+  rebuilds, or a cycle that isn't refused. Pinned by
+  `engine-test/reverse-index-tracks-every-write`. Never rescan `@meta` to find
+  who reads a cell — that scan was 60x of edit latency (see TECHDEBT).
 - **A Spin body that has never run has captured nothing.** `await` grabs the
   registry node when the body RUNS, not when it compiles, so a cell installed
   before its dependencies is fine as long as nothing derefs in between. That is

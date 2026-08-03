@@ -863,6 +863,79 @@
     (testing "a LITERAL style still shows — it needs no computation"
       (is (= "navy" (sh/style-value s "A1" :fg))))))
 
+(defn- scanned-readers
+  "The `:readers` index recomputed from scratch by scanning `:meta` — what the
+   maintained one must always equal."
+  [s]
+  (reduce-kv (fn [idx a m] (reduce (fn [x d] (update x d (fnil conj #{}) a))
+                                   idx (:deps m)))
+             {} @(:meta s)))
+
+(defn- index-intact? [s] (= (scanned-readers s) @(:readers s)))
+
+(deftest reverse-index-tracks-every-write
+  ;; `:readers` is maintained rather than derived, so a write path that forgets
+  ;; to update it is not a slow answer but a wrong one: a dependent that never
+  ;; rebuilds, or a cycle that is not refused. Every path that can change a
+  ;; cell's :deps has to leave the index equal to a fresh scan of :meta.
+  (testing "the ordinary write paths"
+    (let [s (mk)]
+      (put s "A1" "1") (put s "A2" "2")
+      (put s "B1" "=(+ $A1 $A2)")
+      (is (= #{"B1"} (get @(:readers s) "A1")))
+      (is (index-intact? s))
+      (testing "formula -> shorter formula drops the abandoned edge"
+        (put s "B1" "=(inc $A1)")
+        (is (index-intact? s))
+        (is (nil? (get @(:readers s) "A2"))))
+      (testing "formula -> literal drops them all"
+        (put s "B1" "7")
+        (is (index-intact? s))
+        (is (empty? @(:readers s))))
+      (testing "and blanking does too"
+        (put s "B1" "=(inc $A1)")
+        (put s "B1" "")
+        (is (index-intact? s))
+        (is (empty? @(:readers s))))))
+  (testing "a REJECTED install leaves the index alone"
+    (let [s (mk)]
+      (put s "A1" "1")
+      (put s "B1" "=(inc $A1)")
+      (is (thrown? clojure.lang.ExceptionInfo (put s "A1" "=(inc $B1)")))
+      (is (index-intact? s) "the refused formula's deps must not be recorded")
+      (is (= 2 (v s "B1")))))
+  (testing "a load that errors a cell replaces its meta — and its edges"
+    (let [s (mk)]
+      (put s "A1" "1")
+      (put s "B1" "=(inc $A1)")
+      (sh/load-document! s {"B1" {:value "=(nope $A1)"}})   ; unknown fn -> :error
+      (is (index-intact? s))))
+  (testing "structural edits and a full reload"
+    (let [s (mk)]
+      (put s "A1" "1") (put s "A2" "=(inc $A1)") (put s "A3" "=(* $A2 $A1)")
+      (sh/insert-line! s :row 0)
+      (is (index-intact? s) "reshape rebuilds from the shifted document")
+      (sh/remove-line! s :row 1)
+      (is (index-intact? s) "and a delete leaves #REF! formulas behind")
+      (let [s2 (mk)]
+        (sh/load-document! s2 (sh/document s))
+        (is (index-intact? s2)))))
+  (testing "a random walk of edits never drifts"
+    (let [s     (mk)
+          addrs (vec (for [i (range 1 13)] (str "A" i)))
+          rnd   (java.util.Random. 42)]
+      (dotimes [_ 400]
+        (let [a   (nth addrs (.nextInt rnd (count addrs)))
+              b   (nth addrs (.nextInt rnd (count addrs)))
+              raw (case (.nextInt rnd 4)
+                    0 ""
+                    1 (str (.nextInt rnd 100))
+                    2 (str "=(inc $" b ")")
+                    3 (str "=(+ $" b " 1)"))]
+          (try (put s a raw) (catch clojure.lang.ExceptionInfo _ nil))))   ; cycles refused
+      (is (index-intact? s))
+      (is (seq @(:readers s)) "and the walk actually built some edges"))))
+
 (defn- back-to-front-chain
   "A `chain` document — A1 = 0, A_i = (inc A_i-1) — whose iteration order is the
    WORST case for a bulk load: every cell arrives before the one it references."

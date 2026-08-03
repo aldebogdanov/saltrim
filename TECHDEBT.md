@@ -608,28 +608,59 @@ the only window in which a loaded cell can go stale.
 Measured after, on today's engine: 35 ms / 11 ms / 10 ms for the same three
 orders, and `chain` 1000 loads in 33 ms instead of 2.75 s. See `doc/bench.md`.
 
-## Cycle detection is O(depth) per install
+## Cycle detection is O(depth) per install — FIXED
 
 Found by the benchmark suite once the load cascade above stopped hiding it.
-`would-cycle?` answers "can this new reference reach me?" by walking the forward
+`would-cycle?` answered "can this new reference reach me?" by walking the forward
 dependency graph from scratch, every time. In a chain that walk is the entire
-ancestry, so installing n cells costs O(n²) — **~65% of the time to build a
+ancestry, so installing n cells cost O(n²) — **~65% of the time to build a
 1000-deep chain** (332 ms with the check, 117 ms with it stubbed out), and the
-reason loading in DEPENDENCY order is now the slow order.
+reason loading in DEPENDENCY order had become the slow order.
 
 The check itself is not optional: a cyclic formula deadlocks `await` into a
 StackOverflowError, so it has to run before `compile`, and it has to consider
 dynamic edges as well as static ones (see `rt/lookup-dyn`, which repeats it at
 run time for targets only known then).
 
-What is wasteful is recomputing reachability from nothing when the graph changed
-by one edge. The known fix is incremental cycle detection over a maintained
-topological order (Bender–Fineman–Gilbert–Tarjan): keep a rank per cell, and on
-a new edge only reorder the region between the two endpoints, which is O(1) for
-the overwhelmingly common append. That is a real piece of work — the rank has to
-survive `remove-line!`, the reshape rebuilds, and the dynamic edges recorded
-mid-evaluation — so it is a PR of its own, not a tweak. Nothing is currently
-wrong; a sheet just costs more to open than it needs to.
+**Fixed** without touching the walk, and without the incremental topological
+order this entry originally proposed (keep a rank per cell, reorder only the
+region between the endpoints of a new edge) — that would have had to survive
+`remove-line!`, the reshape rebuilds and the dynamic edges recorded
+mid-evaluation, and it turned out not to be needed. A cycle through `addr` has
+to come back INTO it, so it needs an edge x -> addr. If nothing references
+`addr` there is no cycle to find, however deep the ancestry below it goes, and
+the walk is skipped outright. That is the common case: a fresh formula, the next
+cell down a column, every cell of an import in dependency order. A
+self-reference is the one cycle whose in-edge comes from the install itself, so
+`would-cycle?` checks it directly rather than leaving it to the walk —
+**remove that line and `=$A1` in A1 StackOverflows the sheet.**
+
+The cheap "does anything reference this?" answer comes from the `:readers`
+index (below). `chain` 1000 builds in 31 ms instead of 394 ms.
+
+## The `:readers` index is maintained, not derived
+
+`:readers` is `:meta`'s `:deps` inverted — `{addr #{addrs naming it}}` — and it
+exists because rendering an edit, rebuilding dependents and refusing a cycle all
+ask "who reads this cell?", which used to mean a `keep` over the entire sheet
+per question. Removing those scans is where the **60x edit improvement** came
+from (a write to the root of a 1000-deep chain: 83 ms -> 1.3 ms).
+
+The cost is that it has to be updated by hand, in `reindex-readers!`, on every
+path that changes a cell's `:deps` — and a missed update is not a slow answer
+but a wrong one: a dependent that never rebuilds (silently stale value) or a
+cycle that is not refused (StackOverflow). The paths today are the three
+branches of `write-cell!` plus `load-document!`'s error branch, which REPLACES a
+meta entry wholesale. `engine-test/reverse-index-tracks-every-write` pins it by
+comparing the maintained index against a fresh scan after each kind of write and
+after 400 random ones; deleting any single `reindex-readers!` call fails it.
+
+**If you add a path that writes `:deps` into `:meta`, it must call
+`reindex-readers!` first** (it reads the OLD deps from `:meta`, so ordering
+matters). The dynamic half of the reverse edges is deliberately NOT indexed:
+`:dyn` is written from `rt/lookup-dyn` on executor threads, it holds an entry
+only for cells that have a dynamic ref (usually none), and a second index kept
+in step across threads is a lock waiting to be got wrong.
 
 ## A formula can await at most ~250 cells (JVM 255-argument limit) — FIXED
 
