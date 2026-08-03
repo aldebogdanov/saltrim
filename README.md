@@ -23,6 +23,9 @@ restricted **Clojure s-expressions** (not infix). Reference other cells with the
 | `$A1:C1` | a row range `[A1 B1 C1]` |
 | `$A1:B2` | a rectangle, row-major `[A1 B1 A2 B2]` |
 
+A range may cover up to 5 000 cells; a bigger one is refused when you enter it,
+rather than left to time out.
+
 References shift on paste (see below). The `$` forms are shorthand for the
 underlying reader tags — `$A1` for `#cell A1`, and `$A1:A3` for `#cells A1:A3` —
 which you can also write out in full if you prefer.

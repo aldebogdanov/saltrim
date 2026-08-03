@@ -44,8 +44,14 @@
 
 (def MAX-DYN-RANGE
   "Cap on the cell count of a dynamically resolved range — an unbounded
-   `$(str \"A1:ZZ\" huge)` would install that many awaits in one body."
-  10000)
+   `$(str \"A1:ZZ\" huge)` would await that many cells in one body.
+
+   Mirrors `formula/MAX-RANGE-CELLS`, and for the same measured reason: the
+   awaits are looped rather than written out flat, so what bounds a range now is
+   the time of its first evaluation against `sheet/EVAL-TIMEOUT-MS`, not the
+   JVM's argument limit. Past the cap the sheet would WEDGE instead of reporting
+   a bad range, so the two caps must stay in step."
+  5000)
 
 (defn- canon-addr
   "Canonical form of one address string (\"a01\" -> \"A1\"), or nil if it isn't
