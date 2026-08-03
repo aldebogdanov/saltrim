@@ -594,45 +594,40 @@ rather than merely order-correct, and `load-document!` is explicitly documented
 as order-independent — today that is true of the RESULT but very much not of
 the cost.
 
-## A formula can await at most ~250 cells (JVM 255-argument limit)
+## A formula can await at most ~250 cells (JVM 255-argument limit) — FIXED
 
-Found by the benchmark suite (`clojure -M:bench`), which is why it exists.
-`=(sum $A1:A250)` works; `=(sum $A1:A260)` does not — it fails to COMPILE with
+Found by the benchmark suite, fixed in the same track. Left here because the
+shape of the fix is a constraint on any future change to `formula/compile`.
 
-    java.lang.ClassFormatError: Too many arguments in method signature
+`=(sum $A1:A250)` compiled; `=(sum $A1:A260)` failed to compile with
+`ClassFormatError: Too many arguments in method signature`. A range expands to
+one `await` per cell, and Spindel's CPS transform nests a continuation per await
+whose method signature carries every previously-bound local — so ~250 awaits
+exceeded the JVM's hard cap of 255 arguments.
 
-A range expands statically to one `await` per cell, and Spindel's CPS transform
-nests a continuation per await, each carrying every previously-bound value as a
-method argument. Past ~250 the generated continuation method exceeds the JVM's
-hard cap of 255 arguments. The exact ceiling depends on how many other locals
-the formula has, so it is not a number we can quote — only a region.
+The fix: **awaits are looped, not written out flat**. One await site, one
+continuation frame reused via `recur`, values collected into a vector that
+reaches the SCI body through `apply`. No per-cell local exists, so nothing
+accumulates in a signature. Two rules that fall out of this and must survive
+future edits:
 
-Three things make this worse than the raw limit:
+- The addresses arrive as a runtime ARGUMENT, never as a literal in the emitted
+  code — a 5 000-element literal vector hits the other JVM limit, "Method code
+  too large".
+- `static-spin` is a plain `defn`, not an `eval`ed factory, because the shape no
+  longer varies per formula. That removed a per-`set-cell!` `eval` and is most
+  of why build/load got 9-30x faster; do not reintroduce a per-formula `eval` on
+  the static path.
 
-- **It throws out of `set-cell!`** rather than becoming a cell error, so the
-  user gets a failure toast about a ClassFormatError instead of "that range is
-  too big". `load-document!` is tolerant and keeps the cell as an error, so the
-  SAME formula crashes when typed and loads quietly when reopened — the sheet
-  is in a state the editor cannot reproduce.
-- **Every configured cap is far above it**: `MAX-DYN-RANGE` is 10 000 and the
-  importer's `max-range-cells` is 4 096. Both promise ranges an order of
-  magnitude larger than the engine can actually compile, so a .xlsx with
-  `SUM(A1:A1000)` — utterly ordinary — imports and then fails.
-- `=(sum $A1:A1000)` is not an exotic formula. This is a real ceiling on real
-  spreadsheets.
+The dynamic path keeps the flat shape below `FLAT-AWAIT-LIMIT` (200 refs) and
+switches to the looped one above it. Not premature: a dynamic formula re-runs
+its address fns on every recompute and is structurally rebuilt on ANY edit, and
+making the looped shape unconditional cost the bench `dyn` shape 10.5 s against
+6.3 s at 1000 cells.
 
-The cheap mitigation is a guard: reject a range wider than the safe limit at
-compile time with a message naming the limit, and lower `MAX-DYN-RANGE` /
-`max-range-cells` to match. That turns a crash into an explanation but does not
-raise the ceiling.
-
-The actual fix is for a range reference to compile to ONE await of a collection
-rather than N awaits of cells — the runtime would resolve the whole range in a
-single breakpoint. That changes the dependency graph's shape (a range edge
-instead of N cell edges), which touches `formula/compile`, `runtime/lookup`,
-`sheet/deps`, the graph view and the dynamic-ref cycle check. Worth doing: it
-lifts the ceiling AND shrinks the per-cell dep bookkeeping that `star`/
-`aggregate` shapes show as the dominant build cost.
+What now bounds a range is TIME, not the argument cap — see `MAX-RANGE-CELLS`,
+lowered from a fictional 10 000 to a measured 5 000 so an oversized range is
+refused at install instead of wedging the sheet.
 
 ## Errors as VALUES (so a guard can catch a propagated one)
 

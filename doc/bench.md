@@ -47,23 +47,46 @@ Recorded 2026-07-30 · SaltRim dev · JVM 26.0.1 · macOS · 10 cores.
 
 | shape | n | cells | build | load | edit | read all | build/cell |
 |---|---|---|---|---|---|---|---|
-| chain | 100 | 100 | 221ms | 720ms | 0.9ms | 0.3ms | 2.21ms |
-| wide | 100 | 200 | 349ms | 464ms | 0.1ms | 0.3ms | 1.75ms |
-| aggregate | 100 | 101 | 275ms | 7.17s | 0.3ms | 0.1ms | 2.73ms |
-| star | 100 | 101 | 220ms | 331ms | 1.3ms | 0.2ms | 2.18ms |
-| dyn | 100 | 200 | 927ms | 1.14s | 0.1ms | 0.3ms | 4.64ms |
-| xl | 100 | 200 | 601ms | 730ms | 0.1ms | 0.3ms | 3.00ms |
-| chain | 1000 | 1000 | 3.28s | 32.43s | 83ms | 1.0ms | 3.28ms |
-| wide | 1000 | 2000 | 4.46s | 6.76s | 0.5ms | 1.9ms | 2.23ms |
-| aggregate | 1000 | 1001 | **FAILED** | 3.01s | **FAILED** | **FAILED** | — |
-| star | 1000 | 1001 | 3.30s | 4.23s | 108ms | 0.9ms | 3.29ms |
-| dyn | 1000 | 2000 | 6.27s | 6.92s | 0.5ms | 1.8ms | 3.13ms |
-| xl | 1000 | 2000 | 4.80s | 6.89s | 0.5ms | 1.9ms | 2.40ms |
+| chain | 100 | 100 | 18ms | 42ms | 1.0ms | 0.4ms | 0.18ms |
+| wide | 100 | 200 | 162ms | 164ms | 0.1ms | 0.3ms | 0.81ms |
+| aggregate | 100 | 101 | 148ms | 180ms | 0.2ms | 0.1ms | 1.47ms |
+| star | 100 | 101 | 6.1ms | 7.8ms | 1.1ms | 0.2ms | 0.06ms |
+| dyn | 100 | 200 | 626ms | 615ms | 0.1ms | 0.3ms | 3.13ms |
+| xl | 100 | 200 | 160ms | 183ms | 0.1ms | 0.3ms | 0.80ms |
+| chain | 1000 | 1000 | 337ms | 2.75s | 85ms | 1.1ms | 0.34ms |
+| wide | 1000 | 2000 | 2.02s | 2.38s | 0.5ms | 1.8ms | 1.01ms |
+| aggregate | 1000 | 1001 | 2.04s | 4.85s | 0.4ms | 0.9ms | 2.04ms |
+| star | 1000 | 1001 | 124ms | 211ms | 87ms | 0.9ms | 0.12ms |
+| dyn | 1000 | 2000 | 6.6s † | 7.2s † | 0.5ms | 1.8ms | 3.3ms † |
+| xl | 1000 | 2000 | 1.89s | 2.12s | 0.5ms | 1.8ms | 0.95ms |
+
+† `dyn` measured alone (`--shapes=dyn 1000`), for the order-sensitivity reason
+above; it reads ~10 s when run sixth in the sweep, on identical code.
+
+### Before the looped awaits
+
+The same suite on the previous engine, for comparison. `build` and `load` are
+where the change lands, because both were paying a per-formula `eval`:
+
+| shape | n | build before | after | load before | after |
+|---|---|---|---|---|---|
+| chain | 100 | 221ms | **18ms** | 720ms | **42ms** |
+| star | 100 | 220ms | **6.1ms** | 331ms | **7.8ms** |
+| aggregate | 100 | 275ms | **148ms** | 7.17s | **180ms** |
+| chain | 1000 | 3.28s | **337ms** | 32.43s | **2.75s** |
+| star | 1000 | 3.30s | **124ms** | 4.23s | **211ms** |
+| aggregate | 1000 | **FAILED** | **2.04s** | 3.01s | 4.85s |
+| wide | 1000 | 4.46s | **2.02s** | 6.76s | **2.38s** |
+| xl | 1000 | 4.80s | **1.89s** | 6.89s | **2.12s** |
+
+9-30x on the shapes dominated by installing formulas, and `aggregate` at 1000
+computes at all now instead of failing to compile. `edit` and `read` are
+unchanged — they were never the problem.
 
 Reading the table:
 
-- **~2-3 ms per cell to install**, near-flat from 100 to 1000. The 20 000-cell
-  import cap is therefore about a minute of pure engine time.
+- **~0.1-2 ms per cell to install**, depending on shape. The 20 000-cell import
+  cap is therefore seconds of engine time, not the minute it used to be.
 - **An edit is cheap when the graph is shallow and wide** — 0.1-0.5 ms for
   `wide`, `dyn` and `xl` even at 2000 cells, because only the touched
   dependents recompute. It costs ~100 ms when the edit is at the root of a
@@ -106,9 +129,9 @@ long chain waits tens of seconds today, and the wait is decided by hash
 ordering. See `TECHDEBT.md` — the fix is to install in dependency order, or to
 suppress per-cell rebuilds during a bulk load and do one pass at the end.
 
-### 2. A formula can await at most ~250 cells
+### 2. A formula can await at most ~250 cells — FIXED
 
-`=(sum $A1:A250)` compiles;
+`=(sum $A1:A250)` compiled;
 `=(sum $A1:A260)` dies with `ClassFormatError: Too many arguments in method
 signature`. A range expands to one `await` per cell, and Spindel's CPS transform
 nests a continuation per await carrying every prior binding as a method
@@ -116,7 +139,16 @@ argument — past ~250 the generated method exceeds the JVM's hard 255-argument
 cap. `aggregate` is therefore the shape that fails rather than the shape that is
 slow, and the harness reports **FAILED** for it instead of aborting the run.
 
-That is a real ceiling on ordinary spreadsheets, and the configured limits
+**Fixed**: the awaits are now looped — one await site, one continuation frame
+reused via `recur` — so nothing accumulates in a method signature. 260, 500,
+1000 and 5000-cell formulas all compute, stay reactive, and keep range order.
+What bounds a range now is the TIME of its first evaluation against
+`sheet/EVAL-TIMEOUT-MS`, so `MAX-RANGE-CELLS` dropped from a fictional 10 000 to
+a measured 5 000 and an oversized range is refused at install instead of wedging
+the sheet. See `TECHDEBT.md` for the constraints the fix imposes on future
+edits to `formula/compile`.
+
+The original finding, for the record: the configured limits
 (`MAX-DYN-RANGE` 10 000, the importer's `max-range-cells` 4 096) promise ranges
 far larger than the engine can compile. Full write-up, including why the fix is
 "a range should be ONE await of a collection", is in `TECHDEBT.md`.

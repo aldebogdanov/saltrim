@@ -862,3 +862,47 @@
       (is (< (- (System/currentTimeMillis) t0) (* 3 sh/EVAL-TIMEOUT-MS))))
     (testing "a LITERAL style still shows — it needs no computation"
       (is (= "navy" (sh/style-value s "A1" :fg))))))
+
+(deftest large-ranges
+  ;; The JVM caps a method signature at 255 arguments, and Spindel's CPS
+  ;; transform makes one continuation argument per await — so awaits written out
+  ;; flat capped a formula at ~250 referenced cells, forty times below the
+  ;; advertised MAX-RANGE-CELLS. `=(sum $A1:A260)` died with a ClassFormatError
+  ;; at INSTALL time. The awaits are now looped (one site, one frame), so the
+  ;; ceiling is gone; these sizes all failed before.
+  (testing "a formula can reference far more than the old ~250-cell ceiling"
+    (doseq [n [260 500 1000]]
+      (let [s (sh/create-sheet)]
+        (doseq [i (range n)] (sh/set-cell! s (str "A" (inc i)) (str i)))
+        (sh/set-cell! s "B1" (str "=(sum $A1:A" n ")"))
+        (sh/settle! s)
+        (is (= (/ (* n (dec n)) 2) (sh/value s "B1"))
+            (str n " cells in one formula")))))
+  (testing "values arrive in range order, not merely as a set"
+    (let [s (sh/create-sheet)]
+      (doseq [i (range 300)] (sh/set-cell! s (str "A" (inc i)) (str i)))
+      (sh/set-cell! s "B1" "=(vec (take 5 $A1:A300))")
+      (sh/settle! s)
+      (is (= [0 1 2 3 4] (sh/value s "B1")))))
+  (testing "and stay reactive — an edit deep inside a big range recomputes"
+    (let [s (sh/create-sheet)]
+      (doseq [i (range 1000)] (sh/set-cell! s (str "A" (inc i)) "1"))
+      (sh/set-cell! s "B1" "=(sum $A1:A1000)")
+      (sh/settle! s)
+      (is (= 1000 (sh/value s "B1")))
+      (sh/set-cell! s "A700" "1000")
+      (sh/settle! s)
+      (is (= 1999 (sh/value s "B1")))))
+  (testing "a dynamic ref and a big static range coexist in one formula"
+    ;; the dyn path binds one local per site plus the value vector, so it does
+    ;; not reintroduce a per-cell local
+    (let [s (sh/create-sheet)]
+      (doseq [i (range 300)] (sh/set-cell! s (str "A" (inc i)) (str i)))
+      (sh/set-cell! s "C1" "5")
+      (sh/set-cell! s "B1" "=(+ (sum $A1:A300) $(str \"A\" $C1))")
+      (sh/settle! s)
+      (is (= 44854 (sh/value s "B1")))))
+  (testing "past the cap a range is refused at install, not left to wedge"
+    (let [s (sh/create-sheet)]
+      (is (thrown-with-msg? clojure.lang.ExceptionInfo #"covers 6000 cells \(max 5000\)"
+                            (sh/set-cell! s "B1" "=(sum $A1:A6000)"))))))

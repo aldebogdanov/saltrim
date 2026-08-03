@@ -84,10 +84,20 @@
 (def MAX-RANGE-CELLS
   "Cap on how many cells a STATIC range (`$A1:D9`, `#cells A1:D9`) may expand to
    at read time. Ranges expand eagerly into one ref marker per cell, so a typo'd
-   `$A1:ZZ99999` would build millions of markers (and that many `await`s in one
-   body) before anything could reject it. Mirrors `rt/MAX-DYN-RANGE`, which caps
-   the dynamic `$(…)` path the same way."
-  10000)
+   `$A1:ZZ99999` would build millions of markers before anything could reject
+   it. Mirrors `rt/MAX-DYN-RANGE`, which caps the dynamic `$(…)` path the same
+   way.
+
+   MEASURED, not guessed. It used to be 10 000 while the engine could not
+   compile past ~250 (see the await note below) — the cap promised forty times
+   what worked. With the awaits looped, size is bounded by TIME instead: first
+   evaluation of `=(sum $A1:AN)` takes ~0.2 s at 1000, ~1.2 s at 6000 and ~2.0 s
+   at 8000, against `sheet/EVAL-TIMEOUT-MS` of 2 s. Past that the sheet WEDGES,
+   which is a far worse outcome than a rejection — a wedge is sticky and needs
+   the sheet reopened. 5000 leaves roughly a 2x margin on the machine this was
+   measured on; a range bigger than that is refused at read time with a message
+   naming the limit."
+  5000)
 
 (defn- expand-range
   "`(vector <ref> …)` for the inclusive rectangle `a`..`b`, refusing anything
@@ -676,6 +686,48 @@
 
 ;; --- compile ------------------------------------------------------------
 
+;; --- awaiting the referenced cells ---------------------------------------
+;; Every distinct referenced cell is awaited exactly once, IN A LOOP with a
+;; single await site — not one `await` per cell.
+;;
+;; That is not a style choice. Spindel's CPS transform turns each await into a
+;; nested continuation whose method signature carries every previously-bound
+;; local, so N awaits written out flat generate a method with ~N arguments —
+;; and the JVM caps a method signature at 255. `=(sum $A1:A250)` compiled;
+;; `=(sum $A1:A260)` died with `ClassFormatError: Too many arguments in method
+;; signature`, forty times below the `MAX-RANGE-CELLS` we advertised. Found by
+;; `clojure -M:bench`; see `spikes/10-await-fanout-chunking.clj` for the
+;; alternatives (a tree of chunk spins also works, and is strictly more
+;; machinery for the same result).
+;;
+;; A loop reuses ONE continuation frame via `recur`, so the depth is constant
+;; and the whole 10 000-cell cap is reachable. The addresses arrive as a runtime
+;; ARGUMENT rather than a literal in the emitted code, because a 5 000-element
+;; literal vector hits the other JVM limit — "Method code too large".
+;;
+;; The values come back as a vector in `addrs` order and reach the SCI body via
+;; `apply`, so no per-cell local is ever bound: a call with 1000 arguments is
+;; fine (Clojure compiles anything past 20 to `.applyTo`); it is only the
+;; continuation SIGNATURE that is capped.
+
+(def ^:private FLAT-AWAIT-LIMIT
+  "Above this many referenced cells, a formula's awaits are looped instead of
+   written out flat. Set well below the JVM's 255-argument cap that forces the
+   issue, since a formula has other locals too."
+  200)
+
+(defn- static-spin
+  "Spin awaiting each address in `addrs` once, in order, then calling `uf` with
+   the values. A plain fn, not an `eval`ed factory — the shape no longer depends
+   on the formula, so the CPS transform happens once when this namespace is
+   compiled instead of on every `set-cell!`."
+  [uf addrs]
+  (spin (loop [as addrs, acc []]
+          (if (seq as)
+            (let [v (await (rt/lookup (first as)))]
+              (recur (rest as) (conj acc v)))
+            (apply uf acc)))))
+
 (defn- dyn-bindings
   "Emitted let-binding pairs for ONE dynamic ref site: compute the address
    string (SCI), resolve/validate it, then a loop awaiting each resolved cell —
@@ -684,12 +736,16 @@
    second await of a shared node. `d` unwraps to a scalar when the string named
    a single cell (\"A5\"), stays a row-major vector for a range (\"A1:B3\") —
    mirroring `$A5` vs `$A5:A5`. Returns [binding-pairs d-sym]; `vmap` (the
-   running addr->value map) is read and re-shadowed by each site in turn."
-  [self k afn-args {:keys [sym]}]
+   running addr->value map) is read and re-shadowed by each site in turn.
+
+   `afn-call` is the finished form that computes this site's address string —
+   the caller decides whether that is a direct call over per-cell locals or an
+   `apply` over the value vector (see FLAT-AWAIT-LIMIT)."
+  [self k afn-call {:keys [sym]}]
   (let [vm  (gensym "vm_") a (gensym "a_") res (gensym "res_")
         raw (gensym "raw_") as (gensym "as_") acc (gensym "acc_")
         v   (gensym "v_")]
-    [[a    (list* (list 'nth 'afns k) afn-args)
+    [[a    afn-call
       res  (list 'uno.michelada.saltrim.runtime/resolve-dyn a)
       raw  (list 'loop [as (list :addrs res) vm 'vmap acc []]
                  (list 'if (list 'seq as)
@@ -737,19 +793,25 @@
                     :else x))
                 form)
          dyns  @dyns*
+         ;; the static awaits written out flat, one local per cell — what the
+         ;; dynamic path uses below FLAT-AWAIT-LIMIT
          bnds  (vec (mapcat (fn [a s]
                               [s (list 'await (list 'uno.michelada.saltrim.runtime/lookup a))])
-                            addrs syms))]
+                            addrs syms))
+         ;; …and the same awaits as a loop over the addresses (see the note above
+         ;; `static-spin`): one await site, one continuation frame, no per-cell
+         ;; local. `vals` is the vector of values in `addrs` order.
+         vbnds ['vals (list 'loop ['as 'addrs 'acc []]
+                            (list 'if (list 'seq 'as)
+                                  (list 'let ['v (list 'await
+                                                       (list 'uno.michelada.saltrim.runtime/lookup
+                                                             (list 'first 'as)))]
+                                        (list 'recur (list 'rest 'as) (list 'conj 'acc 'v)))
+                                  'acc))]]
      (if (empty? dyns)
-       ;; static-only: exactly the pre-dynref shape
-       (let [user-fn (sci-fn ctx syms body)
-             ;; eval a factory (fn [uf] (spin (let [<awaits>] (uf <syms>)))) in
-             ;; this ns so spin/await resolve and CPS sees the effects; then
-             ;; close over uf.
-             factory (binding [*ns* (find-ns 'uno.michelada.saltrim.formula)]
-                       (eval (list 'fn ['uf]
-                                   (list 'spin (list 'let bnds (list* 'uf syms))))))]
-         (factory user-fn))
+       ;; static-only: no per-formula eval at all — the shape is fixed, so the
+       ;; CPS transform already happened when this namespace was compiled.
+       (static-spin (sci-fn ctx syms body) addrs)
        (let [_ (when-not self
                  (throw (ex-info "dynamic $(…) ref needs an owner cell" {})))
              ;; afn k computes site k's address string from the static values
@@ -759,16 +821,38 @@
                          (range) dyns)
              all   (into syms (map :sym dyns))
              user-fn (sci-fn ctx all body)
-             dbnds (loop [k 0, args (vec syms), out ['vmap (zipmap addrs syms)]]
+             ;; Site k's address fn takes the static values plus the results of
+             ;; earlier sites — as ONE seq, applied, so the emitted body binds
+             ;; `vals` and one local per dynamic site rather than one per cell.
+             ;;
+             ;; Only above FLAT-AWAIT-LIMIT, though. A dynamic formula re-runs
+             ;; its address fns on every recompute AND is structurally rebuilt on
+             ;; ANY edit, so the `apply`+`concat` this shape needs is paid a lot
+             ;; of times: measured on the bench `dyn` shape at 1000 cells, making
+             ;; it unconditional cost 10.5 s against 6.3 s for the spliced form.
+             ;; Below the limit the flat shape is both faster and exactly what
+             ;; shipped before, so it stays.
+             big?  (> (count addrs) FLAT-AWAIT-LIMIT)
+             args-of (if big?
+                       (fn [k dsyms] (list 'apply (list 'nth 'afns k)
+                                           (list* 'concat 'vals [(vec dsyms)])))
+                       (fn [k dsyms] (list* (list 'nth 'afns k) (into (vec syms) dsyms))))
+             call-uf (fn [dsyms] (if big?
+                                   (list 'apply 'uf (list* 'concat 'vals [(vec dsyms)]))
+                                   (list* 'uf (into (vec syms) dsyms))))
+             head  (if big?
+                     (into vbnds ['vmap (list 'zipmap 'addrs 'vals)])
+                     (into bnds ['vmap (zipmap addrs syms)]))
+             dbnds (loop [k 0, dsyms [], out head]
                      (if-let [d (nth dyns k nil)]
-                       (let [[pairs dsym] (dyn-bindings self k args d)]
-                         (recur (inc k) (conj args dsym) (into out pairs)))
+                       (let [[pairs dsym] (dyn-bindings self k (args-of k dsyms) d)]
+                         (recur (inc k) (conj dsyms dsym) (into out pairs)))
                        out))
              factory (binding [*ns* (find-ns 'uno.michelada.saltrim.formula)]
-                       (eval (list 'fn ['uf 'afns]
-                                   (list 'spin (list 'let (into bnds dbnds)
-                                                     (list* 'uf all))))))]
-         (factory user-fn afns))))))
+                       (eval (list 'fn ['uf 'afns 'addrs]
+                                   (list 'spin (list 'let dbnds
+                                                     (call-uf (mapv :sym dyns)))))))]
+         (factory user-fn afns addrs))))))
 
 (defn compile-literal-wrapper
   "Spin exposing a literal cell's editable signal as a public awaitable node:
