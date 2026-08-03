@@ -183,7 +183,14 @@ Gotchas learned the hard way:
 - `await`/`track` must appear **literally** in the spin body (CPS breakpoints) —
   not inside a nested `fn`. Ranges expand statically at read time.
 - A cyclic formula **StackOverflows** — `sheet/would-cycle?` rejects before
-  install.
+  install. That check is O(depth) per install and is now ~65% of the cost of
+  building a deep chain (see TECHDEBT) — don't add work to it.
+- **A Spin body that has never run has captured nothing.** `await` grabs the
+  registry node when the body RUNS, not when it compiles, so a cell installed
+  before its dependencies is fine as long as nothing derefs in between. That is
+  why `load-document!` is a BULK path (install everything, rebuild once at the
+  end) and not a loop over `set-cell!` — as a loop it cascaded on nearly every
+  cell and a 1000-cell chain took 2.75s to open instead of 33ms.
 
 ## Datastar / http-kit gotchas — already solved
 

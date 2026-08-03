@@ -559,7 +559,7 @@ stay inside backend value limits. That needs numbers from a real sheet, plus a
 decision about what the app does when a write exceeds it (refuse at the UI, with
 a message, rather than throw at save).
 
-## Sheet load is order-dependent, and the order is a hash order
+## Sheet load is order-dependent, and the order is a hash order — FIXED
 
 Found by the benchmark suite. Installing the SAME 300-cell dependency chain
 costs 897 ms in dependency order, 3.9 s in hash-map order, and **111.7 s**
@@ -573,26 +573,57 @@ to capture the real node (this is what makes a reference to a not-yet-filled
 cell reactive at all — see the empty-cell note). Install a chain back-to-front
 and every single insert re-triggers that cascade over everything already placed.
 
-`load-document!` iterates the document MAP, so the order is whatever the hash
-gives — and `store/load-record` hands it exactly such a map. Nobody chose this
+`load-document!` iterated the document MAP, so the order was whatever the hash
+gave — and `store/load-record` hands it exactly such a map. Nobody chose this
 order; it is not stable across Clojure versions either. So the time to open a
-sheet is decided by hashing.
+sheet was decided by hashing.
 
-Two fixes, either of which would do:
+**Fixed** by the second of the two options weighed here — suppress the rebuild
+during the bulk load and do one pass at the end — because it is order-independent
+by construction rather than merely order-correct. (The first was: derive the dep
+graph from the document and install in topological order. Rejected: it only
+makes the good order likely, and it cannot help the interactive path.)
 
-- **Install in dependency order.** The document already contains the formulas,
-  so the dep graph is derivable before anything is installed — topologically
-  sort, then install. Cells in a cycle (impossible today, since cycles are
-  rejected) or with dangling refs go last.
-- **Suppress rebuilds during a bulk load.** Add a bulk mode where `set-cell!`
-  skips the dependent rebuild, then do ONE rebuild pass over the whole sheet at
-  the end. Simpler to reason about, and it also fixes the import path, which has
-  the same shape.
+`load-document!` now installs every cell with no cascade, then rebuilds ONE set:
+the dependent closure of what it loaded, computed from a single reverse-edge
+index rather than a scan per cell. That set is normally EMPTY, and the reason is
+worth keeping in mind before anyone "optimizes" the pass away or widens it —
+**a Spin body that has never run has captured nothing**. Nothing in the install
+pass derefs a spin, so a cell installed before its dependencies still awaits the
+finished registry entry when it eventually runs. Only cells ALREADY on the sheet
+can hold a dead node, and only `restore-line!` loads onto a populated sheet.
 
-The second is probably the better one: it is order-independent by construction
-rather than merely order-correct, and `load-document!` is explicitly documented
-as order-independent — today that is true of the RESULT but very much not of
-the cost.
+On a populated sheet the loaded cells are rebuilt too, deliberately: resetting a
+literal's signal marks the old dependents dirty and the executor drains on its
+own thread, so one of them can run — and capture — while the pass is still
+going. That is cheap there (the snapshot is one line's worth of cells) and it is
+the only window in which a loaded cell can go stale.
+
+Measured after, on today's engine: 35 ms / 11 ms / 10 ms for the same three
+orders, and `chain` 1000 loads in 33 ms instead of 2.75 s. See `doc/bench.md`.
+
+## Cycle detection is O(depth) per install
+
+Found by the benchmark suite once the load cascade above stopped hiding it.
+`would-cycle?` answers "can this new reference reach me?" by walking the forward
+dependency graph from scratch, every time. In a chain that walk is the entire
+ancestry, so installing n cells costs O(n²) — **~65% of the time to build a
+1000-deep chain** (332 ms with the check, 117 ms with it stubbed out), and the
+reason loading in DEPENDENCY order is now the slow order.
+
+The check itself is not optional: a cyclic formula deadlocks `await` into a
+StackOverflowError, so it has to run before `compile`, and it has to consider
+dynamic edges as well as static ones (see `rt/lookup-dyn`, which repeats it at
+run time for targets only known then).
+
+What is wasteful is recomputing reachability from nothing when the graph changed
+by one edge. The known fix is incremental cycle detection over a maintained
+topological order (Bender–Fineman–Gilbert–Tarjan): keep a rank per cell, and on
+a new edge only reorder the region between the two endpoints, which is O(1) for
+the overwhelmingly common append. That is a real piece of work — the rank has to
+survive `remove-line!`, the reshape rebuilds, and the dynamic edges recorded
+mid-evaluation — so it is a PR of its own, not a tweak. Nothing is currently
+wrong; a sheet just costs more to open than it needs to.
 
 ## A formula can await at most ~250 cells (JVM 255-argument limit) — FIXED
 

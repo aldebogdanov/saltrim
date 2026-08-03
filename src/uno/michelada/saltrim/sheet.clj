@@ -166,6 +166,34 @@
                (into out (filter #(get-in @meta [% :dyn?]) new))))
       out)))
 
+(defn- reverse-edges
+  "The whole reverse-dependency graph in one pass: addr -> #{addrs referencing
+   it}, over static `:deps` plus currently-recorded dynamic edges. `rdeps`
+   answers the same question for ONE address by scanning every cell, which is
+   what a single edit wants and what a bulk load cannot afford (a scan per cell
+   is quadratic in the sheet)."
+  [meta dyn]
+  (let [add (fn [idx a ds] (reduce (fn [m d] (update m d (fnil conj #{}) a)) idx ds))]
+    (as-> {} idx
+      (reduce-kv (fn [m a mm] (add m a (:deps mm))) idx @meta)
+      (reduce-kv (fn [m a ts] (add m a ts)) idx @dyn))))
+
+(defn- stranded-dependents
+  "Cells OUTSIDE `loaded` that reach one of them over the reverse graph — the
+   cells a bulk load can leave holding a spin object it just replaced. Computed
+   from one `reverse-edges` index rather than a scan per step.
+
+   Traversal runs THROUGH the loaded cells (they are the starting frontier) so a
+   dependent two hops out is found, but they are never reported: a cell the load
+   installed has a brand-new spin, and a brand-new spin has captured nothing."
+  [meta dyn loaded]
+  (let [rev (reverse-edges meta dyn)]
+    (loop [frontier (vec loaded) seen (set loaded) out #{}]
+      (if-let [a (peek frontier)]
+        (let [new (remove seen (get rev a))]
+          (recur (into (pop frontier) new) (into seen new) (into out new)))
+        out))))
+
 (declare rebuild-styles!)
 
 (defn set-cell!
@@ -385,14 +413,20 @@
 
    `@styles` is deref'd once, so `set-style!`'s own swaps can't disturb the walk.
    `$val` rewrites to a ref on the owner, so an owner's OWN structural change is
-   covered too."
-  [{:keys [styles] :as sheet} addrs]
-  (when (seq addrs)
-    (let [hit? (set addrs)]
-      (doseq [[a props] @styles
-              [prop {:keys [kind deps raw]}] props
-              :when (and (= kind :formula) (some hit? deps))]
-        (set-style! sheet a prop raw)))))
+   covered too.
+
+   `skip` is a set of `[addr prop]` pairs to leave alone — what `load-document!`
+   passes for the props it has just compiled itself, which by definition already
+   await the finished graph."
+  ([sheet addrs] (rebuild-styles! sheet addrs #{}))
+  ([{:keys [styles] :as sheet} addrs skip]
+   (when (seq addrs)
+     (let [hit? (set addrs)]
+       (doseq [[a props] @styles
+               [prop {:keys [kind deps raw]}] props
+               :when (and (= kind :formula) (some hit? deps)
+                          (not (contains? skip [a prop])))]
+         (set-style! sheet a prop raw))))))
 
 (defn style-value
   "Computed value of style PROP of `addr`: a string, nil (blank/absent), or a
@@ -699,28 +733,66 @@
    as an error (its raw is preserved; `value` reports {:error …}) instead of
    aborting the load.
 
+   A BULK path, deliberately not a loop over `set-cell!`. Every install there
+   transitively rebuilds the dependents that captured the spin it replaced —
+   right for one edit, quadratic for a load: a document arrives in hash order, so
+   most cells land before something they depend on and rebuild most of the sheet
+   behind them. Measured at ~8x the cost of the same cells typed in dependency
+   order (doc/bench.md). Here the cells go in first and the rebuild happens once,
+   over the only set that can actually be holding a dead node.
+
+   That set is usually EMPTY, because a fresh Spin's body has not run and so has
+   captured nothing: nothing in the install pass derefs a spin, so a cell loaded
+   before its dependencies still awaits the finished registry entry. Only cells
+   ALREADY on the sheet can be stale, and only `restore-line!` loads onto a
+   populated sheet — everything else loads into a fresh or just-cleared one. On a
+   populated sheet the loaded cells are rebuilt too: resetting a literal's signal
+   marks the old dependents dirty, and the executor drains in the background, so
+   one of them can run (and capture) mid-pass.
+
    An address the grid can't hold is DROPPED, not kept as an error: recording it
    would put it right back into `:meta`, where the geometry pass walks it — which
    is exactly what made such a cell fatal in the first place. Dropping it means a
    sheet written before addresses were bounded still opens (minus the ghost).
    Returns {:errors [[addr msg] …]}."
-  [{:keys [meta] :as sheet} doc]
-  (let [errs (atom [])]
-    (doseq [[addr props] doc]
-      (if-not (addr/valid? addr)
-        (swap! errs conj [addr "address outside the grid — cell dropped"])
-        (do
-          (when-let [raw (:value props)]
-            (try (set-cell! sheet addr raw)
-                 (catch Exception e
-                   (swap! errs conj [addr (.getMessage e)])
-                   (swap! meta assoc addr {:raw raw :kind :error
-                                           :err (.getMessage e)
-                                           :errcode (errors/classify e)}))))
-          (doseq [[prop raw] (:style props)]
-            (try (set-style! sheet addr prop raw)
-                 (catch Exception e
-                   (swap! errs conj [(str addr " " (name prop)) (.getMessage e)])))))))
+  [{:keys [rt meta dyn styles] :as sheet} doc]
+  (let [errs    (atom [])
+        warm?   (boolean (or (seq @meta) (seq @styles)))
+        entries (reduce (fn [acc [addr props]]
+                          (if (addr/valid? addr)
+                            (conj acc [(addr/canon addr) props])
+                            (do (swap! errs conj
+                                       [addr "address outside the grid — cell dropped"])
+                                acc)))
+                        [] doc)
+        loaded  (volatile! #{})
+        styled  (volatile! #{})]
+    (binding [ec/*execution-context* rt]
+      ;; 1. every value cell, with no dependent cascade
+      (doseq [[addr {:keys [value]}] entries :when value]
+        (try (write-cell! sheet addr value)
+             (vswap! loaded conj addr)
+             (catch Exception e
+               (swap! errs conj [addr (.getMessage e)])
+               (swap! meta assoc addr {:raw value :kind :error
+                                       :err (.getMessage e)
+                                       :errcode (errors/classify e)}))))
+      ;; 2. the one rebuild pass (see above — empty unless the sheet was warm)
+      (let [stale (cond-> (stranded-dependents meta dyn @loaded)
+                    warm? (into @loaded))]
+        (doseq [a stale :let [raw (get-in @meta [a :raw])] :when raw]
+          (try (write-cell! sheet a raw)
+               (catch Exception e
+                 (swap! errs conj [a (.getMessage e)]))))
+        ;; 3. style props, compiled against the finished value graph
+        (doseq [[addr {:keys [style]}] entries
+                [prop raw] style]
+          (vswap! styled conj [addr prop])
+          (try (set-style! sheet addr prop raw)
+               (catch Exception e
+                 (swap! errs conj [(str addr " " (name prop)) (.getMessage e)]))))
+        ;; 4. and the styles ALREADY on the sheet that read what changed
+        (rebuild-styles! sheet (into @loaded stale) @styled)))
     {:errors @errs}))
 
 ;; --- structural edits: insert / delete a whole row or column ------------
