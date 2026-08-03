@@ -863,6 +863,55 @@
     (testing "a LITERAL style still shows — it needs no computation"
       (is (= "navy" (sh/style-value s "A1" :fg))))))
 
+(defn- back-to-front-chain
+  "A `chain` document — A1 = 0, A_i = (inc A_i-1) — whose iteration order is the
+   WORST case for a bulk load: every cell arrives before the one it references."
+  [n]
+  (into (sorted-map-by
+         (fn [a b] (compare (Long/parseLong (subs b 1)) (Long/parseLong (subs a 1)))))
+        (cons ["A1" {:value "0"}]
+              (for [i (range 1 n)]
+                [(str "A" (inc i)) {:value (str "=(inc $A" i ")")}]))))
+
+(deftest bulk-load-does-not-cascade
+  ;; `load-document!` used to be a loop over `set-cell!`, which rebuilds the
+  ;; dependents of every cell it structurally replaces. During a load that is
+  ;; almost all of them: a document arrives in hash order, so most cells land
+  ;; before something they reference and each one re-triggers the cascade behind
+  ;; it. Measured at 111 SECONDS for a 300-cell chain loaded back-to-front, and
+  ;; 2.75 s for 1000 cells in hash order (doc/bench.md). The load is now one
+  ;; install pass plus one rebuild pass.
+  (testing "the worst possible order is still correct, and no longer quadratic"
+    (let [s  (mk)
+          t0 (System/currentTimeMillis)]
+      (sh/load-document! s (back-to-front-chain 300))
+      (sh/settle! s)
+      (let [ms (- (System/currentTimeMillis) t0)]
+        (is (= 299 (sh/value s "A300")) "the whole chain resolves")
+        (is (= 149 (sh/value s "A150")) "and so does the middle of it")
+        (is (< ms 20000)
+            (str "a back-to-front load must not cascade (took " ms "ms)")))))
+  (testing "a cell already on the sheet follows a spin the load replaced"
+    ;; the one case the deferred rebuild has to catch: B1's body has already RUN
+    ;; and captured A1's node, and the load hands A1 a new one (literal ->
+    ;; formula is a structural change). B1 is not in the document, so only the
+    ;; dependent closure reaches it.
+    (let [s (mk)]
+      (put s "A1" "1")
+      (put s "B1" "=(inc $A1)")
+      (is (= 2 (v s "B1")))
+      (sh/load-document! s {"A1" {:value "=(* 5 5)"}})
+      (is (= 26 (v s "B1")) "recomputed against the new node, not the dead one")))
+  (testing "and so does a style formula already on the sheet"
+    (let [s (mk)]
+      (put s "A1" "1")
+      (sh/set-style! s "B1" :bg "=(if (> $A1 10) \"tomato\" \"white\")")
+      (sh/settle! s)
+      (is (= "white" (sh/style-value s "B1" :bg)))
+      (sh/load-document! s {"A1" {:value "=(* 5 5)"}})
+      (sh/settle! s)
+      (is (= "tomato" (sh/style-value s "B1" :bg))))))
+
 (deftest large-ranges
   ;; The JVM caps a method signature at 255 arguments, and Spindel's CPS
   ;; transform makes one continuation argument per await — so awaits written out
