@@ -839,8 +839,11 @@ truncation) makes `k'` negative, and the loop's `(if (= i k') …)` counts up fr
 `i = 0` and can never reach it. `COMBIN` right above it guards with
 `(> k n)` → `#NUM!`; `COMBINA` has no equivalent guard.
 
+Reported upstream: https://github.com/replikativ/rechentafel/issues/2 — close
+this when a release carrying the fix is pinned in `deps.edn`.
+
 Reachable from any cell, but it degrades to `#TIMEOUT!` through `sheet/`'s
-eval-timeout wedge rather than freezing the sheet, so this is a report to file
-upstream rather than an outage here. It is the only borrowed function known to
+eval-timeout wedge rather than freezing the sheet, so this is not an outage
+here. It is the only borrowed function known to
 do it; there is no argument validation in front of the borrowed half generally,
 and adding one per function is not the answer — the timeout is.
