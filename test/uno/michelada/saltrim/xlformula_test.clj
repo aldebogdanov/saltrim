@@ -61,12 +61,25 @@
                "=(str-find \"a\" $A1)" "=(percentile $A1:A9 0.5)"
                "=(count (filter number? $A1:A9))" "=(count (str (trim (str $A1))))"
                "=(if (excel-truthy $A1) 1 2)" "=(let [x 1 y 2] (+ (+ x y) $A1))"
-               "=(sum (flatten (vector $A1:B2 $C3 5)))" "=(xl/TRANSPOSE $A1:B2)"]]
+               "=(sum (flatten (vector $A1:B2 $C3 5)))" "=(xl/TRANSPOSE #area A1:B2)"
+               "=(index #area A1:B2 2 1)"]]
     (is (= src (round src)) (str "round trip: " src)))
-  (testing "one deliberate non-identity"
+  (testing "deliberate non-identities — both come back BETTER than they went out"
     ;; xl/PMT and pmt ARE the same function; the importer prefers the Clojure
-    ;; name now, so this comes back better than it went out
-    (is (= "=(pmt $A1 10 -1000)" (round "=(xl/PMT $A1 10 -1000)")))))
+    ;; name now
+    (is (= "=(pmt $A1 10 -1000)" (round "=(xl/PMT $A1 10 -1000)")))
+    ;; a flat range handed to a shape-sensitive function is the bug #area fixes,
+    ;; so a round trip UPGRADES it: the export loses nothing (Excel ranges carry
+    ;; their own shape) and the import puts the shape back
+    (is (= "=(xl/TRANSPOSE #area A1:B2)" (round "=(xl/TRANSPOSE $A1:B2)")))))
+
+(deftest areas-export-as-one-range
+  ;; without area folding an #area argument would splice into one range PER ROW,
+  ;; so a one-argument function would be called with two
+  (is (= "TRANSPOSE(A1:B2)" (->xl "=(xl/TRANSPOSE #area A1:B2)")))
+  (is (= "MDETERM(A1:C3)"   (->xl "=(xl/MDETERM #area A1:C3)")))
+  (is (= "INDEX(A1:B2,2,1)" (->xl "=(index #area A1:B2 2 1)")))
+  (is (= "SUM(A1:B2)"       (->xl "=(sum $A1:B2)")) "a flat range still folds too"))
 
 (deftest count-idiom-checks-its-shape
   ;; the matcher recognises three specific expansions, and anything else that

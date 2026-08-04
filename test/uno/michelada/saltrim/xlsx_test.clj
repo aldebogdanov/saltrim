@@ -89,11 +89,23 @@
           "borrowed by the stdlib under a Clojure name")
       (is (= "=(norm-dist 1 0 1 true)" (t "NORM.DIST(1,0,1,TRUE)")))
       (is (= "=(str-find \"a\" $A1)" (t "FIND(\"a\",A1)")) "including the renamed ones")
-      (is (= "=(xl/TRANSPOSE $A1:B2)" (t "TRANSPOSE(A1:B2)"))
+      (is (= "=(xl/TRANSPOSE #area A1:B2)" (t "TRANSPOSE(A1:B2)"))
           "not in the stdlib -> reached verbatim through xl/")
       (is (= "=(sumif $A1:A9 \">5\")" (t "SUMIF(A1:A9,\">5\")")) "SUMIF is borrowed too")
       (is (= "=(xl/EOMONTH $A1 2)" (t "EOMONTH(A1,2)"))
           "date-shaped: only xl/ speaks Excel serials, so the borrowed name is skipped"))
+    (testing "a RECTANGLE reaches an Excel function as a rectangle"
+      ;; ->rv turns a flat collection into a COLUMN, so a shape-sensitive
+      ;; function handed $A1:B2 silently works on a 4x1 and answers wrongly
+      (is (= "=(index #area A1:B2 2 1)" (t "INDEX(A1:B2,2,1)")))
+      (is (= "=(xl/MDETERM #area A1:B2)" (t "MDETERM(A1:B2)")))
+      (is (= "=(sumproduct #area A1:B2 #area A1:B2)" (t "SUMPRODUCT(A1:B2,A1:B2)")))
+      (is (= "=(index $A1:A9 2)" (t "INDEX(A1:A9,2)"))
+          "a single COLUMN has no shape to lose and stays flat")
+      (is (= "=(index $A1:E1 2)" (t "INDEX(A1:E1,2)")) "nor does a single row")
+      (is (= "=(sum $A1:B2)" (t "SUM(A1:B2)"))
+          "and a hand-mapped aggregate stays flat — `sum` filters with number?,
+           which a nested vector would defeat"))
     (testing "a hand-written mapping still wins over the mechanical fallback"
       (is (= "=(xmin $A1:A9)" (t "MIN(A1:A9)")) "not xl/MIN — ours skips blanks")
       (is (= "=(sum $A1:A3)" (t "SUM(A1:A3)")))

@@ -115,6 +115,32 @@
                       {:range [a b] :cells n})))
     (cons 'vector (map ref-marker (addr/range-cells a b)))))
 
+(defn- expand-area
+  "`(vector (vector <ref> …) …)` for the inclusive rectangle `a`..`b` — the same
+   cells as `expand-range`, but grouped into ROWS so the shape survives.
+
+   Excel functions are defined over rectangles, and a flat row-major vector
+   cannot say whether `[1 2 3 4]` was 2x2, 1x4 or 4x1. `excel/->rv` already
+   turns a collection of collections into a 2D area (and a flat one into a
+   COLUMN), so this is the only piece that was missing: without it
+   `(xl/TRANSPOSE $A1:B2)` transposes a 4x1 column and silently answers
+   `[1 2 3 4]` instead of `[1 3 2 4]`. Shares `MAX-RANGE-CELLS` with
+   `expand-range` — same cells, same cost."
+  [a b]
+  (let [{ca :ci ra :ri} (addr/parse a)
+        {cb :ci rb :ri} (addr/parse b)
+        c0 (min ca cb) c1 (max ca cb)
+        r0 (min ra rb) r1 (max ra rb)
+        n  (* (inc (- c1 c0)) (inc (- r1 r0)))]
+    (when (> n MAX-RANGE-CELLS)
+      (throw (ex-info (str "area " a ":" b " covers " n " cells (max "
+                           MAX-RANGE-CELLS ") — reference a smaller rectangle")
+                      {:range [a b] :cells n})))
+    (cons 'vector
+          (for [r (range r0 (inc r1))]
+            (cons 'vector
+                  (for [c (range c0 (inc c1))] (ref-marker (addr/make c r))))))))
+
 (def ^:private readers
   {;; #cell A1 -> (::ref "A1")
    'cell  (fn [sym] (ref-marker (str sym)))
@@ -122,7 +148,12 @@
    ;; #cells A1:C1 -> (vector (::ref "A1") (::ref "B1") (::ref "C1"))  (rectangle)
    'cells (fn [sym]
             (let [[a b] (str/split (str sym) #":")]
-              (expand-range a b)))})
+              (expand-range a b)))
+   ;; #area A1:B2 -> (vector (vector (::ref "A1") (::ref "B1"))
+   ;;                        (vector (::ref "A2") (::ref "B2")))
+   'area  (fn [sym]
+            (let [[a b] (str/split (str sym) #":")]
+              (expand-area a b)))})
 
 (defn deps
   "Cell addresses referenced by a marker form."
@@ -346,6 +377,16 @@
    design)."
   [a b] (list ::range a b))
 
+(defn area-marker
+  "The 2D counterpart of `range-marker`: renders as `#area A1:B2`, which parses
+   into a (vector …) of ROW vectors so the rectangle's SHAPE survives to the
+   Excel adapter. Same asymmetry as `range-marker` — `parse` never emits it."
+  [a b] (list ::area a b))
+
+(defn area-ref?
+  "Is `x` an area marker (see `area-marker`)?"
+  [x] (and (seq? x) (= ::area (first x))))
+
 (defn range-ref?
   "Is `x` an unparse-side range marker?"
   [x] (and (seq? x) (= ::range (first x))))
@@ -365,11 +406,30 @@
           (when (= as (addr/range-cells tl br))
             [tl br]))))))
 
+(defn- vector-area
+  "If `x` is a (vector …) of ROW vectors that together tile a full rectangle —
+   exactly what `#area A1:B2` parses to — the [top-left bottom-right] corner
+   pair, else nil. The inverse of `expand-area`, for `unparse`."
+  [x]
+  (when (and (seq? x) (= 'vector (first x)))
+    (let [rows (rest x)]
+      (when (and (seq rows)
+                 (every? #(and (seq? %) (= 'vector (first %))
+                               (seq (rest %)) (every? ref? (rest %)))
+                         rows))
+        (let [grid (mapv #(mapv second (rest %)) rows)
+              tl   (ffirst grid)
+              br   (peek (peek grid))]
+          (when (= (apply concat grid)
+                   (addr/range-cells tl br))
+            [tl br]))))))
+
 (defn unparse
   "Marker form -> formula source WITHOUT the leading `=` — the inverse of
    `parse`. Cell refs render as the terse `$` sugar: (::ref \"A1\") -> $A1; a
-   (vector …) of refs forming a full rectangle re-collapses to $A1:B2; a range
-   marker (see `range-marker`) renders as $A1:B2 directly. Everything else
+   (vector …) of refs forming a full rectangle re-collapses to $A1:B2; a
+   (vector …) of ROW vectors tiling a rectangle re-collapses to #area A1:B2; a
+   range marker (see `range-marker`) renders as $A1:B2 directly. Everything else
    prints as EDN, so for any form in the image of `parse`:
      (= form (:form (parse (unparse form))))."
   [form]
@@ -377,6 +437,7 @@
     (ref? form)       (str "$" (second form))
     (dynref? form)    (str "$" (unparse (second form)))
     (range-ref? form) (str "$" (nth form 1) ":" (nth form 2))
+    (area-ref? form)  (str "#area " (nth form 1) ":" (nth form 2))
     (seq? form)       (cond
                         ;; a fn literal prints as one again, so flattened source
                         ;; reads the way it was written
@@ -385,7 +446,9 @@
                         :else
                         (if-let [[tl br] (vector-range form)]
                           (str "$" tl ":" br)
-                          (str "(" (str/join " " (map unparse form)) ")")))
+                          (if-let [[tl br] (vector-area form)]
+                            (str "#area " tl ":" br)
+                            (str "(" (str/join " " (map unparse form)) ")"))))
     (vector? form)    (str "[" (str/join " " (map unparse form)) "]")
     (map? form)       (str "{" (str/join ", " (map (fn [[k v]]
                                                      (str (unparse k) " " (unparse v)))
@@ -523,8 +586,9 @@
   (if (or (nil? src) (and (zero? dc) (zero? dr)))
     src
     (-> src
-        (str/replace #"#cells\s+([A-Za-z]+[0-9]+):([A-Za-z]+[0-9]+)"
-                     (fn [[_ a b]] (str "#cells " (shift-addr a dc dr) ":" (shift-addr b dc dr))))
+        (str/replace #"#(cells|area)\s+([A-Za-z]+[0-9]+):([A-Za-z]+[0-9]+)"
+                     (fn [[_ tag a b]]
+                       (str "#" tag " " (shift-addr a dc dr) ":" (shift-addr b dc dr))))
         (str/replace #"#cell\s+([A-Za-z]+[0-9]+)"
                      (fn [[_ a]] (str "#cell " (shift-addr a dc dr))))
         ;; $-sugar: range first, then a lone $A1 (the (?!:) keeps the single
@@ -559,8 +623,8 @@
     src
     (let [b (fn [a] (bump-addr a axis at delta))]
       (-> src
-          (str/replace #"#cells\s+([A-Za-z]+[0-9]+):([A-Za-z]+[0-9]+)"
-                       (fn [[_ a c]] (str "#cells " (b a) ":" (b c))))
+          (str/replace #"#(cells|area)\s+([A-Za-z]+[0-9]+):([A-Za-z]+[0-9]+)"
+                       (fn [[_ tag a c]] (str "#" tag " " (b a) ":" (b c))))
           (str/replace #"#cell\s+([A-Za-z]+[0-9]+)"
                        (fn [[_ a]] (str "#cell " (b a))))
           (str/replace #"\$([A-Za-z]+[0-9]+):([A-Za-z]+[0-9]+)"
@@ -640,8 +704,8 @@
                 (> c at) (str tag (with-coord a axis (dec c)))
                 :else    (str tag a))))]
       (-> src
-          (str/replace #"#cells\s+([A-Za-z]+[0-9]+):([A-Za-z]+[0-9]+)"
-                       (fn [[_ a b]] (range-rw "#cells " a b)))
+          (str/replace #"#(cells|area)\s+([A-Za-z]+[0-9]+):([A-Za-z]+[0-9]+)"
+                       (fn [[_ tag a b]] (range-rw (str "#" tag " ") a b)))
           (str/replace #"#cell\s+([A-Za-z]+[0-9]+)"
                        (fn [[_ a]] (cell-rw "#cell " a)))
           (str/replace #"\$([A-Za-z]+[0-9]+):([A-Za-z]+[0-9]+)"

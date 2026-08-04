@@ -454,6 +454,19 @@ requiring identity. `refs->range` folds `(vector ref…)` back into a range
 (`formula/parse` expands ranges and never puts them back) — needed for
 correctness, not looks: `SUM(A1,…,A500)` breaches Excel's 8192-char formula
 limit, and a formula Excel rejects loses the whole FILE, not the cell.
+**`#area A1:B2` is the 2D range** (`formula/expand-area`): a vector of ROW
+vectors, where `$A1:B2` stays FLAT row-major. Additive on purpose — no saved
+formula changes meaning. It exists because `excel/->rv` turns a flat collection
+into a COLUMN, so `(xl/TRANSPOSE $A1:B2)` transposed a 4x1 and answered
+`[1 2 3 4]` instead of `[1 3 2 4]` — silently, for every shape-sensitive
+function (`INDEX`, `MDETERM`, `MINVERSE`, `MMULT`, the `LINEST` family). `->rv`
+already understood a collection-of-collections; the LANGUAGE just had no way to
+write one. The importer emits `#area` for a true rectangle (both dims > 1) in
+the MECHANICAL tiers only — a hand-mapped aggregate like `sum` filters with
+`number?`, which a nested vector would defeat, and a 1xN/Nx1 has no shape to
+lose. `unparse`/`shift-refs`/`insert-shift`/`delete-shift` all know the tag, and
+`xlformula/area->range` folds it back to one Excel range on export (without it
+`TRANSPOSE(#area A1:B2)` would emit a two-argument call).
 **The function vocabulary is THREE TIERS**, and only the first is a decision:
 `fname->form`'s hand-written cases (where we chose different semantics —
 `MIN`→`xmin` skips blanks, `VLOOKUP`→`xvlookup` is exact-match only), then

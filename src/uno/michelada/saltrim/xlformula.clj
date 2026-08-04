@@ -75,6 +75,22 @@
             br (addr/make (apply max (map :ci ps)) (apply max (map :ri ps)))]
         (when (= as (vec (addr/range-cells tl br))) [tl br])))))
 
+(defn- area->range
+  "The `#area` counterpart of `refs->range`: a run of ROW vectors of refs that
+   together tile a rectangle -> [top-left bottom-right]. Without this an area
+   argument would splice into one range PER ROW, so `TRANSPOSE(#area A1:B2)`
+   would come out as `TRANSPOSE(A1:B1,A2:B2)` — a two-argument call to a
+   one-argument function."
+  [items]
+  (when (and (seq items)
+             (every? #(and (seq? %) (= 'vector (first %))
+                           (seq (rest %)) (every? ref-addr (rest %)))
+                     items))
+    (let [grid (mapv #(mapv ref-addr (rest %)) items)
+          tl   (ffirst grid)
+          br   (peek (peek grid))]
+      (when (= (apply concat grid) (addr/range-cells tl br)) [tl br]))))
+
 (declare form->ast)
 
 (defn- ref-node [a]
@@ -90,7 +106,7 @@
   (vec (mapcat (fn [a]
                  (if (and (seq? a) (splice (first a)))
                    (let [items (rest a)]
-                     (if-let [[tl br] (refs->range items)]
+                     (if-let [[tl br] (or (refs->range items) (area->range items))]
                        [(range-node tl br)]
                        (args->ast items scope)))
                    [(form->ast a scope)]))
