@@ -17,7 +17,7 @@
             [uno.michelada.saltrim.mcp :refer [handle-mcp]]
             [uno.michelada.saltrim.web.state :refer [SWEEP-MS sessions* sheets*]]
             [uno.michelada.saltrim.web.collab :refer [sweep!]]
-            [uno.michelada.saltrim.web.handlers :refer [auth-routes handle-branch handle-cell handle-celllayer handle-clear handle-copy handle-cut handle-defadd handle-defdel handle-deflock handle-defsave handle-defunlock handle-delete-sheet handle-deleteline handle-export handle-flatten handle-graph handle-agentkey handle-assert handle-import handle-insert handle-merge handle-mergecells handle-paste handle-presence handle-props handle-redo handle-root handle-session-end handle-share handle-size handle-stream handle-style handle-undo handle-unmergecells handle-view handle-viewat handle-violations]])
+            [uno.michelada.saltrim.web.handlers :refer [auth-routes handle-branch handle-cell handle-celllayer handle-clear handle-copy handle-cut handle-defadd handle-defdel handle-deflock handle-defsave handle-defunlock handle-delete-sheet handle-deleteline handle-export handle-flatten handle-fnsrc handle-graph handle-agentkey handle-assert handle-import handle-insert handle-merge handle-mergecells handle-paste handle-presence handle-props handle-redo handle-root handle-session-end handle-share handle-size handle-stream handle-style handle-undo handle-unmergecells handle-view handle-viewat handle-violations]])
   (:gen-class))
 
 (defn- app [req]
@@ -65,6 +65,8 @@
                                       :body (io/input-stream r)}
                                      {:status 404 :body "no icon"})
     [:get "/stream"]         (handle-stream req)
+    ;; ƒ-panel reference: one function's source, plain text, on demand
+    [:get "/fnsrc"]          (handle-fnsrc req)
     [:get "/export.xlsx"]    (handle-export req)
     [:post "/import"]        (handle-import req)
     [:post "/session/end"]   (handle-session-end req)

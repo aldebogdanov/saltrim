@@ -200,6 +200,20 @@
       (@xl-names n)          (apply list (symbol "xl" n) args)
       :else                  (unsupported! (str "function " n)))))
 
+(def hand-mapped
+  "The Excel names `fname->form` translates BY HAND, below — tier one, the only
+   tier that is a decision. Kept as data next to the `case` because the ƒ panel
+   needs to know which of Excel's functions already have a Clojure spelling: with
+   the ~238 borrowed ones these cover 267 of the 411 that `xl/` exposes, and
+   listing all 411 as \"the long tail\" made the panel look like a wholesale
+   duplicate of the stdlib above it.
+
+   `xlsx-test` pins it against the `case`, so the two cannot drift."
+  #{"SUM" "AVERAGE" "MEDIAN" "MIN" "MAX" "COUNT" "COUNTA" "IF" "AND" "OR" "NOT"
+    "ABS" "SQRT" "EXP" "LN" "LOG10" "SIGN" "POWER" "ROUND" "CONCATENATE" "CONCAT"
+    "LEN" "UPPER" "LOWER" "TRIM" "TODAY" "YEAR" "MONTH" "DAY" "DATE" "IFERROR"
+    "TRUE" "FALSE" "VLOOKUP" "MMULT" "TRANSPOSE"})
+
 (defn- fname->form
   "One Excel function call (name + already-translated args) as a SaltRim form."
   [name args]

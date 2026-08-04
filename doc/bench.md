@@ -68,6 +68,13 @@ Recorded 2026-08-04 · SaltRim dev · JVM 26.0.1 · macOS · 10 cores.
 
 † `dyn` measured alone (`--shapes=dyn 1000`), for the order-sensitivity reason
 above; it reads ~9-11 s when run sixth in the sweep, on identical code.
+
+A re-run the next day (2026-08-05), on the same machine and with no engine
+change between them, came in 20-40% FASTER on every row — `aggregate 1000` 1.30s
+against the 2.37s above, `wide 1000` 1.21s against 1.77s. That is the size of
+this machine's day-to-day variance, so read the table as a ceiling to stay under
+rather than a number to reproduce, and do not re-record on an improvement you
+cannot point at a change for.
 `aggregate` is the other jumpy one — 147-212 ms at n=100 across runs on
 unchanged code — so treat a single-digit-percent move on those two as noise and
 re-measure the shape ALONE before calling it a regression.

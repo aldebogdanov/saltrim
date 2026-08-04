@@ -171,7 +171,10 @@ spreadsheet:
 Names are the terms of art, kebab-cased: Excel's dots become dashes
 (`STDEV.P` → `stdev-p`, `T.DIST.2T` → `t-dist-2t`), and the two whose Excel
 name clojure.core already owns get a prefix (`FIND` → `str-find`,
-`SEARCH` → `str-search`). The full list is in the **ƒ** panel.
+`SEARCH` → `str-search`). The full list is in the **ƒ** panel, where hovering a
+name shows what it does and **⧉** copies its *source* — the real implementation
+with the helpers it needs, ready to paste into a Clojure project, for when a
+flattened or imported formula has to run outside SaltRim.
 
 Three things worth knowing:
 
@@ -236,11 +239,13 @@ those cells into dead numbers, they stay live as `xl/` calls:
 =(xl/PMT 0.08 10 -1000)      ; 149.03 — as imported from Excel
 ```
 
-Around 410 of Excel's functions are reachable that way — the ~230 already
-carrying Clojure names above, plus the long tail we chose not to translate
-(matrix, database, the legacy spellings). The full list is in the **ƒ** panel,
-folded under *Excel interop*. The prefix is deliberate: seeing `xl/` in a cell
-tells you it came from a spreadsheet, and it maps straight back on export.
+Around 410 of Excel's functions are reachable that way. Most of them — 267 —
+already carry a Clojure name, listed above, and an import translates to *that*:
+`PMT(…)` arrives as `(pmt …)`, not as `xl/PMT`. The **ƒ** panel's *Excel
+interop* section lists only the remaining **144**, the tail we chose not to
+translate (database, the text-coercion variants, the legacy spellings). The
+prefix is deliberate: seeing `xl/` in a cell tells you it came from a
+spreadsheet, and it maps straight back on export.
 **When writing your own formulas, use the Clojure name.**
 
 Two conventions differ inside `xl/`, and both fail loudly rather than guessing:

@@ -490,9 +490,13 @@ areafies them there itself, since only the mechanical tiers do that
 automatically.
 **The function vocabulary is THREE TIERS**, and only the first is a decision:
 `fname->form`'s hand-written cases (where we chose different semantics —
-`MIN`→`xmin` skips blanks, `VLOOKUP`→`xvlookup` is exact-match only), then
-~213 borrowed names via **`stdlib/excel-name`**, then ~414 verbatim as
-**`xl/NAME`**. New function mappings go in tier one; the other two are one table
+`MIN`→`xmin` skips blanks, `VLOOKUP`→`xvlookup` is exact-match only; the set is
+`xlsx/hand-mapped`, pinned against the `case` by a test), then
+~238 borrowed names via **`stdlib/excel-name`**, then the rest verbatim as
+**`xl/NAME`**. Those first two cover 267 of the 411 `xl/` exposes, so the ƒ
+panel lists only the remaining **144** under Excel interop: listing all 411
+under a stdlib that already covers most of them reads as a duplicate and invites
+the fair question of why both exist. New function mappings go in tier one; the other two are one table
 lookup each and need no maintenance. This is what `xl/` was always documented
 FOR, and the importer went a long time without reaching for it — a workbook of
 `PMT`/`SUMIF`/`STDEV.P`/`GEOMEAN`/`TRANSPOSE` used to demote every cell to a
@@ -538,10 +542,37 @@ alphabetical put `mean*` before `nums` and the paste didn't compile), plus the
 and `hand-written-src` come from ONE literal — the copy button cannot lie.
 `defsrc` does the same for helpers. A name that is only clojure.core's emits a
 NOTE, never `(def abs abs)` (the RHS resolves to the var being defined → runtime
-`unbound fn`). Borrowed → the rechentafel coordinate + our one-line delegation,
-honest rather than a pretend body; macros → nil (their laziness only matters
-inside the sandbox). `stdlib-test/copied-source-actually-runs` evals every one
+`unbound fn`); macros → nil (their laziness only matters inside the sandbox).
+`stdlib-test/copied-source-actually-runs` evals every one
 in a FRESH ns and requires it to compute what the installed function does.
+**A BORROWED function hands over the REAL implementation** (`xlsource` ns), not
+a note saying the work happens upstream — `(defn erfc [& args] (excel/call
+"ERFC" args))` is unrunnable without the dependency you were leaving behind and
+says nothing about what ERFC computes. rechentafel ships its `.cljc` in its jar,
+so `tools.reader` in SOURCE-LOGGING mode reads it off the classpath and every
+form carries its own original text as `:source` meta (formatting, comments and
+all). From the `(f/register! "ERFC" <impl> …)` form: the impl expression
+(a `fn`, a `with-meta`, or a factory call like `(n1 #(Math/sin …))`), plus every
+top-level definition of that module it reaches transitively, in FILE order —
+which is dependency order already, since a Clojure file cannot call forward.
+`excel.clj`'s `->rv`/`<-rv` are read the SAME way rather than restated, so the
+button cannot hand over a bridge this build doesn't run. THREE things had to be
+pulled apart, each of which compiled and then failed at RUN time: our
+`date->serial`/`serial->date` collide with `datetime.cljc`'s own (ISO strings vs
+LocalDates) → ours get `-sr`; rechentafel already has a private `norm-dist-impl`
+of four args → our generated impl name gets `*`; `FACT` is implemented over a
+private `fact` and the wrapper redefined it out from under a primitive signature
+→ THEIRS gets `-rt`. `#?(…)` is resolved to its `:clj` branch (a paste goes into
+a `.clj`, where a reader conditional is a syntax error), and only the source
+files' OWN `declare`s are reproduced — a blanket declare ahead of a
+primitive-hinted `defn` breaks its recursive call. Not reproduced, and the
+header says so: upstream's `f/call` arity check, error short-circuit and
+element-wise broadcast of a scalar function over a range. The panel does NOT
+embed these: ~5KB each, 1.2MB over 238 chips, so a borrowed chip carries only
+`data-src` and `app.cljs` fetches `/fnsrc` on HOVER (the tooltip already makes
+hover the way you look at a chip), leaving the click synchronous so the
+clipboard keeps its gesture. `xlsource-test` compiles all 238 in a fresh ns and
+runs ~70 against the installed function.
 `stdlib-test/every-listed-function-documents-itself` pins that every listed name
 has both, and that every example PARSES. **The copy listener MUST be CAPTURE
 phase** — every modal's inner box carries `data-on:click="evt.stopPropagation()"`

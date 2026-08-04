@@ -325,13 +325,13 @@
         (is (< (.indexOf src "defn nums") (.indexOf src "defn mean*")))))))
 
 (deftest source-is-honest-where-it-is-not-ours
-  (testing "a borrowed function points at the library that implements it"
+  (testing "a borrowed function credits the library it came from"
+    ;; and then hands over that library's actual implementation — see
+    ;; xlsource-test, which compiles and runs every one of them
     (let [src (lib/source-for 'pmt)]
       (is (re-find #"rechentafel" src))
       (is (re-find #"org.replikativ/rechentafel \{:mvn/version" src)
-          "with the coordinate you would actually need")
-      (is (re-find #"\(defn pmt \[& args\] \(excel/call \"PMT\" args\)\)" src)
-          "and SaltRim's own one-line delegation, rather than a pretend body")))
+          "with the coordinate you would actually need")))
   (testing "a macro has no source worth pasting — plain Clojure already has try"
     (is (nil? (lib/source-for 'if-error)))
     (is (nil? (lib/source-for 'error-type)))))
