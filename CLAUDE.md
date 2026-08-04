@@ -438,6 +438,22 @@ token-order hazards baked in — a single-range `SUM` arriving as `AttrPtg(isSum
 Every refusal NAMES the construct (`cross-sheet reference to Other`,
 `defined name Tax_Rate`) because that string becomes the cell's audit `:comment`.
 Spike: `spikes/11-excel-ast-import.clj`.
+**EXPORT goes back the same way** (`xlformula` ns): SaltRim marker form -> Excel
+AST -> `rechentafel.unparse`, so precedence, escaping and `$`-absolute refs are
+its problem. `/export.xlsx` is no longer a static snapshot — a formula Excel can
+spell is written as a REAL Excel formula (`.setCellFormula`) with our computed
+answer as the cached value and `setForceFormulaRecalculation`, so the workbook
+recalculates in Excel. The fallback is per CELL: no Excel spelling (a `def`-library
+call, a dynamic ref, arbitrary Clojure) -> the computed value plus a comment
+saying it didn't cross. **An ERRORING cell never exports live** even when it
+translates — Excel might compute a different answer from the same formula, and an
+export that quietly disagrees with the sheet is the one bug this must not have.
+Both directions share `stdlib/excel-name`, so the vocabularies cannot drift, and
+`xlformula-test` pins that by round-tripping 29 formulas OUT and back IN and
+requiring identity. `refs->range` folds `(vector ref…)` back into a range
+(`formula/parse` expands ranges and never puts them back) — needed for
+correctness, not looks: `SUM(A1,…,A500)` breaches Excel's 8192-char formula
+limit, and a formula Excel rejects loses the whole FILE, not the cell.
 **The function vocabulary is THREE TIERS**, and only the first is a decision:
 `fname->form`'s hand-written cases (where we chose different semantics —
 `MIN`→`xmin` skips blanks, `VLOOKUP`→`xvlookup` is exact-match only), then

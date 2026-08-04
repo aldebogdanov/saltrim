@@ -498,14 +498,23 @@ Tools: `saltrim_list_sheets` · `saltrim_describe_sheet` · `saltrim_read_range`
 
 ### Export to Excel
 
-The **⬇ xlsx** button (top bar) downloads the sheet as an `.xlsx` file. It is a
-**static snapshot**: every cell exports its current **computed value**, carrying
-its styling (fill, font colour, bold/italic, alignment) and number format — but
-**not** its borders, and **not** its formula. SaltRim formulas are Clojure expressions, not Excel syntax,
-so the exported file has **no live formulas and no reactivity**: changing a value
-in Excel won't recompute anything. Each formula's original source is attached as
-a **cell comment** so the logic isn't lost. The export respects what you're
-viewing — the current branch, or a read-only history snapshot.
+The **⬇ xlsx** button (top bar) downloads the sheet as an `.xlsx` file, **live
+where it can be**. A formula built from functions Excel also has is written as a
+real Excel formula, so the workbook **recalculates in Excel**: change an input
+there and the results follow. SaltRim's own answer is written alongside as the
+cached value, so the file opens showing the right numbers before Excel
+recalculates anything.
+
+A formula with **no Excel spelling** — one calling your own ƒ definitions, a
+dynamic `$(…)` reference, or any Clojure that Excel simply has no function for —
+falls back to its **computed value**, for that cell only. A mostly-translatable
+sheet therefore exports mostly live.
+
+Either way the original Clojure source is attached as a **cell comment** (which
+says so when the formula didn't cross), and the cell carries its styling (fill,
+font colour, bold/italic, alignment) and number format — but **not** its borders.
+The export respects what you're viewing — the current branch, or a read-only
+history snapshot.
 
 ### Import from Excel
 
