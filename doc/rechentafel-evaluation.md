@@ -197,15 +197,24 @@ to meet in the middle, and it should be spiked first.
 > the `FormulaParsingWorkbook`/sheet-index plumbing, and adds `LET` and array
 > constants as new translations.
 >
-> **The "fewer demotions" claim above was optimistic and should be read with
-> this correction.** Cross-sheet refs, whole-column ranges, defined names, table
-> refs and spill refs all still demote. The AST does name each of them precisely
-> — which is why the audit comment now reads `cross-sheet reference to Other`
-> instead of `Ref3DPxg` — but naming a construct is not the same as having
-> somewhere to put it: named regions are item K, spill is item E, a whole column
-> is ~1M cells against a 4096-cell range cap, and a cross-sheet ref has no target
-> because each Excel sheet imports as its own SaltRim sheet. The real wins are
-> the deleted stack machine, the accurate reasons, and B2 becoming reachable.
+> **On the "fewer demotions" claim.** The AST rewrite by itself did not reduce
+> demotions at all — a REFERENCE it cannot place is still a reference it cannot
+> place. Cross-sheet refs, whole-column ranges, defined names, table refs and
+> spill refs all still demote: named regions are item K, spill is item E, a whole
+> column is ~1M cells against a 4096-cell range cap, and a cross-sheet ref has no
+> target because each Excel sheet imports as its own SaltRim sheet.
+>
+> What DID cut demotions, in the following PR, was FUNCTIONS — and the AST is
+> what made the gap obvious. The importer knew ~30 Excel functions by hand while
+> the stdlib had borrowed 213 and `xl/` exposed 414, and `xl/` had been
+> documented from the start as the reason an imported formula stays live instead
+> of demoting to a dead cached number. The importer simply never reached for it.
+> Two table lookups later, a workbook of `PMT` / `SUMIF` / `STDEV.P` /
+> `GEOMEAN` / `SUMPRODUCT` / `TRANSPOSE` imports with zero demotions where every
+> cell used to demote.
+>
+> The AST rewrite's own wins are the deleted stack machine, the accurate refusal
+> reasons, and B2 becoming reachable.
 
 ### C. Excel's error taxonomy as values, not exceptions
 

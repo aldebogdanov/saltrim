@@ -316,6 +316,21 @@
   "The same set, flat."
   (vec (mapcat second catalog-syms)))
 
+(def excel-name
+  "SaltRim symbol -> the Excel name it was borrowed from, for the .xlsx boundary
+   in BOTH directions: the importer translates an Excel call it has no hand-
+   written mapping for, and the exporter turns the result back into a formula
+   Excel will recompute. `kebab` already owns this correspondence; this is only
+   it, inverted and made public, so neither side can invent a second table.
+
+   Date-shaped functions are LEFT OUT on purpose. `stdlib` takes and returns ISO
+   date strings while Excel wants a 1900 serial, and `borrow` does that
+   conversion — so the two names denote the same function but not the same
+   signature, and swapping one for the other across the boundary would silently
+   change what the formula means. `xl/EOMONTH` is still reachable and still
+   speaks serials; it is the honest spelling for that side."
+  (into {} (for [n borrowed-names :when (not (date-shape n))] [(kebab n) n])))
+
 (def ^:private derived
   (into {} (for [n borrowed-names] [(kebab n) (borrow n)])))
 

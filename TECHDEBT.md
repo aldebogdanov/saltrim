@@ -399,6 +399,12 @@ the `FormulaParsingWorkbook`/sheet-index plumbing. `translate-formula` now
 takes only the string, which is also what a "paste an Excel formula" input mode
 would need.
 
+The function vocabulary is three tiers — hand-mapped (chosen semantics), then
+`stdlib/excel-name` (~213 borrowed), then `xl/NAME` verbatim (~414). The last
+two were wired up after the AST rewrite made the gap obvious: `xl/` had always
+been documented as the reason an imported formula stays live rather than
+demoting, and the importer simply never reached for it.
+
 Deferred (all land as commented values today, so sheets stay correct). The AST
 names each of these precisely, so the refusal REASON in the audit comment is now
 the construct rather than a POI token class — what is missing is somewhere to

@@ -1,5 +1,5 @@
 (ns uno.michelada.saltrim.xlsx-test
-  "Excel import: the Ptg->form translator, workbook reading (values / styles /
+  "Excel import: the AST->form translator, workbook reading (values / styles /
    masks / sizes / fallbacks), the demote-and-verify pass, naming, caps, and
    the apostrophe literal escape the importer relies on."
   (:require [clojure.test :refer [deftest testing is use-fixtures]]
@@ -80,8 +80,24 @@
       (is (= "structured table reference to Sales" (bad "SUM(Sales[Amount])")))
       (is (= "spill reference (A1#)" (bad "SUM(A1#)")))
       (is (= "range intersection" (bad "SUM(A1:A3 B1:B3)")))
-      (is (= "function TRANSPOSE" (bad "TRANSPOSE(A1:B2)")) "unknown function")
-      (is (re-find #"range covers" (bad "SUM(A1:CV5000)")) "over the range cap"))))
+      (is (= "function NOSUCHFN" (bad "NOSUCHFN(A1)")) "unknown function")
+      (is (re-find #"range covers" (bad "SUM(A1:CV5000)")) "over the range cap"))
+    (testing "a function with no hand-written mapping still translates LIVE"
+      ;; the whole point of the xl/ namespace: an imported formula we have no
+      ;; Clojure name for must not demote to a dead cached number
+      (is (= "=(pmt $A1 10 -1000)" (t "PMT(A1,10,-1000)"))
+          "borrowed by the stdlib under a Clojure name")
+      (is (= "=(norm-dist 1 0 1 true)" (t "NORM.DIST(1,0,1,TRUE)")))
+      (is (= "=(str-find \"a\" $A1)" (t "FIND(\"a\",A1)")) "including the renamed ones")
+      (is (= "=(xl/TRANSPOSE $A1:B2)" (t "TRANSPOSE(A1:B2)"))
+          "not in the stdlib -> reached verbatim through xl/")
+      (is (= "=(sumif $A1:A9 \">5\")" (t "SUMIF(A1:A9,\">5\")")) "SUMIF is borrowed too")
+      (is (= "=(xl/EOMONTH $A1 2)" (t "EOMONTH(A1,2)"))
+          "date-shaped: only xl/ speaks Excel serials, so the borrowed name is skipped"))
+    (testing "a hand-written mapping still wins over the mechanical fallback"
+      (is (= "=(xmin $A1:A9)" (t "MIN(A1:A9)")) "not xl/MIN — ours skips blanks")
+      (is (= "=(sum $A1:A3)" (t "SUM(A1:A3)")))
+      (is (= "=(xround $A1 2)" (t "ROUND(A1,2)"))))))
 
 ;; --- workbook read -----------------------------------------------------------
 

@@ -20,8 +20,18 @@
    AST node knows its own name and its own arguments. See
    `spikes/11-excel-ast-import.clj` for the side-by-side.
 
-   Anything untranslatable falls back to the cell's CACHED value from the file,
-   with the original formula kept as an audit `:comment`. The AST names each
+   The function vocabulary has three tiers. A couple of dozen names are mapped by
+   HAND, because we chose different semantics (`MIN`->`xmin` skips blanks,
+   `IF`->`if` + `excel-truthy`, `VLOOKUP`->`xvlookup` exact-match only). Below
+   that, ~213 more are the ones `stdlib` borrowed from Excel, reached through
+   `stdlib/excel-name`. Below THAT, ~414 are reached verbatim as `xl/NAME` —
+   which is what the `xl/` namespace was for: an imported formula whose function
+   we lack stays LIVE instead of demoting to a dead cached number. Only the first
+   tier is a decision; the other two are one table lookup each, and
+   `demote-verify!` checks every result against Excel's own cached value anyway.
+
+   Anything still untranslatable falls back to the cell's CACHED value from the
+   file, with the original formula kept as an audit `:comment`. The AST names each
    refusal precisely — `cross-sheet reference to Sheet2`, `whole-col reference`,
    `defined name Tax_Rate`, `structured table reference` — which matters because
    that reason is what the audit comment shows a user. They stay refusals
@@ -41,9 +51,11 @@
   (:require [clojure.string :as str]
             [rechentafel.parser :as xlp]
             [uno.michelada.saltrim.addr :as addr]
+            [uno.michelada.saltrim.excel :as excel]
             [uno.michelada.saltrim.db :as db]
             [uno.michelada.saltrim.formula :as formula]
             [uno.michelada.saltrim.sheet :as sheet]
+            [uno.michelada.saltrim.stdlib :as lib]
             [uno.michelada.saltrim.store :as store])
   (:import [java.io InputStream]
            [org.apache.poi.ss.usermodel CellType DateUtil FillPatternType HorizontalAlignment]
@@ -135,6 +147,34 @@
     (let [w (inc (- (:ci (addr/parse (nth rng 2))) (:ci (addr/parse (nth rng 1)))))]
       (list 'xvlookup k rng w col))))
 
+(def ^:private from-excel-name
+  "Excel name -> the stdlib symbol that borrowed it (`stdlib/excel-name`
+   inverted). Date-shaped functions are absent by construction — see there."
+  (delay (into {} (for [[sym n] lib/excel-name] [n sym]))))
+
+(def ^:private xl-names
+  "`excel/exposed-names` as a set — it is a sorted vector there, for the help
+   catalog's ordering."
+  (delay (set excel/exposed-names)))
+
+(defn- borrowed-or-xl
+  "An Excel function with no hand-written mapping, translated anyway.
+
+   Two fallbacks, in order. The stdlib borrowed ~213 of Excel's functions under
+   Clojure names, so `PMT(A1,10,-1000)` can simply become `(pmt $A1 10 -1000)`.
+   Failing that, `excel/exposed-names` reaches ~414 of them verbatim, so
+   `TRANSPOSE(A1:B2)` becomes `(xl/TRANSPOSE $A1:B2)` — which is what the `xl/`
+   namespace was FOR: an imported formula whose function we lack stays LIVE
+   instead of demoting to a dead cached number. Only the hand-written cases
+   above are chosen semantics; these two are mechanical, and `demote-verify!`
+   still checks every one against Excel's own cached value, so a translation
+   that computes something else degrades to exactly the old behaviour."
+  [n args]
+  (cond
+    (@from-excel-name n)     (apply list (@from-excel-name n) args)
+    (@xl-names n)            (apply list (symbol "xl" n) args)
+    :else                    (unsupported! (str "function " n))))
+
 (defn- fname->form
   "One Excel function call (name + already-translated args) as a SaltRim form."
   [name args]
@@ -180,7 +220,7 @@
       "TRUE"    true
       "FALSE"   false
       "VLOOKUP" (vlookup-form args)
-      (unsupported! (str "function " n)))))
+      (borrowed-or-xl n args))))
 
 (def ^:private sandbox-names
   "Every name a translated formula can call. A `LET` local that shadows one is
