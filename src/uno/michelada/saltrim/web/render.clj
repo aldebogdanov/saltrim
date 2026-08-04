@@ -642,11 +642,17 @@
 
             [:div {:style h3} "Export to Excel"]
             [:p {:style p} "The " [:span {:style kbd} "⬇ xlsx"] " button downloads the sheet as an "
-             ".xlsx file. It is a " [:b "static snapshot"] ": each cell exports its current "
-             [:b "computed value"] " (with its styling and number format) — "
-             [:b "not"] " its formula. The exported file has " [:b "no live formulas and no reactivity"]
-             "; editing a value in Excel won't recompute anything. Each formula's original "
-             "source is attached as a cell comment so the logic isn't lost."]
+             ".xlsx file, " [:b "live where it can be"] ": a formula whose functions have Excel "
+             "equivalents is written as a real Excel formula, so the workbook "
+             [:b "recalculates in Excel"] " — change an input there and the results follow. "
+             "SaltRim's own answer is stored as the cached value, so it opens showing the "
+             "right numbers straight away."]
+            [:p {:style p} "A formula with " [:b "no Excel spelling"] " — one calling your own "
+             "ƒ definitions, a dynamic " [:span {:style kbd} "$(…)"] " reference, or any Clojure "
+             "Excel has no function for — falls back to its " [:b "computed value"] " for that "
+             "cell only, so a mostly-translatable sheet exports mostly live. Either way the "
+             "original Clojure source is attached as a cell comment (saying so when the formula "
+             "didn't cross), and styling and number format come along. Borders do not."]
 
             [:div {:style h3} "Import from Excel"]
             [:p {:style p} "The " [:span {:style kbd} "⬆ xlsx"] " button imports an Excel workbook: "
@@ -1692,7 +1698,8 @@
             [:button {:class "btn" :data-on:click "$propspanel=true" :title "sheet properties"} "⚙"])
           [:button {:class "btn" :data-on:click "$histpanel=true" :title "history — view an earlier revision"} "🕘"]
           ;; export: a plain download link (GET /export.xlsx), carrying the same
-          ;; access params as this page. A STATIC snapshot — values, not formulas.
+          ;; access params as this page. Formulas export LIVE where `xlformula`
+          ;; can spell them, computed values elsewhere (see export.clj).
           (let [q (if link-token
                     (str "?t=" (url-encode link-token) "&b=" (url-encode branch))
                     (str "?s=" (url-encode sname)
@@ -1700,9 +1707,9 @@
                          "&b=" (url-encode branch)))]
             [:a {:class "btn" :href (str "/export.xlsx" q) :download (str sname ".xlsx")
                  :style "text-decoration:none;"
-                 :title (str "Export to Excel (.xlsx) — a STATIC snapshot: computed values + "
-                             "styling only. No live formulas or reactivity (each formula's "
-                             "source is kept as a cell comment).")}
+                 :title (str "Export to Excel (.xlsx) — live formulas where Excel has an "
+                             "equivalent, computed values elsewhere. Styling and number format "
+                             "come along; each formula's source is kept as a cell comment.")}
              "⬇ xlsx"])
           ;; import: opens the multipart-form modal — each tab becomes a NEW sheet.
           ;; Re-opening clears any previous run's report (back to the form).

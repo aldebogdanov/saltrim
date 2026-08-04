@@ -364,13 +364,36 @@ REMAINING:
 
 ## XLSX export (`export` ns) — deferred polish
 
-`/export.xlsx` writes a STATIC snapshot via Apache POI: computed values + a subset
-of presentation. Intentional limits / future polish:
+`/export.xlsx` writes a workbook that is LIVE where it can be, via Apache POI:
+real Excel formulas (`xlformula`) with SaltRim's answer as the cached value,
+computed values where a formula has no Excel spelling, plus a subset of
+presentation. Intentional limits / future polish:
 
-- **No formulas / reactivity, by design.** SaltRim formulas are Clojure, not Excel
-  syntax; we export the computed value and keep the source as a cell comment
-  rather than attempt a (lossy, partial) Clojure→Excel translation. The UI tooltip
-  + help modal warn about this.
+- **The formula fallback is per CELL and that is the design.** A formula calling
+  the sheet's own `def` library, a dynamic `$(…)` ref, or any Clojure with no
+  Excel name exports as its computed value with the source in a comment saying
+  so — the old behaviour, for that cell only. `xlformula` refuses rather than
+  approximates: there is no "close enough" translation, because a workbook that
+  recalculates to a different number than the sheet it came from is worse than
+  one that does not recalculate at all.
+- **A cell that ERRORS exports its value, never its formula**, even when the
+  formula translates perfectly. `=(/ 1 0)` is valid Excel and Excel would happily
+  compute `#DIV/0!` — but a cell might error here and NOT there (a blank input,
+  a type we are stricter about), and an export that quietly disagrees with the
+  sheet you are looking at is the one bug this feature must not have.
+- **Round-tripping is pinned, not assumed.** `xlformula-test` runs 29 formulas
+  out through the exporter and back through the importer and requires the source
+  to come back identical; `export-test/excel-recomputes-what-we-exported` hands
+  the file to POI's own Excel formula engine and requires its answers to match
+  SaltRim's. Both directions share `stdlib/excel-name`, so neither vocabulary can
+  grow without the other.
+- **Ranges are folded back up** (`xlformula/refs->range`) because `formula/parse`
+  expands `$A1:A3` into per-cell refs and documents that it never comes back.
+  The fold checks the run against `addr/range-cells` exactly, so a gappy list
+  stays a list. Without it `SUM(A1,…,A500)` would breach Excel's 8192-character
+  formula limit that `SUM(A1:A500)` sits nine characters inside — which is also
+  why an over-long translation demotes rather than being written and rejected by
+  Excel (a rejected formula takes the whole FILE down, not the one cell).
 - **Column widths / row heights are not exported.** Our sizes are pixels; POI uses
   1/256-character + twip units, and `autoSizeColumn` needs headless AWT fonts. Left
   at Excel defaults for now.

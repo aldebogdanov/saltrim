@@ -183,6 +183,26 @@ Two further things this buys:
    formulas — including the `cm="1"` + `xl/metadata.xml` trick needed for Excel
    365 to accept dynamic arrays rather than CSE arrays.
 
+   > **Update — B2 shipped** as the `xlformula` ns. `unparse` turned out to
+   > accept hand-built AST maps, not just ones it parsed, so precedence,
+   > parenthesisation, string escaping and `$`-absolute refs all came free. Two
+   > things the estimate did not anticipate:
+   >
+   > - **`formula/parse` expands `$A1:A3` into per-cell refs and documents that
+   >   it never comes back**, so export has to re-fold the rectangle itself
+   >   (`refs->range`, checked exactly against `addr/range-cells`). That is not
+   >   cosmetic — `SUM(A1,…,A500)` breaches Excel's 8192-character formula limit,
+   >   and a formula Excel rejects costs the whole FILE, not the cell.
+   > - **An erroring cell must NOT export live even when it translates.** Excel
+   >   may well compute a different answer from the same formula, and an export
+   >   that silently disagrees with the sheet it came from is worse than one that
+   >   does not recalculate.
+   >
+   > The round trip is pinned rather than assumed: 29 formulas go out through the
+   > exporter and back through the importer and must come back identical, and the
+   > written file is handed to POI's own Excel formula engine, which must agree
+   > with SaltRim cell for cell.
+
 Only the mappable subset round-trips, of course — a cell calling a user `def`
 chunk can't become an Excel formula and must still demote to its value. But the
 mappable subset is most of a typical imported sheet.
@@ -482,7 +502,7 @@ Worth raising with the author, since the collaboration is welcome:
 | 5 | **G** — offline POI oracle for the adapter | S–M | High | Reuses POI already on the classpath |
 | 6 | **D** — 2D range shape | M | High | Gates the array/lookup functions; breaking, needs a plan |
 | 7 | **B1** — importer: POI RPN → rechentafel AST | M | High | ✅ DONE. Note: the "fewer demotions" estimate was optimistic — see below |
-| 8 | **B2** — live xlsx export (real formulas) | M–L | Very high | Kills export's #1 documented limitation |
+| 8 | **B2** — live xlsx export (real formulas) | M–L | Very high | ✅ DONE (`xlformula` ns) — export's #1 documented limitation is gone |
 | 9 | **K** — named regions / table refs | M | Medium | Cheap-win candidate, SaltRim-native design |
 | 10 | **E** — dynamic arrays / spill | L | Very high | Roadmap-grade; blueprint exists; do last |
 

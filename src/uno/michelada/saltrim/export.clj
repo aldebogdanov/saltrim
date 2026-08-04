@@ -1,13 +1,23 @@
 (ns uno.michelada.saltrim.export
-  "Build a STATIC .xlsx snapshot of a loaded sheet (Apache POI). Formulas are NOT
-   translated to Excel: each cell exports its current COMPUTED value (numbers stay
-   numeric), carrying its presentation — fill / font colour / bold / italic /
-   alignment / number-format — and, for a formula cell, the original Clojure
-   source as a cell comment. So an exported workbook has no live formulas or
-   reactivity; it is a point-in-time copy. Only the workbook WRITER is used here."
+  "Build an .xlsx of a loaded sheet (Apache POI), LIVE where it can be.
+
+   A formula cell exports as a real Excel formula whenever `xlformula` can spell
+   it — so the workbook RECALCULATES in Excel rather than being a frozen wall of
+   numbers — with SaltRim's computed result written alongside as the cached
+   value, so it also opens showing the right thing before Excel recalculates.
+
+   Where it cannot be spelled (a call into the sheet's own `def` library, a
+   dynamic ref, any Clojure with no Excel name) the cell falls back to exactly
+   what every cell used to get: the computed VALUE, with the Clojure source kept
+   as a comment that now says the formula did not cross. The fallback is per
+   CELL, so a sheet that is 90% translatable exports 90% live.
+
+   Either way the cell carries its presentation — fill / font colour / bold /
+   italic / alignment / number-format. Only the workbook WRITER is used here."
   (:require [clojure.string :as str]
             [uno.michelada.saltrim.addr :as addr]
-            [uno.michelada.saltrim.sheet :as sheet])
+            [uno.michelada.saltrim.sheet :as sheet]
+            [uno.michelada.saltrim.xlformula :as xlformula])
   (:import (java.io ByteArrayOutputStream)
            (org.apache.poi.ss.usermodel FillPatternType HorizontalAlignment)
            (org.apache.poi.xssf.usermodel XSSFWorkbook XSSFColor)))
@@ -56,6 +66,31 @@
     (boolean? v) (.setCellValue cell (boolean v))
     (map? v)     (.setCellValue cell (str "#ERR " (:error v)))   ; {:error msg}
     :else        (.setCellValue cell (str v))))
+
+(def ^:private MAX-FORMULA-CHARS
+  "Excel refuses a formula longer than this, and a refused formula takes the
+   whole file down rather than the one cell — so an over-long translation is
+   demoted to its value like any other untranslatable one. `xlformula` folds
+   ranges back up precisely so this stays rare."
+  8192)
+
+(defn- formula-src
+  "The cell's raw source if it is a formula, else nil."
+  [sh a]
+  (let [src (sheet/raw sh a)]
+    (when (and src (str/starts-with? (str/trim (str src)) "=")) src)))
+
+(defn- set-cached!
+  "SaltRim's computed result as the formula cell's CACHED value, so the workbook
+   opens showing numbers instead of blanks even before Excel recalculates. An
+   `{:error …}` gets none — Excel will produce its own error, and writing our
+   text would replace the formula with a string."
+  [cell v]
+  (cond
+    (number? v)  (.setCellValue cell (double v))
+    (boolean? v) (.setCellValue cell (boolean v))
+    (string? v)  (.setCellValue cell ^String v)
+    :else        nil))
 
 (def ^:private aligns
   {"left"   HorizontalAlignment/LEFT   "right"  HorizontalAlignment/RIGHT
@@ -126,7 +161,8 @@
                 (.setCellComment cell c))
               (catch Exception _ nil)))
           addrs (->> (concat (sheet/cells sh) (keys (sheet/document-styles sh)))
-                     (filter addr/valid?) distinct)]
+                     (filter addr/valid?) distinct)
+          live (atom 0)]
       (doseq [a addrs]
         (let [v    (sheet/value sh a)
               spec (style-spec sh a)
@@ -135,17 +171,35 @@
             (let [{:keys [ci ri]} (addr/parse a)
                   row  (or (.getRow ws ri) (.createRow ws ri))
                   cell (.createCell row ci)
-                  src  (sheet/raw sh a)
+                  fsrc (formula-src sh a)
+                  ;; a cell that ERRORS here does not export live, even when it
+                  ;; translates: Excel would compute its own answer from the same
+                  ;; formula and might well succeed, and an export that quietly
+                  ;; disagrees with the sheet you are looking at is worse than one
+                  ;; that just shows the error. The source is in the comment.
+                  xl   (when (and fsrc (not (map? v)))
+                         (let [f (xlformula/try-excel fsrc)]
+                           (when (and f (<= (count f) MAX-FORMULA-CHARS)) f)))
                   lbl  (prop sh a :label)
                   cmt  (prop sh a :comment)
                   note (cond-> []
-                         cmt (conj (str cmt))
-                         (and src (str/starts-with? (str/trim (str src)) "="))
-                         (conj (str "Formula: " src))
-                         lbl (conj (str "Label: " lbl)))]
-              (set-value! cell v)
+                         cmt  (conj (str cmt))
+                         (and fsrc xl)       (conj (str "Formula: " fsrc))
+                         (and fsrc (not xl) (map? v))
+                         (conj (str "Formula (errored here, so not exported live): " fsrc))
+                         (and fsrc (not xl) (not (map? v)))
+                         (conj (str "Formula (value only, no Excel equivalent): " fsrc))
+                         lbl  (conj (str "Label: " lbl)))]
+              (if xl
+                (do (.setCellFormula cell xl)
+                    (set-cached! cell v)
+                    (swap! live inc))
+                (set-value! cell v))
               (when cs (.setCellStyle cell cs))
               (when (seq note) (add-comment! cell (str/join "\n" note)))))))
+      ;; make Excel recompute on open — the cached values we wrote are SaltRim's
+      ;; answers, and the point of exporting formulas is that Excel owns them now
+      (when (pos? @live) (.setForceFormulaRecalculation ws true))
       (let [baos (ByteArrayOutputStream.)]
         (.write wb baos)
         (.toByteArray baos)))))
