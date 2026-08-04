@@ -437,6 +437,26 @@ merge for free.
 **Effort:** medium. **Risk:** low-medium. This is a "cheap win" candidate for the
 roadmap, informed by rechentafel rather than copied from it.
 
+> **Half DONE, and the design landed differently.** Defined names are in — but as
+> an IMPORT-time resolution, not a new engine concept. Excel stores a name's
+> target as a formula string of its own, so the translator calls itself on it:
+> `Tax_Rate` → `Data!$B$1` → `#cell B1`, and ranges, expressions and
+> names-over-names come free with every existing refusal intact.
+>
+> That is deliberately not the `:table` prop sketched above. The reason is
+> reactivity's price: keeping the NAME in the formula means a runtime
+> indirection, which in SaltRim is `$(…)`, and `set-cell!` structurally rebuilds
+> every dynamic dependent on ANY edit — the `dyn` benchmark shape is 4x the
+> others. Imposing that on every imported formula to preserve a label is a bad
+> trade. For names a user writes themselves the opt-in already exists:
+> `(def sales "B2:B10")` + `$(sales)`, which is what this item observed in the
+> first place.
+>
+> Structured table refs (`Sales[Amount]`) are still open. They resolve the same
+> way — POI's `XSSFTable` gives the area and the header names, so the rectangle
+> is computable at import — and `[@col]` additionally needs the referring cell's
+> row, which the importer has. That is the remaining half.
+
 ---
 
 ## 3. What NOT to take

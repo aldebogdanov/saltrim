@@ -594,9 +594,16 @@ Values, styling, number-format masks and column/row sizes carry over; dates
 become ISO strings (`2024-03-15`); text that looks like a number or a formula
 is protected with a leading apostrophe (`'123` — works when typing, too).
 
-**Anything untranslatable** (cross-sheet references, named ranges,
-whole-column ranges, other functions) is imported as its last **computed
-value**, with the original Excel formula kept as the cell's `comment`. Every
+**Defined names** are resolved to what they point at: `=A1*Tax_Rate` arrives as
+`=(* $A1 $B$1)`, live. A name may be a cell, a range, an expression, or another
+name, and a sheet-scoped one shadows a global of the same name — the same rules
+Excel uses. The *name* itself doesn't survive into the formula (Excel resolves it
+to an address too); to name a range in SaltRim, put `(def sales "B2:B10")` in the
+sheet's ƒ library and write `$(sales)`.
+
+**Anything untranslatable** (cross-sheet references, whole-column ranges,
+structured table references, other functions) is imported as its last
+**computed value**, with the original Excel formula kept as the cell's `comment`. Every
 translated formula is then **verified against Excel's own cached value** —
 mismatches (e.g. Excel's blank-as-zero arithmetic) are demoted to values the
 same way. An imported sheet is always *correct-or-commented*; the import report

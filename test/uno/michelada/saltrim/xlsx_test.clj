@@ -77,7 +77,8 @@
       ;; that string lands in the cell's audit :comment, so a user reads it
       (is (= "cross-sheet reference to Other" (bad "Other!A1")))
       (is (= "whole-col reference" (bad "SUM(A:A)")))
-      (is (= "defined name Tax_Rate" (bad "A1*Tax_Rate")))
+      (is (= "defined name Tax_Rate" (bad "A1*Tax_Rate"))
+          "with no workbook to resolve it against")
       (is (= "structured table reference to Sales" (bad "SUM(Sales[Amount])")))
       (is (= "spill reference (A1#)" (bad "SUM(A1#)")))
       (is (= "range intersection" (bad "SUM(A1:A3 B1:B3)")))
@@ -204,6 +205,100 @@
     (testing "name collisions get suffixed"
       (let [again (xlsx/import! (in-stream (fixture-wb)) "dev-ann" "budget")]
         (is (= ["budget-Data-2" "budget-Other-2"] (mapv :sname (:sheets again))))))))
+
+;; --- defined names ----------------------------------------------------------
+
+(defn- named-wb
+  "A workbook using DEFINED NAMES the way real ones do: a named constant cell, a
+   named range, a sheet-scoped name shadowing a global, a name defined over
+   another name, and one pointing at a second tab. (Not a self-referential one:
+   POI refuses to write that workbook at all — see the unit test below.)"
+  ^bytes []
+  (let [wb (XSSFWorkbook.)
+        s  (.createSheet wb "Data")
+        o  (.createSheet wb "Other")
+        ;; scope BEFORE the name: POI checks for a duplicate at `setNameName`,
+        ;; and a sheet-scoped name is only allowed to shadow a global one once
+        ;; it already knows it is scoped
+        nm (fn [n refers & [sheet-idx]]
+             (doto (.createName wb)
+               (cond-> sheet-idx (.setSheetIndex sheet-idx))
+               (.setNameName n)
+               (.setRefersToFormula refers)))]
+    (.setCellValue (cell s 0 0) 100.0)                    ; A1
+    (.setCellValue (cell s 1 0) 200.0)                    ; A2
+    (.setCellValue (cell s 2 0) 0.2)                      ; A3  (the rate)
+    (.setCellValue (cell o 0 0) 7.0)                      ; Other!A1
+    (nm "Rate"       "Data!$A$3")
+    (nm "Sales"      "Data!$A$1:$A$2")
+    (nm "Doubled"    "Data!$A$3*2")                       ; an expression
+    (nm "RateAgain"  "Rate")                              ; a name over a name
+    (nm "Elsewhere"  "Other!$A$1")                        ; cross-sheet
+    (.setCellFormula (cell s 4 0) "A1*Rate")              ; A5
+    (.setCellFormula (cell s 5 0) "SUM(Sales)")           ; A6
+    (.setCellFormula (cell s 6 0) "Doubled")              ; A7
+    (.setCellFormula (cell s 7 0) "A1*RateAgain")         ; A8
+    (.setCellFormula (cell s 8 0) "A1*Elsewhere")         ; A9 — must refuse
+    (wb-bytes wb)))
+
+(deftest defined-names-resolve-to-what-they-point-at
+  (db/upsert-user! {:uid "dev-ann" :name "Ann"})
+  (let [report (xlsx/import! (in-stream (named-wb)) "dev-ann" "named")
+        data   (first (:sheets report))
+        why    (into {} (for [f (:fallbacks data)] [(:addr f) (:reason f)]))]
+    (testing "a name resolves to its target, and the formula stays LIVE"
+      (let [{:keys [sh]} (store/load-record "dev-ann__named-Data")]
+        (try
+          (is (= "=(* $A1 $A3)" (sheet/raw sh "A5")))
+          (is (= 20.0 (sheet/value sh "A5")))
+          (is (= "=(sum $A1:A2)" (sheet/raw sh "A6")) "a named RANGE too")
+          (is (= 300 (sheet/value sh "A6")))
+          (is (= "=(* $A3 2)" (sheet/raw sh "A7")) "a name may be an expression")
+          (is (= 0.4 (sheet/value sh "A7")))
+          (is (= 20.0 (sheet/value sh "A8")) "a name over a name resolves")
+          (finally (sheet/close! sh)))))
+    (testing "and a refusal still names what it refused"
+      (is (= "cross-sheet reference to Other" (why "A9"))))))
+
+(deftest a-sheet-scoped-name-shadows-a-global-one
+  ;; Asserted on the name table rather than end-to-end: POI's own evaluator
+  ;; resolves a shadowed name to the GLOBAL one, so a fixture would carry a
+  ;; cached value that disagrees with the right answer and `demote-verify!`
+  ;; would (correctly) demote the translation. Real workbooks carry Excel's
+  ;; cached values, not POI's, so this only bites synthetic ones.
+  (let [wb (XSSFWorkbook.)
+        _  (.createSheet wb "Data")
+        _  (.createSheet wb "Other")
+        nm (fn [n refers & [idx]]
+             (doto (.createName wb)
+               (cond-> idx (.setSheetIndex idx))
+               (.setNameName n)
+               (.setRefersToFormula refers)))]
+    (nm "Rate" "Data!$A$3")            ; global
+    (nm "Only" "Data!$A$9")            ; global, unshadowed
+    (nm "Rate" "Data!$A$1" 0)          ; scoped to Data
+    (let [names (fn [idx] (#'xlsx/defined-names wb idx))]
+      (is (= "Data!$A$1" (get (names 0) "Rate")) "Data sees its own")
+      (is (= "Data!$A$3" (get (names 1) "Rate")) "Other sees the global")
+      (is (= "Data!$A$9" (get (names 0) "Only")) "an unshadowed global reaches both"))))
+
+(deftest a-name-needs-the-workbook
+  ;; translate-formula on a bare string has no names to resolve, and must say so
+  ;; rather than inventing one
+  (is (thrown-with-msg? Exception #"defined name Rate"
+                        (xlsx/translate-formula "A1*Rate")))
+  (is (= "=(* $A1 $A3)" (xlsx/translate-formula "A1*Rate"
+                                                {:tab "Data" :names {"Rate" "Data!$A$3"}})))
+  (testing "a name defined in terms of itself refuses instead of recurring"
+    ;; POI will not write such a workbook, but a hand-built file can carry one,
+    ;; and without the guard this is a StackOverflow rather than a refusal
+    (is (thrown-with-msg? Exception #"refers to itself"
+                          (xlsx/translate-formula "Loop+1"
+                                                  {:tab "Data" :names {"Loop" "Loop"}}))))
+  (testing "a local sheet prefix is not a cross-sheet reference"
+    (is (= "=$A3" (xlsx/translate-formula "Data!A3" {:tab "Data"})))
+    (is (thrown-with-msg? Exception #"cross-sheet reference to Other"
+                          (xlsx/translate-formula "Other!A3" {:tab "Data"})))))
 
 (deftest import-caps
   (with-redefs [xlsx/max-cells 3]
