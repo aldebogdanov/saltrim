@@ -64,6 +64,19 @@ point of having the shape:
 =(map sum #area A1:B2) ; (3 7) — a total per row
 ```
 
+**Matrix functions** take and return areas, so they compose:
+
+```clojure
+=(transpose #area A1:C2)                    ; [[1 4] [2 5] [3 6]]
+=(matmul #area A1:C2 #area E1:F3)           ; [[58 64] [139 154]]
+=(det #area H1:I2)                          ; 10
+=(matmul #area H1:I2 (inverse #area H1:I2)) ; the identity
+```
+
+`transpose`, `matmul`, `det`, `inverse`, `linest` and `trend` are all ordinary
+names — no `xl/` prefix needed. Hand one a flat `$A1:B2` and it tells you so
+rather than quietly computing something else.
+
 **Relative references** point to a cell by *offset from the cell itself*, written
 `$<col><row>` where each of col/row is `_` (same index), `+N`, or `-N`. They are
 resolved per cell, so they **survive copy/paste unchanged** — copy one down or

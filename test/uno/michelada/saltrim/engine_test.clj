@@ -964,9 +964,9 @@
       (put s "D1" "=#area A1:B2")
       (is (= [[1 2] [3 4]] (v s "D1"))))
     (testing "and that is what makes a shape-sensitive Excel function right"
-      (put s "D2" "=(xl/TRANSPOSE #area A1:B2)")
-      (is (= [1 3 2 4] (v s "D2")) "the transpose of [[1 2] [3 4]]")
-      (put s "D3" "=(xl/MDETERM #area A1:B2)")
+      (put s "D2" "=(transpose #area A1:B2)")
+      (is (= [[1 3] [2 4]] (v s "D2")) "the transpose of [[1 2] [3 4]]")
+      (put s "D3" "=(det #area A1:B2)")
       (is (= -2 (v s "D3")) "1*4 - 2*3; meaningless on a flat column"))
     (testing "areas stay reactive like any other range"
       (put s "A1" "10")

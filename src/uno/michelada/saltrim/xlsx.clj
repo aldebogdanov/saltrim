@@ -245,6 +245,10 @@
       "TRUE"    true
       "FALSE"   false
       "VLOOKUP" (vlookup-form args)
+      ;; ours, not borrowed — and they need the rectangle, which only the
+      ;; mechanical tiers areafy automatically
+      "MMULT"     (apply list 'matmul (areafy args))
+      "TRANSPOSE" (apply list 'transpose (areafy args))
       (borrowed-or-xl n args))))
 
 (def ^:private sandbox-names

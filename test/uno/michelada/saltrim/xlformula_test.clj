@@ -61,8 +61,9 @@
                "=(str-find \"a\" $A1)" "=(percentile $A1:A9 0.5)"
                "=(count (filter number? $A1:A9))" "=(count (str (trim (str $A1))))"
                "=(if (excel-truthy $A1) 1 2)" "=(let [x 1 y 2] (+ (+ x y) $A1))"
-               "=(sum (flatten (vector $A1:B2 $C3 5)))" "=(xl/TRANSPOSE #area A1:B2)"
-               "=(index #area A1:B2 2 1)"]]
+               "=(sum (flatten (vector $A1:B2 $C3 5)))" "=(transpose #area A1:B2)"
+               "=(index #area A1:B2 2 1)" "=(matmul #area A1:B2 #area C1:D2)"
+               "=(det #area A1:B2)" "=(inverse #area A1:B2)"]]
     (is (= src (round src)) (str "round trip: " src)))
   (testing "deliberate non-identities — both come back BETTER than they went out"
     ;; xl/PMT and pmt ARE the same function; the importer prefers the Clojure
@@ -70,14 +71,18 @@
     (is (= "=(pmt $A1 10 -1000)" (round "=(xl/PMT $A1 10 -1000)")))
     ;; a flat range handed to a shape-sensitive function is the bug #area fixes,
     ;; so a round trip UPGRADES it: the export loses nothing (Excel ranges carry
-    ;; their own shape) and the import puts the shape back
-    (is (= "=(xl/TRANSPOSE #area A1:B2)" (round "=(xl/TRANSPOSE $A1:B2)")))))
+    ;; their own shape) and the import puts the shape back — AND lands on the
+    ;; native name, since matrices are no longer xl/-only
+    (is (= "=(transpose #area A1:B2)" (round "=(xl/TRANSPOSE $A1:B2)")))
+    (is (= "=(matmul #area A1:B2 #area C1:D2)" (round "=(xl/MMULT #area A1:B2 #area C1:D2)")))))
 
 (deftest areas-export-as-one-range
   ;; without area folding an #area argument would splice into one range PER ROW,
   ;; so a one-argument function would be called with two
-  (is (= "TRANSPOSE(A1:B2)" (->xl "=(xl/TRANSPOSE #area A1:B2)")))
-  (is (= "MDETERM(A1:C3)"   (->xl "=(xl/MDETERM #area A1:C3)")))
+  (is (= "TRANSPOSE(A1:B2)" (->xl "=(transpose #area A1:B2)")))
+  (is (= "MMULT(A1:B2,C1:D2)" (->xl "=(matmul #area A1:B2 #area C1:D2)")))
+  (is (= "MDETERM(A1:C3)"   (->xl "=(det #area A1:C3)")))
+  (is (= "MINVERSE(A1:B2)"  (->xl "=(inverse #area A1:B2)")))
   (is (= "INDEX(A1:B2,2,1)" (->xl "=(index #area A1:B2 2 1)")))
   (is (= "SUM(A1:B2)"       (->xl "=(sum $A1:B2)")) "a flat range still folds too"))
 

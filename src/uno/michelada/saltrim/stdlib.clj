@@ -15,13 +15,16 @@
      - **ISO dates, not 1900 serial numbers.** `(eomonth \"2026-07-29\" 1)` takes
        and returns `yyyy-MM-dd` strings like the rest of SaltRim; the serial
        conversion happens here, at the boundary, in both directions.
-     - **Curated, not dumped.** Roughly 230 of Excel's ~410 are here. Left out:
+     - **Curated, not dumped.** Roughly 235 of Excel's ~410 are here. Left out:
        what Clojure already does better (`SORT`, `UNIQUE`, `FILTER`, `IF`,
-       `CHOOSE`-as-`nth`), what needs 2D ranges we do not have yet (`MMULT`,
-       `TRANSPOSE`, `LINEST`), the text-coercion variants (`AVERAGEA` and
-       friends), the database `D*` family (Clojure has `filter`), and the
-       legacy duplicates Excel keeps for compatibility (`NORMDIST` alongside
+       `CHOOSE`-as-`nth`), the text-coercion variants (`AVERAGEA` and friends),
+       the database `D*` family (Clojure has `filter`), and the legacy
+       duplicates Excel keeps for compatibility (`NORMDIST` alongside
        `NORM.DIST`). Anything omitted is still reachable as `xl/NAME`.
+     - **Matrices are in now.** `MMULT`/`TRANSPOSE`/`LINEST` used to be excluded
+       for want of 2D ranges; `#area` supplied them, so `transpose`, `matmul`,
+       `det`, `inverse`, `linest` and `trend` are ordinary bare names. Nobody
+       should have to reach for `xl/MMULT` to multiply two matrices.
      - **Nothing changes meaning.** Names already in use keep their semantics:
        `round` stays 1-arg `Math/round` (Excel's 2-arg half-away-from-zero is
        `xround`), `ceil`/`floor` stay 1-arg (Excel's round-to-a-multiple is
@@ -68,6 +71,29 @@
   [c] (filter number? (flatten c)))
 
 (defn- mean* [c] (let [c (nums c)] (if (seq c) (/ (double (reduce + 0 c)) (count c)) 0)))
+
+;; --- matrices --------------------------------------------------------------
+;; `transpose` and `matmul` are OURS rather than borrowed, for one reason: they
+;; are four lines of Clojure, and going through `excel/call` would convert every
+;; element to a tagged value and back to answer a question Clojure answers
+;; directly. `det` and `inverse` ARE borrowed — pivoting and conditioning are
+;; exactly the "decades of careful numerics" this namespace exists to inherit.
+
+(defn- transpose* [m]
+  (when-not (and (sequential? m) (seq m) (every? sequential? m))
+    (throw (ex-info "transpose needs a rectangle — write #area A1:B2, not $A1:B2" {})))
+  (apply mapv vector m))
+
+(defn- matmul* [a b]
+  (when-not (and (sequential? a) (seq a) (every? sequential? a)
+                 (sequential? b) (seq b) (every? sequential? b))
+    (throw (ex-info "matmul needs two rectangles — write #area A1:B2, not $A1:B2" {})))
+  (when-not (= (count (first a)) (count b))
+    (throw (ex-info (str "matmul shape mismatch: " (count a) "x" (count (first a))
+                         " by " (count b) "x" (count (first b)))
+                    {})))
+  (let [bt (apply mapv vector b)]
+    (mapv (fn [row] (mapv (fn [col] (reduce + 0 (map * row col))) bt)) a)))
 (defn- var* [c]
   (let [c (nums c) n (count c)]
     (if (zero? n) 0
@@ -138,6 +164,9 @@
    'sign    (fn [x] (long (Math/signum (double x))))
    'sum     (fn [c] (reduce + 0 (nums c)))
    'product (fn [c] (reduce * 1 (nums c)))
+   ;; matrices — take and return #area rectangles
+   'transpose transpose*
+   'matmul    matmul*
    ;; stats — all skip blank (nil) cells, like a spreadsheet
    'mean   mean*
    'avg    mean*
@@ -205,7 +234,10 @@
    is just `MODE` once the legacy array form is gone)."
   {"FIND"      'str-find
    "SEARCH"    'str-search
-   "MODE.SNGL" 'mode})
+   "MODE.SNGL" 'mode
+   ;; Excel's M-for-matrix prefix is its own convention, not a term of art
+   "MDETERM"   'det
+   "MINVERSE"  'inverse})
 
 (defn- kebab
   "Excel name -> the symbol we expose it as. `NORM.S.DIST` -> `norm-s-dist`."
@@ -312,7 +344,8 @@
      "BESSELY" "BITAND" "BITOR" "BITXOR" "BITLSHIFT" "BITRSHIFT" "BIN2DEC"
      "BIN2HEX" "BIN2OCT" "DEC2BIN" "DEC2HEX" "DEC2OCT" "HEX2BIN" "HEX2DEC"
      "HEX2OCT" "OCT2BIN" "OCT2DEC" "OCT2HEX"]]
-   ["logical" ["XOR"]]])
+   ["logical" ["XOR"]]
+   ["matrix" ["MDETERM" "MINVERSE" "LINEST" "TREND"]]])
 
 (def borrowed-names
   "Every Excel name this namespace re-exposes, flat."

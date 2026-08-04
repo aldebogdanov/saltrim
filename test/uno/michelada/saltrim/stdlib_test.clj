@@ -11,6 +11,10 @@
 
 (defn- v [s a] (sh/settle! s) (sh/value s a))
 
+(defn- call
+  "Invoke a stdlib function directly by the name a formula would write."
+  [sym & args] (apply (get lib/stdlib sym) args))
+
 (defn- sheet-with [cells]
   (let [s (sh/create-sheet)]
     (doseq [[a raw] cells] (sh/set-cell! s a raw))
@@ -177,3 +181,31 @@
       (is (= 149.02948869707532 (v s "B1")))
       (sh/set-cell! s "A1" "0.05")
       (is (= 129.50457496545658 (v s "B1"))))))
+
+(deftest matrices
+  ;; MMULT/TRANSPOSE/LINEST were excluded from this namespace for want of 2D
+  ;; ranges. `#area` supplied them, so they are ordinary bare names now — nobody
+  ;; should reach for `xl/MMULT` to multiply two matrices.
+  (let [a [[1 2 3] [4 5 6]]                 ; 2x3
+        b [[7 8] [9 10] [11 12]]            ; 3x2
+        m [[4 7] [2 6]]]
+    (testing "transpose and matmul are ours, and keep their shape"
+      (is (= [[1 4] [2 5] [3 6]] (call 'transpose a)))
+      (is (= a (call 'transpose (call 'transpose a))) "an involution"))
+    (testing "matmul"
+      (is (= [[58 64] [139 154]] (call 'matmul a b)))
+      (is (= [[17 22 27] [22 29 36] [27 36 45]] (call 'matmul (call 'transpose a) a))))
+    (testing "det and inverse are borrowed, but come back as rectangles"
+      (is (= 10 (call 'det m)) "4*6 - 7*2")
+      (is (= [[0.6000000000000001 -0.7000000000000001] [-0.2 0.4]] (call 'inverse m)))
+      (testing "which is the whole point — they compose"
+        (let [i (call 'matmul m (call 'inverse m))]
+          (is (= 2 (count i)) "still a 2x2, not four loose numbers")
+          (is (every? #(< (abs (- 1.0 %)) 1e-9) [(get-in i [0 0]) (get-in i [1 1])]))
+          (is (every? #(< (abs %) 1e-9) [(get-in i [0 1]) (get-in i [1 0])])))))
+    (testing "a FLAT range says so, instead of computing something else"
+      (is (thrown-with-msg? Exception #"needs a rectangle" (call 'transpose [1 2 3 4])))
+      (is (thrown-with-msg? Exception #"needs two rectangles" (call 'matmul [1 2] [3 4]))))
+    (testing "and a shape mismatch names both shapes"
+      (is (thrown-with-msg? Exception #"2x3 by 2x2"
+                            (call 'matmul a [[1 2] [3 4]]))))))

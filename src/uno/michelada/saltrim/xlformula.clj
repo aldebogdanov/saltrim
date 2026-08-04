@@ -50,7 +50,8 @@
   '{sum "SUM" mean "AVERAGE" median "MEDIAN" xmin "MIN" xmax "MAX"
     abs "ABS" sqrt "SQRT" exp "EXP" ln "LN" log10 "LOG10" sign "SIGN"
     xround "ROUND" today "TODAY" xdate "DATE" upper "UPPER" lower "LOWER"
-    trim "TRIM" and "AND" or "OR" not "NOT" join "CONCATENATE"})
+    trim "TRIM" and "AND" or "OR" not "NOT" join "CONCATENATE"
+    matmul "MMULT" transpose "TRANSPOSE"})
 
 (def ^:private splice
   "Heads the importer's `coll-arg` wraps aggregate arguments in; they are
