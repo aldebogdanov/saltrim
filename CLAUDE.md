@@ -467,6 +467,14 @@ the MECHANICAL tiers only — a hand-mapped aggregate like `sum` filters with
 lose. `unparse`/`shift-refs`/`insert-shift`/`delete-shift` all know the tag, and
 `xlformula/area->range` folds it back to one Excel range on export (without it
 `TRANSPOSE(#area A1:B2)` would emit a two-argument call).
+**`stdlib/nums` FLATTENS**, so every blank-skipping aggregate (`sum` `mean`
+`median` `xmin` `xmax` `product` `stdev` `variance`) gives the SAME answer for
+`$A1:B2` and `#area A1:B2` — without that, `filter number?` over `[[1 2] [3 4]]`
+keeps nothing and they all silently returned 0. That is the line between the
+halves of the stdlib: OUR aggregates take cells and ignore shape;
+**clojure.core stays Clojure**, so `(count #area A1:B2)` is 2 rows (not 4 cells)
+and `(map sum #area A1:B2)` is the per-row totals — which is what an area is FOR
+on that side.
 **The function vocabulary is THREE TIERS**, and only the first is a decision:
 `fname->form`'s hand-written cases (where we chose different semantics —
 `MIN`→`xmin` skips blanks, `VLOOKUP`→`xvlookup` is exact-match only), then

@@ -52,6 +52,18 @@ The .xlsx importer emits `#area` automatically wherever a workbook passes a true
 rectangle to an Excel function. Both forms cost the same and share the 5 000-cell
 cap; `#area` shifts on paste and follows row/column inserts exactly like `$A1:B2`.
 
+**The built-in aggregates don't care which one you use.** `sum`, `mean`,
+`median`, `xmin`, `xmax`, `product`, `stdev` and `variance` all work over the
+cells, so `(sum $A1:B2)` and `(sum #area A1:B2)` are the same number. Plain
+Clojure functions, on the other hand, see exactly what you wrote — which is the
+point of having the shape:
+
+```clojure
+=(count $A1:B2)        ; 4  — cells
+=(count #area A1:B2)   ; 2  — rows
+=(map sum #area A1:B2) ; (3 7) — a total per row
+```
+
 **Relative references** point to a cell by *offset from the cell itself*, written
 `$<col><row>` where each of col/row is `_` (same index), `+N`, or `-N`. They are
 resolved per cell, so they **survive copy/paste unchanged** — copy one down or

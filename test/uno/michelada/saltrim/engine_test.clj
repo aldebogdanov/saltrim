@@ -972,9 +972,29 @@
       (put s "A1" "10")
       (is (= [[10 2] [3 4]] (v s "D1")))
       (is (= 34 (v s "D3")) "10*4 - 2*3"))
+    (put s "A1" "1")                                  ; back to [[1 2] [3 4]]
+    (testing "OUR aggregates do not care which spelling you used"
+      ;; the trap this nearly shipped with: `filter number?` over [[1 2] [3 4]]
+      ;; keeps NOTHING, so every blank-skipping aggregate answered 0 (or nil)
+      ;; for an area — silently, which is the worst way to be wrong
+      (put s "B2" "")                              ; and a blank inside the block
+      (doseq [[flat area f] [["F1" "G1" "sum"] ["F2" "G2" "mean"] ["F3" "G3" "xmax"]
+                             ["F4" "G4" "xmin"] ["F5" "G5" "median"] ["F6" "G6" "product"]
+                             ["F7" "G7" "stdev"] ["F8" "G8" "variance"]]]
+        (put s flat (str "=(" f " $A1:B2)"))
+        (put s area (str "=(" f " #area A1:B2)")))
+      (sh/settle! s)
+      (doseq [i (range 1 9)]
+        (is (= (sh/value s (str "F" i)) (sh/value s (str "G" i)))
+            (str "flat and area must agree (row " i ")"))))
+    (testing "but clojure.core stays Clojure — an area really is rows"
+      (put s "H1" "=(map sum #area A1:B2)")
+      (is (= [3 3] (vec (v s "H1"))) "per-row sums, which is what an area is FOR")
+      (put s "H2" "=(count #area A1:B2)")
+      (is (= 2 (v s "H2")) "two rows, not four cells"))
     (testing "a single row or column is an area too, just a thin one"
       (put s "E1" "=#area A1:B1")
-      (is (= [[10 2]] (v s "E1"))))
+      (is (= [[1 2]] (v s "E1"))))
     (testing "and the cap is shared with plain ranges"
       (is (thrown-with-msg? Exception #"covers 6000 cells \(max 5000\)"
                             (put s "F1" "=(count #area A1:A6000)"))))))

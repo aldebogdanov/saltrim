@@ -53,8 +53,19 @@
 
 (defn- nums
   "Keep only the numbers in a cell collection, so aggregates IGNORE blank cells
-   (which resolve to nil) — matching a spreadsheet's SUM/AVERAGE-skip-blanks."
-  [c] (filter number? c))
+   (which resolve to nil) — matching a spreadsheet's SUM/AVERAGE-skip-blanks.
+
+   FLATTENS first, so a 2D `#area A1:B2` aggregates over its cells rather than
+   its rows. Without that every aggregate here answered 0 (or nil) for an area,
+   silently: `filter number?` over `[[1 2] [3 4]]` keeps nothing. Excel sums a
+   rectangle's cells too, and a `sum` that depends on which of two spellings of
+   the same block you used is a wrong answer, not a design.
+
+   This is the line between the two halves of the stdlib: OUR aggregates take a
+   collection of cells and do not care about its shape, while `clojure.core`
+   stays Clojure — `(reduce + #area A1:B2)` still adds ROWS and still throws,
+   because that is what reducing + over vectors means."
+  [c] (filter number? (flatten c)))
 
 (defn- mean* [c] (let [c (nums c)] (if (seq c) (/ (double (reduce + 0 c)) (count c)) 0)))
 (defn- var* [c]
