@@ -829,3 +829,11 @@ Also open, smaller: `TEXT` with a date mask returns the serial's digits rather
 than a formatted date (upstream implements the numeric masks only), and the
 `excel` ns is JVM-only — rechentafel is `.cljc`, so a future client-side formula
 preview could use the same pack if the adapter were written portably.
+
+## `combina` with a fractional first argument never returns
+
+`(combina 0.5 2)` loops forever inside rechentafel — an upstream bug, reachable
+from any cell. It degrades to `#TIMEOUT!` through `sheet/`'s eval-timeout wedge
+rather than freezing the sheet, so this is a report to file upstream rather than
+an outage, but it is the only borrowed function known to do it and there is no
+argument validation in front of the borrowed half generally.

@@ -14,6 +14,7 @@
             [uno.michelada.saltrim.graph :as graph]
             [uno.michelada.saltrim.merge :as mrg]
             [uno.michelada.saltrim.sheet :as sheet]
+            [uno.michelada.saltrim.stdlib :as lib]
             [uno.michelada.saltrim.store :as store]
             [uno.michelada.saltrim.util :as u]
             [uno.michelada.saltrim.xlsx :as xlsx]
@@ -828,6 +829,27 @@
     (fn [uid sheet-id rec {:keys [sid]} gen]
       (ensure-session! sid sheet-id (:branch rec) uid (:token rec))
       (patch-inner! gen "#violview" (violations-html (:sh rec))))))
+
+(defn handle-fnsrc
+  "Plain-text source for one stdlib function, for the ƒ panel's copy button.
+
+   Fetched rather than embedded: a borrowed function's source is rechentafel's
+   real implementation plus the helpers it needs, ~5KB each and 1.2MB across the
+   panel. Nobody should download that to copy one of them. Like `handle-agentkey`
+   this is tied to no sheet — the reference is the same for everybody — but it
+   still wants a signed-in user, since the whole app does.
+
+   The name must be one the panel actually lists; anything else is a 404 rather
+   than a lookup in a map an attacker chose the key of."
+  [req]
+  (let [sym (some-> (qparam req "f") symbol)]
+    (cond
+      (not (auth/req->uid req))        {:status 401 :body "not signed in"}
+      (not (contains? lib/stdlib sym)) {:status 404 :body "no such function"}
+      :else
+      (if-let [src (lib/source-for sym)]
+        {:status 200 :headers {"Content-Type" "text/plain; charset=utf-8"} :body src}
+        {:status 404 :body "no source"}))))
 
 (defn handle-agentkey
   "Mint/rotate or revoke the signed-in user's ACCOUNT agent key (the MCP

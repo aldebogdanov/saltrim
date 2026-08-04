@@ -5,6 +5,7 @@
   (:require [clojure.test :refer [deftest testing is use-fixtures]]
             [mount.core :as mount]
             [uno.michelada.saltrim.db :as db]
+            [uno.michelada.saltrim.formula :as formula]
             [uno.michelada.saltrim.sheet :as sheet]
             [uno.michelada.saltrim.store :as store]
             [uno.michelada.saltrim.xlsx :as xlsx])
@@ -214,6 +215,27 @@
   (is (= "my-file" (xlsx/base-name nil "my file.xlsx")))
   (is (= "imported" (xlsx/base-name nil "###.xlsx")))
   (is (= "budget-2026" (xlsx/base-name " budget 2026 " nil))))
+
+;; --- the hand-mapped tier, as data ------------------------------------------
+
+(deftest hand-mapped-matches-the-translator
+  ;; `xlsx/hand-mapped` is what the ƒ panel reads to decide which of Excel's
+  ;; functions already have a Clojure spelling — so a name that drifts out of
+  ;; the `case` below would be advertised as native and arrive as `xl/NAME`.
+  (testing "every listed name really is a case in the translator"
+    ;; against `fname->form` itself rather than through the parser: `TRUE` and
+    ;; `FALSE` are parsed as boolean LITERALS and never reach a call node at
+    ;; all, which is the strongest form of "already native"
+    (let [fname->form @#'xlsx/fname->form
+          ;; a range second argument, since VLOOKUP refuses a table that is not
+          ;; one before it can pick a tier
+          args        [(formula/ref-marker "A1") (formula/range-marker "B1" "C9") 2 false]]
+      (doseq [n xlsx/hand-mapped]
+        (let [form (fname->form n args)]
+          (is (not (re-find #"\bxl/" (pr-str form)))
+              (str n " is listed as hand-mapped but fell through to xl/"))))))
+  (testing "and a name that is NOT listed does fall through"
+    (is (re-find #"\bxl/" (pr-str (xlsx/translate-formula "DSUM(A1,B1,C1)"))))))
 
 ;; --- the apostrophe escape (engine-level, importer relies on it) ------------
 

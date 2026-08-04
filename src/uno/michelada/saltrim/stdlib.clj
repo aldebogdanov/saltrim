@@ -39,7 +39,8 @@
   (:require [clojure.set :as set]
             [clojure.string :as str]
             [uno.michelada.saltrim.errors :as errors]
-            [uno.michelada.saltrim.excel :as excel]))
+            [uno.michelada.saltrim.excel :as excel]
+            [uno.michelada.saltrim.xlsource :as xlsource]))
 
 ;; --- hand-written ----------------------------------------------------------
 ;; The functions whose semantics we chose rather than inherited: the aggregates
@@ -537,20 +538,27 @@
 (declare source-for)
 
 (defn docs-for
-  "{:desc :eg} for a stdlib name. Hand-written entries are curated; a borrowed
-   name generates one from the Excel function it is, plus upstream's arity —
-   which is honest, and is the thing a spreadsheet user actually wants to know
-   (that `stdev-p` IS `STDEV.P`) rather than prose invented here."
+  "{:desc :eg} for a stdlib name, plus how the panel gets at its source.
+   Hand-written entries are curated; a borrowed name generates one from the
+   Excel function it is, plus upstream's arity — which is honest, and is the
+   thing a spreadsheet user actually wants to know (that `stdev-p` IS
+   `STDEV.P`) rather than prose invented here.
+
+   A hand-written function carries its `:src` INLINE, because it is a few lines.
+   A borrowed one is marked `:fetch` instead and served on demand: its source is
+   the real upstream implementation with the helpers it needs, ~5KB each and
+   1.2MB across the panel, which is not something to put in every page load for
+   the one function somebody eventually copies."
   [sym]
   (or (some-> (hand-docs sym) (assoc :src (source-for sym)))
       (when-let [xl (borrowed-origin sym)]
         (let [n (min 4 (max 1 (or (first (excel/arity xl)) 1)))]
-          {:desc (str "Excel's " xl
-                      (when-let [a (arity-phrase xl)] (str " — " a))
-                      (when (date-shape xl)
-                        ". Dates are ISO yyyy-MM-dd strings here, not serials"))
-           :eg   (str "(" sym " " (placeholders n) ")")
-           :src  (source-for sym)}))))
+          {:desc  (str "Excel's " xl
+                       (when-let [a (arity-phrase xl)] (str " — " a))
+                       (when (date-shape xl)
+                         ". Dates are ISO yyyy-MM-dd strings here, not serials"))
+           :eg    (str "(" sym " " (placeholders n) ")")
+           :fetch true}))))
 
 ;; --- handing a function over as standalone Clojure -------------------------
 ;;
@@ -661,14 +669,17 @@
                                  [(str "(require '" (str/join "\n         '" reqs) ")") ""])
                                [text])))
 
+      ;; A borrowed function is implemented upstream, and saying so was all this
+      ;; used to do — a comment plus `(defn erfc [& args] (excel/call "ERFC" args))`,
+      ;; which is unrunnable without the very dependency you were trying to
+      ;; leave behind and shows you nothing about what ERFC computes. So the
+      ;; implementation is fetched out of rechentafel's own shipped source.
       (borrowed-origin sym)
       (let [xl (borrowed-origin sym)]
-        (str ";; `" sym "` is Excel's " xl ", implemented by rechentafel.\n"
-             ";; deps.edn  org.replikativ/rechentafel {:mvn/version \"0.1.5\"}\n"
-             ";;\n"
-             ";; SaltRim's own definition is a one-line delegation; `excel/call`\n"
-             ";; converts plain values to rechentafel's tagged maps and back\n"
-             ";; (uno.michelada.saltrim.excel, ~40 lines).\n"
-             "(defn " sym " [& args] (excel/call \"" xl "\" args))"))
+        (or (xlsource/source-for sym xl (date-shape xl))
+            (str ";; `" sym "` is Excel's " xl ", implemented by rechentafel, and its\n"
+                 ";; source could not be located in this build.\n"
+                 ";; deps.edn  org.replikativ/rechentafel {:mvn/version \"0.1.5\"}\n"
+                 "(defn " sym " [& args] (excel/call \"" xl "\" args))")))
 
       :else nil)))
