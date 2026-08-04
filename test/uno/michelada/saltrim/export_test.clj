@@ -81,6 +81,34 @@
            (mapv #(.getNumericCellValue (cel %)) (range 5)))
         "Excel's own engine recomputes them to SaltRim's answers")))
 
+(deftest comment-label-and-formula-note-compose
+  ;; three independent things want the ONE Excel comment a cell gets: the user's
+  ;; own :comment (which is also where the .xlsx IMPORTER leaves its audit
+  ;; trail), the note about the formula, and the :label. They stack in that
+  ;; order — none of them overwrites another.
+  (let [{:keys [cell]} (roundtrip
+                        (fn [s]
+                          (sheet/set-cell! s "A1" "3")
+                          (sheet/set-cell! s "B1" "=(sum $A1:A1)")
+                          (sheet/set-style! s "B1" :comment "checked by Ann")
+                          (sheet/set-style! s "B1" :label "total")
+                          (sheet/set-cell! s "B2" "=(reduce + $A1:A1)")
+                          (sheet/set-style! s "B2" :comment "XLSX: =SUM(A1)")
+                          (sheet/set-style! s "B2" :label "squares")
+                          (sheet/set-cell! s "B3" "7")
+                          (sheet/set-style! s "B3" :comment "just a note")
+                          (sheet/set-style! s "B3" :label "seven")))
+        note (fn [a] (some-> (cell a) .getCellComment .getString .getString))]
+    (is (= "checked by Ann\nFormula: =(sum $A1:A1)\nLabel: total" (note "B1"))
+        "a live formula keeps the user's comment above it and the label below")
+    (is (= (str "XLSX: =SUM(A1)\n"
+                "Formula (value only, no Excel equivalent): =(reduce + $A1:A1)\n"
+                "Label: squares")
+           (note "B2"))
+        "an import's audit trail survives alongside the export's own note")
+    (is (= "just a note\nLabel: seven" (note "B3"))
+        "and a cell with no formula gets no formula line")))
+
 (deftest text-and-errors
   (let [{:keys [cell]} (roundtrip
                         (fn [s]

@@ -108,15 +108,19 @@
    `(count (filter number? r))`, `COUNTA(r)` into `(count (remove nil? r))`.
    Recognising the three shapes is what lets an imported sheet export back with
    its own function names instead of refusing on a bare `count`.
-   Returns [excel-name args] or nil."
+
+   The arities are checked, not assumed: `COUNT()` with no argument is not a
+   formula Excel accepts, and a formula Excel rejects costs the whole FILE
+   rather than the one cell. Returns [excel-name args] or nil."
   [args]
   (let [a (first args)]
     (when (and (= 1 (count args)) (seq? a))
-      (let [[h & as] a]
+      (let [[h & as] a
+            n (count as)]
         (cond
-          (and (= 'str h) (= 1 (count as)))                     ["LEN" as]
-          (and (= 'filter h) (= '(number?) (take 1 as)))        ["COUNT" (rest as)]
-          (and (= 'remove h) (= '(nil?) (take 1 as)))           ["COUNTA" (rest as)])))))
+          (and (= 'str h)    (= 1 n))                        ["LEN"    as]
+          (and (= 'filter h) (= 2 n) (= 'number? (first as))) ["COUNT"  (rest as)]
+          (and (= 'remove h) (= 2 n) (= 'nil? (first as)))    ["COUNTA" (rest as)])))))
 
 (defn form->ast
   "One SaltRim marker form -> a rechentafel AST node. `scope` maps the symbols a
