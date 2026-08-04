@@ -36,7 +36,8 @@
    Errors behave like the rest of the sandbox: a domain failure THROWS, named
    the way a spreadsheet user knows it (`#NUM!`, `#DIV/0!`), and the sheet layer
    renders that as the cell's `{:error …}`."
-  (:require [clojure.string :as str]
+  (:require [clojure.set :as set]
+            [clojure.string :as str]
             [uno.michelada.saltrim.errors :as errors]
             [uno.michelada.saltrim.excel :as excel]))
 
@@ -45,7 +46,20 @@
 ;; that skip blanks the Clojure way, the ISO date helpers, the excel-compat
 ;; shims the .xlsx importer targets, and the sandbox's I/O refusals.
 
-(defn- ld ^java.time.LocalDate [s] (java.time.LocalDate/parse (str s)))
+(def ^:private helper-src
+  "Source of the private helpers a stdlib function may lean on, so `source-for`
+   can hand one over with everything it needs to run outside SaltRim."
+  (atom {}))
+
+(defmacro ^:private defsrc
+  "`defn-`, remembering the source. One form defines the helper AND records what
+   to paste, so the two cannot disagree."
+  [name args & body]
+  `(do (defn ~(vary-meta name assoc :private true) ~args ~@body)
+       (swap! helper-src assoc '~name '~(concat (list 'defn name args) body))
+       (var ~name)))
+
+(defsrc ld [s] (java.time.LocalDate/parse (str s)))
 
 ;; SCI's core exposes the print/read family, but its *out*/*in* are unbound, so
 ;; calling them crashes with an opaque cast (SciUnbound -> Writer). They're also
@@ -54,7 +68,7 @@
 (defn- no-io [& _]
   (throw (ex-info "I/O isn't available in formulas — the sandbox is pure (no console)" {})))
 
-(defn- nums
+(defsrc nums
   "Keep only the numbers in a cell collection, so aggregates IGNORE blank cells
    (which resolve to nil) — matching a spreadsheet's SUM/AVERAGE-skip-blanks.
 
@@ -70,7 +84,13 @@
    because that is what reducing + over vectors means."
   [c] (filter number? (flatten c)))
 
-(defn- mean* [c] (let [c (nums c)] (if (seq c) (/ (double (reduce + 0 c)) (count c)) 0)))
+(defsrc mean* [c] (let [c (nums c)] (if (seq c) (/ (double (reduce + 0 c)) (count c)) 0)))
+
+(defsrc var* [c]
+  (let [c (nums c) n (count c)]
+    (if (zero? n) 0
+        (let [m (/ (double (reduce + 0 c)) n)]
+          (/ (reduce + (map (fn [x] (let [d (- x m)] (* d d))) c)) n)))))
 
 ;; --- matrices --------------------------------------------------------------
 ;; `transpose` and `matmul` are OURS rather than borrowed, for one reason: they
@@ -79,12 +99,12 @@
 ;; directly. `det` and `inverse` ARE borrowed — pivoting and conditioning are
 ;; exactly the "decades of careful numerics" this namespace exists to inherit.
 
-(defn- transpose* [m]
+(defsrc transpose* [m]
   (when-not (and (sequential? m) (seq m) (every? sequential? m))
     (throw (ex-info "transpose needs a rectangle — write #area A1:B2, not $A1:B2" {})))
   (apply mapv vector m))
 
-(defn- matmul* [a b]
+(defsrc matmul* [a b]
   (when-not (and (sequential? a) (seq a) (every? sequential? a)
                  (sequential? b) (seq b) (every? sequential? b))
     (throw (ex-info "matmul needs two rectangles — write #area A1:B2, not $A1:B2" {})))
@@ -94,11 +114,6 @@
                     {})))
   (let [bt (apply mapv vector b)]
     (mapv (fn [row] (mapv (fn [col] (reduce + 0 (map * row col))) bt)) a)))
-(defn- var* [c]
-  (let [c (nums c) n (count c)]
-    (if (zero? n) 0
-        (let [m (/ (double (reduce + 0 c)) n)]
-          (/ (reduce + (map #(let [d (- % m)] (* d d)) c)) n)))))
 
 ;; --- error branching -------------------------------------------------------
 ;; Excel's IFERROR / IFNA / ERROR.TYPE, as macros so the guarded expression is
@@ -148,7 +163,20 @@
 (defn- error?-macro [_&form _&env expr]
   (list 'some? (list caught-code (list 'fn [] (unthunk expr)))))
 
-(def hand-written
+(defmacro ^:private def-hand-written
+  "Define `hand-written` AND `hand-written-src` from ONE map literal: the
+   installed functions and the source the ƒ panel hands out are the same text,
+   so no amount of editing can make the copy button lie.
+
+   The keys in that literal are written `'sum`, which quotes to `(quote sum)` —
+   unwrapped here so the source map is keyed by the plain symbol."
+  [docstring m]
+  (let [unquote-key (fn [k] (if (and (seq? k) (= 'quote (first k))) (second k) k))
+        src         (into {} (for [[k v] m] [(unquote-key k) v]))]
+    `(do (def ~'hand-written ~docstring ~m)
+         (def ~'hand-written-src '~src))))
+
+(def-hand-written
   "The functions SaltRim implements itself — the ones whose semantics we chose
    rather than inherited. Everything else comes from `derived` below."
   {;; math
@@ -506,17 +534,141 @@
   [n]
   (str/join " " (for [i (range n)] (str "$" (char (+ (int \A) i)) "1"))))
 
+(declare source-for)
+
 (defn docs-for
   "{:desc :eg} for a stdlib name. Hand-written entries are curated; a borrowed
    name generates one from the Excel function it is, plus upstream's arity —
    which is honest, and is the thing a spreadsheet user actually wants to know
    (that `stdev-p` IS `STDEV.P`) rather than prose invented here."
   [sym]
-  (or (hand-docs sym)
+  (or (some-> (hand-docs sym) (assoc :src (source-for sym)))
       (when-let [xl (borrowed-origin sym)]
         (let [n (min 4 (max 1 (or (first (excel/arity xl)) 1)))]
           {:desc (str "Excel's " xl
                       (when-let [a (arity-phrase xl)] (str " — " a))
                       (when (date-shape xl)
                         ". Dates are ISO yyyy-MM-dd strings here, not serials"))
-           :eg   (str "(" sym " " (placeholders n) ")")}))))
+           :eg   (str "(" sym " " (placeholders n) ")")
+           :src  (source-for sym)}))))
+
+;; --- handing a function over as standalone Clojure -------------------------
+;;
+;; The scenario this exists for: you import a workbook, or flatten a formula,
+;; and end up with one large expression that calls `sum`, `xround`, `xvlookup`.
+;; Then you want to run that calculation in an ordinary Clojure application,
+;; where none of those names exist. So the ƒ panel hands you the source.
+;;
+;; It has to be RUNNABLE, which means more than the one `defn`: `sum` is nothing
+;; without `nums`, and `median` and `stdev` lean on the same helper. `source-for`
+;; walks the body for helpers it recorded and emits them first, then the
+;; namespace requires the result actually uses.
+
+(def ^:private alias-note
+  "Requires a pasted definition may need, keyed by the alias its source mentions."
+  {"str" "[clojure.string :as str]"})
+
+(defn- used-helpers
+  "Helper names appearing anywhere in `form`, transitively — `stdev` uses `var*`,
+   which uses `nums`."
+  [form]
+  (let [helpers @helper-src]
+    (loop [pending [form] seen #{}]
+      (if-let [f (first pending)]
+        (let [found (->> (tree-seq coll? seq f)
+                         (filter symbol?)
+                         (filter helpers)
+                         (remove seen))]
+          (recur (into (rest pending) (map helpers found))
+                 (into seen found)))
+        seen))))
+
+(defn- ordered-helpers
+  "Helper definitions sorted so each comes AFTER the ones it calls — `mean*`
+   needs `nums` above it, and Clojure will not read forward. Alphabetical order
+   put `mean*` first and the paste did not compile."
+  [names]
+  (let [src @helper-src]
+    (loop [pending (set names) out []]
+      (if (empty? pending)
+        out
+        (let [ready (filter (fn [n]
+                              (let [used (->> (tree-seq coll? seq (src n))
+                                              (filter symbol?) set)]
+                                (empty? (disj (set/intersection used pending) n))))
+                            pending)
+              ;; a cycle among helpers would loop forever; there is none today,
+              ;; and emitting the rest in any order beats hanging
+              ready (if (seq ready) ready [(first pending)])]
+          (recur (apply disj pending ready) (into out ready)))))))
+
+(defn- as-defn
+  "The recorded value of a stdlib entry, as a top-level definition named `sym`.
+   `(fn [c] …)` becomes `(defn sum [c] …)`; a private helper like `mean*` becomes
+   a `def`, which is what it is.
+
+   A name that is just clojure.core's gets a NOTE instead: `(def abs abs)` binds
+   the new var to itself (the RHS resolves to the var being defined, not to
+   core's), so the paste compiles and then throws `unbound fn`."
+  [sym v]
+  (cond
+    (and (seq? v) (= 'fn (first v)) (vector? (second v)))
+    (concat (list 'defn sym (second v)) (drop 2 v))
+
+    (and (seq? v) (= 'fn (first v)))            ; multi-arity: (fn ([c] …) ([s c] …))
+    (concat (list 'defn sym) (rest v))
+
+    :else (list 'def sym v)))
+
+(defn- core-alias
+  "The clojure.core name this entry simply IS, if that is all it is."
+  [v]
+  (when (symbol? v)
+    (when-let [r (ns-resolve 'uno.michelada.saltrim.stdlib v)]
+      (when (= (find-ns 'clojure.core) (:ns (meta r)))
+        (symbol "clojure.core" (name (:name (meta r))))))))
+
+(defn source-for
+  "Standalone Clojure source for a stdlib function: the helpers it needs, the
+   definition itself, and the `require`s to make it compile. nil when the
+   implementation is not ours to hand over.
+
+   A BORROWED function is Excel's, implemented upstream, so what comes back is
+   SaltRim's own one-line delegation plus the dependency you would need — honest
+   about where the work happens rather than pretending to be self-contained.
+   A macro (`if-error` and friends) has no source worth pasting: the point of it
+   is laziness inside SaltRim's sandbox, and plain Clojure already has `try`."
+  [sym]
+  (let [v (hand-written-src sym)]
+    (cond
+      ;; macros: the sandbox needs them, an application does not
+      (and (seq? v) (= 'with-meta (first v))) nil
+
+      (core-alias v)
+      (str ";; `" sym "` IS " (core-alias v) " — you already have it.")
+
+      (some? v)
+      (let [helpers (used-helpers v)
+            strip   (fn [f] (if (and (= 'defn (first f)) (string? (nth f 2)))
+                              (concat (take 2 f) (drop 3 f))    ; our docstring is not their problem
+                              f))
+            forms   (concat (map (comp strip @helper-src) (ordered-helpers helpers))
+                            [(as-defn sym v)])
+            text    (str/join "\n\n" (map pr-str forms))
+            reqs    (keep (fn [[a r]] (when (re-find (re-pattern (str "\\b" a "/")) text) r))
+                          alias-note)]
+        (str/join "\n" (concat (when (seq reqs)
+                                 [(str "(require '" (str/join "\n         '" reqs) ")") ""])
+                               [text])))
+
+      (borrowed-origin sym)
+      (let [xl (borrowed-origin sym)]
+        (str ";; `" sym "` is Excel's " xl ", implemented by rechentafel.\n"
+             ";; deps.edn  org.replikativ/rechentafel {:mvn/version \"0.1.5\"}\n"
+             ";;\n"
+             ";; SaltRim's own definition is a one-line delegation; `excel/call`\n"
+             ";; converts plain values to rechentafel's tagged maps and back\n"
+             ";; (uno.michelada.saltrim.excel, ~40 lines).\n"
+             "(defn " sym " [& args] (excel/call \"" xl "\" args))"))
+
+      :else nil)))

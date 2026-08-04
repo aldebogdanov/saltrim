@@ -746,18 +746,27 @@
      [cat (remove '#{det inverse} syms)])))
 
 (defn- fn-chip
-  "One function in the reference: its name, the description and runnable example
-   from `stdlib/docs-for` as a hover tooltip, and a button that copies the
-   example. The tooltip is pure CSS (`content: attr(data-tip)`) — no per-chip
-   markup and nothing to position — and the copy is one delegated listener in
-   `app.cljs`, so 284 of these cost 284 spans and zero handlers."
+  "One function in the reference: its name, a hover tooltip carrying the
+   description and a runnable example, and a button that copies the function's
+   SOURCE.
+
+   Source rather than the example, because of what people actually need it for:
+   you import a workbook or flatten a formula, end up with one large expression
+   full of `sum` / `xround` / `xvlookup`, and want to run that calculation in an
+   ordinary Clojure application where none of those names exist. The example is
+   for reading; the source is for taking away. `stdlib/source-for` brings the
+   private helpers along, so what lands in the clipboard compiles on its own.
+
+   The tooltip is pure CSS (`content: attr(data-tip)`) — no per-chip markup and
+   nothing to position — and the copy is one delegated listener in `app.cljs`,
+   so 284 of these cost 284 spans and zero handlers."
   [sym]
-  (let [{:keys [desc eg]} (lib/docs-for sym)]
+  (let [{:keys [desc eg src]} (lib/docs-for sym)]
     [:span {:class "fnref" :data-tip (str desc "\n\n" eg)}
      (str sym)
-     (when eg
-       [:button {:class "fncopy" :data-copy eg
-                 :title (str "copy  " eg)} "⧉"])]))
+     (when src
+       [:button {:class "fncopy" :data-copy src
+                 :title (str "copy the source of " sym)} "⧉"])]))
 
 (defn- defs-html
   "The definitions LIBRARY modal, toggled by $defspanel. The editable library
@@ -791,8 +800,11 @@
              [:summary {:style "font:600 13px sans-serif;cursor:pointer;color:var(--muted);"}
               "Built-in functions (read-only)"]
              [:p {:style (str p "margin-left:.4rem;color:var(--muted);")}
-              "Hover a name for what it does and an example; " [:span {:style kbd} "⧉"]
-              " copies the example ready to paste into a cell."]
+              "Hover a name for what it does and an example. "
+              [:span {:style kbd} "⧉"] " copies its "
+              [:b "source"] " — helpers included, ready to paste into a Clojure "
+              "project, for when a flattened or imported formula has to run "
+              "outside SaltRim."]
              (for [[cat syms] stdlib-reference]
                [:div {:style "margin:.35rem 0 .1rem .4rem;"}
                 [:div {:style "font:600 12px sans-serif;color:var(--muted);margin-bottom:.15rem;"}

@@ -240,3 +240,98 @@
       (is (= "(pmt $A1 $B1 $C1)" (:eg (lib/docs-for 'pmt))))
       (is (re-find #"ISO yyyy-MM-dd" (:desc (lib/docs-for 'eomonth)))
           "and warns where the date representation differs from Excel's"))))
+
+;; --- the ƒ panel's "copy source" button ------------------------------------
+
+(defn- standalone
+  "Evaluate what `source-for` hands out in a FRESH namespace — nothing of
+   SaltRim's in scope — and return the function it defines. This is the whole
+   promise of the button: paste it into your own project and it works."
+  [sym]
+  (let [ns-sym (gensym "srccheck")
+        ns'    (create-ns ns-sym)]
+    (binding [*ns* ns']
+      (clojure.core/refer-clojure)
+      (eval (read-string (str "(do " (lib/source-for sym) ")"))))
+    (ns-resolve ns' sym)))
+
+(deftest copied-source-actually-runs
+  ;; You import a workbook or flatten a formula, end up with an expression full
+  ;; of `sum` / `xround` / `xvlookup`, and want to run it in an ordinary Clojure
+  ;; application where none of those exist. Handing over source that does not
+  ;; compile — or compiles and answers differently — would be worse than none.
+  (let [cases '{sum          [[1 2 nil 3 "x"]]
+                product      [[2 3 nil 4]]
+                mean         [[1 2 nil 3]]
+                avg          [[1 2 nil 3]]
+                median       [[3 1 nil 2]]
+                variance     [[1 2 3 4]]
+                stdev        [[1 2 3 4]]
+                xmin         [[3 nil 1 2]]
+                xmax         [[3 nil 1 2]]
+                ceil         [1.2]
+                floor        [1.8]
+                round        [1.5]
+                sqrt         [9]
+                pow          [2 10]
+                exp          [1]
+                ln           [2.718281828459045]
+                log10        [1000]
+                sign         [-7]
+                transpose    [[[1 2 3] [4 5 6]]]
+                matmul       [[[1 2] [3 4]] [[5 6] [7 8]]]
+                upper        ["ab"]
+                lower        ["AB"]
+                trim         ["  x  "]
+                join         [", " ["a" "b"]]
+                split        ["a,b" ","]
+                str-replace  ["aXa" "X" "-"]
+                starts-with? ["invoice" "inv"]
+                ends-with?   ["a.pdf" ".pdf"]
+                includes?    ["urgent!" "urge"]
+                blank?       ["   "]
+                year         ["2026-03-15"]
+                month        ["2026-03-15"]
+                day          ["2026-03-15"]
+                days-between ["2026-03-01" "2026-03-15"]
+                excel-truthy [0]
+                xround       [2.345 2]
+                xdate        [2026 3 15]
+                xvlookup     ["b" ["a" 1 "b" 2] 2 2]}]
+    (doseq [[sym args] cases]
+      (testing (str sym)
+        (let [src (lib/source-for sym)]
+          (is (string? src) "the panel has source to hand over")
+          (is (= (apply (get lib/stdlib sym) args)
+                 (apply (standalone sym) args))
+              (str sym " must compute the same thing outside SaltRim")))))
+    (testing "helpers come along, so the paste compiles on its own"
+      (is (re-find #"defn nums" (lib/source-for 'sum)) "sum is nothing without nums")
+      (is (re-find #"defn var\*" (lib/source-for 'stdev)) "and stdev needs var* too")
+      (is (re-find #"defn nums" (lib/source-for 'stdev)) "transitively"))
+    (testing "and the requires a paste needs are emitted, quoted"
+      (is (re-find #"\(require '\[clojure.string :as str\]\)" (lib/source-for 'upper)))
+      (is (nil? (re-find #"require" (lib/source-for 'sum))) "and only when used"))
+    (testing "today has no arguments to compare, so just check it runs"
+      (is (string? ((standalone 'today)))))
+    (testing "a name that is only clojure.core's says so instead of redefining it"
+      ;; (def abs abs) binds the new var to ITSELF — the paste compiles and then
+      ;; throws `unbound fn`
+      (is (= ";; `abs` IS clojure.core/abs — you already have it."
+             (lib/source-for 'abs))))
+    (testing "helpers are emitted in dependency order, not alphabetical"
+      ;; `mean*` sorts before `nums` and calls it; Clojure will not read forward
+      (let [src (lib/source-for 'mean)]
+        (is (< (.indexOf src "defn nums") (.indexOf src "defn mean*")))))))
+
+(deftest source-is-honest-where-it-is-not-ours
+  (testing "a borrowed function points at the library that implements it"
+    (let [src (lib/source-for 'pmt)]
+      (is (re-find #"rechentafel" src))
+      (is (re-find #"org.replikativ/rechentafel \{:mvn/version" src)
+          "with the coordinate you would actually need")
+      (is (re-find #"\(defn pmt \[& args\] \(excel/call \"PMT\" args\)\)" src)
+          "and SaltRim's own one-line delegation, rather than a pretend body")))
+  (testing "a macro has no source worth pasting — plain Clojure already has try"
+    (is (nil? (lib/source-for 'if-error)))
+    (is (nil? (lib/source-for 'error-type)))))
