@@ -434,11 +434,24 @@ evaluation of what else to take from rechentafel: `doc/rechentafel-evaluation.md
 formula string, no workbook context). The stack machine it replaced had three
 token-order hazards baked in — a single-range `SUM` arriving as `AttrPtg(isSum)`,
 `IF`/`CHOOSE` as a TRAILING `FuncVarPtg`, `IFERROR` as `NameXPxg` + `#external#`
-— and none of them exist for a node that knows its own name and arguments. The
-vocabulary (`fname->form`) is unchanged and is where new function mappings go.
+— and none of them exist for a node that knows its own name and arguments.
 Every refusal NAMES the construct (`cross-sheet reference to Other`,
 `defined name Tax_Rate`) because that string becomes the cell's audit `:comment`.
 Spike: `spikes/11-excel-ast-import.clj`.
+**The function vocabulary is THREE TIERS**, and only the first is a decision:
+`fname->form`'s hand-written cases (where we chose different semantics —
+`MIN`→`xmin` skips blanks, `VLOOKUP`→`xvlookup` is exact-match only), then
+~213 borrowed names via **`stdlib/excel-name`**, then ~414 verbatim as
+**`xl/NAME`**. New function mappings go in tier one; the other two are one table
+lookup each and need no maintenance. This is what `xl/` was always documented
+FOR, and the importer went a long time without reaching for it — a workbook of
+`PMT`/`SUMIF`/`STDEV.P`/`GEOMEAN`/`TRANSPOSE` used to demote every cell to a
+dead number and now imports with zero demotions. `stdlib/excel-name` leaves out
+the DATE-shaped functions on purpose: `stdlib` speaks ISO strings and Excel
+speaks 1900 serials, so the same name is not the same signature — `xl/EOMONTH`
+is the honest spelling on that side. `demote-verify!` still checks every
+translated cell against Excel's own cached value, so a mechanical translation
+that computes something else degrades to the old behaviour rather than lying.
 **The stdlib is its own ns** (`uno.michelada.saltrim.stdlib`, moved out of
 `formula`) and has two halves. HAND-WRITTEN: the functions whose semantics we
 chose (blank-skipping aggregates, ISO date helpers, the `x*` excel-compat shims
