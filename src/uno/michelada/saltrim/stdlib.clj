@@ -84,9 +84,31 @@
    because that is what reducing + over vectors means."
   [c] (filter number? (flatten c)))
 
-(defsrc mean* [c] (let [c (nums c)] (if (seq c) (/ (double (reduce + 0 c)) (count c)) 0)))
+(defn- mean* [c] (let [c (nums c)] (if (seq c) (/ (double (reduce + 0 c)) (count c)) 0)))
 
-(defsrc var* [c]
+;; --- matrices --------------------------------------------------------------
+;; `transpose` and `matmul` are OURS rather than borrowed, for one reason: they
+;; are four lines of Clojure, and going through `excel/call` would convert every
+;; element to a tagged value and back to answer a question Clojure answers
+;; directly. `det` and `inverse` ARE borrowed — pivoting and conditioning are
+;; exactly the "decades of careful numerics" this namespace exists to inherit.
+
+(defn- transpose* [m]
+  (when-not (and (sequential? m) (seq m) (every? sequential? m))
+    (throw (ex-info "transpose needs a rectangle — write #area A1:B2, not $A1:B2" {})))
+  (apply mapv vector m))
+
+(defn- matmul* [a b]
+  (when-not (and (sequential? a) (seq a) (every? sequential? a)
+                 (sequential? b) (seq b) (every? sequential? b))
+    (throw (ex-info "matmul needs two rectangles — write #area A1:B2, not $A1:B2" {})))
+  (when-not (= (count (first a)) (count b))
+    (throw (ex-info (str "matmul shape mismatch: " (count a) "x" (count (first a))
+                         " by " (count b) "x" (count (first b)))
+                    {})))
+  (let [bt (apply mapv vector b)]
+    (mapv (fn [row] (mapv (fn [col] (reduce + 0 (map * row col))) bt)) a)))
+(defn- var* [c]
   (let [c (nums c) n (count c)]
     (if (zero? n) 0
         (let [m (/ (double (reduce + 0 c)) n)]
