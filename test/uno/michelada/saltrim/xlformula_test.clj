@@ -31,6 +31,7 @@
   (testing "the idioms the importer expanded, folded back up"
     (is (= "LEN(TRIM(A1))"       (->xl "=(count (str (trim (str $A1))))")))
     (is (= "COUNT(A1:A9)"        (->xl "=(count (filter number? $A1:A9))")))
+    (is (= "COUNTA(A1:A9)"       (->xl "=(count (remove nil? $A1:A9))")))
     (is (= "IF(A1,1,2)"          (->xl "=(if (excel-truthy $A1) 1 2)")))
     (is (= "IFERROR(A1/B1,0)"    (->xl "=(if-error (fn [] (/ $A1 $B1)) 0)"))))
   (testing "let becomes LET"
@@ -66,6 +67,17 @@
     ;; xl/PMT and pmt ARE the same function; the importer prefers the Clojure
     ;; name now, so this comes back better than it went out
     (is (= "=(pmt $A1 10 -1000)" (round "=(xl/PMT $A1 10 -1000)")))))
+
+(deftest count-idiom-checks-its-shape
+  ;; the matcher recognises three specific expansions, and anything else that
+  ;; happens to start with `count` must be refused rather than bent into a
+  ;; wrong-arity Excel call — `COUNT()` is not a formula Excel accepts, and a
+  ;; formula Excel rejects costs the whole file, not the cell
+  (is (refused "=(count (filter number?))") "no collection argument")
+  (is (refused "=(count (filter odd? $A1:A9))") "a predicate that isn't number?")
+  (is (refused "=(count (remove zero? $A1:A9))") "a predicate that isn't nil?")
+  (is (refused "=(count (str $A1 $B1))") "2-arg str is a concatenation, not LEN")
+  (is (refused "=(count $A1:A9)") "a bare count has no Excel spelling at all"))
 
 (deftest what-cannot-cross
   (testing "Clojure with no Excel spelling"
