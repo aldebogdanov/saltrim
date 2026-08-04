@@ -570,6 +570,35 @@
                            (when-let [a (.getAttribute t "data-addr")]
                              (jump! a))))
                        #js {:capture true})
+    ;; ƒ-panel reference: copy a function's example to the clipboard. Same
+    ;; delegated shape as the jump above — one listener covers every chip,
+    ;; including the ~280 the panel renders, with nothing to bind or re-bind.
+    ;; The clipboard is imperative work, so it lives here rather than in an
+    ;; attribute; the markup only carries the string.
+    ;;
+    ;; CAPTURE phase, and NOT optional: every modal's inner box carries
+    ;; `data-on:click="evt.stopPropagation()"` so a click inside does not close
+    ;; it, which means a bubble-phase listener on `document` never sees a click
+    ;; in a panel at all. Verified in the browser — the bubble version fired
+    ;; zero times. Stopping propagation here then keeps the copy from reaching
+    ;; the backdrop and closing the panel out from under the user.
+    (.addEventListener js/document "click"
+                       (fn [e]
+                         (when-let [t (some-> (.-target e) (.closest "[data-copy]"))]
+                           (.stopPropagation e)
+                           (when-let [txt (.getAttribute t "data-copy")]
+                             (-> (.writeText (.-clipboard js/navigator) txt)
+                                 (.then (fn []
+                                          ;; the panel has no toast of its own, so
+                                          ;; the button IS the acknowledgement
+                                          (let [was (.-textContent t)]
+                                            (set! (.-textContent t) "✓")
+                                            (js/setTimeout
+                                             #(set! (.-textContent t) was) 900))))
+                                 (.catch (fn [err]
+                                           (.error js/console
+                                                   "saltrim: clipboard copy refused" err)))))))
+                       #js {:capture true})
     (drag-thumb! "vbar" "vthumb" true)
     (drag-thumb! "hbar" "hthumb" false)
     ;; a resized window needs a different NUMBER of cells, not just a re-transform

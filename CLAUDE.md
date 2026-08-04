@@ -522,6 +522,33 @@ blanks). A test pins that: no name shadows clojure.core beyond the documented
 allowlist, and every borrowed name still exists upstream. `formula/stdlib` =
 `lib/stdlib` + the `#(…)` fn-literal macro (which stays with the desugaring).
 The ƒ panel's reference is GENERATED from `stdlib/catalog-syms`, so it can't drift.
+**Each function is a CHIP** with a hover tooltip (description + runnable example)
+and a ⧉ button that copies its **SOURCE**, fed by `stdlib/docs-for`: hand-written
+descriptions are curated (nobody else documents OUR semantics), borrowed ones
+generate from the Excel name + upstream arity (`excel/arity`) — which is what a
+spreadsheet user actually wants to know, that `stdev-p` IS `STDEV.P`. Tooltips
+are pure CSS (`content:attr(data-tip)`), so 284 chips cost 284 spans and zero
+handlers.
+**`stdlib/source-for` is the point of the button**: you import a workbook or
+flatten a formula, get one big expression full of `sum`/`xround`/`xvlookup`, and
+need it to run in a plain Clojure app where those names don't exist. It emits
+the private helpers TOO, in dependency order (`stdev` needs `var*` needs `nums`;
+alphabetical put `mean*` before `nums` and the paste didn't compile), plus the
+`require`s the result uses. `def-hand-written` is a macro so the installed map
+and `hand-written-src` come from ONE literal — the copy button cannot lie.
+`defsrc` does the same for helpers. A name that is only clojure.core's emits a
+NOTE, never `(def abs abs)` (the RHS resolves to the var being defined → runtime
+`unbound fn`). Borrowed → the rechentafel coordinate + our one-line delegation,
+honest rather than a pretend body; macros → nil (their laziness only matters
+inside the sandbox). `stdlib-test/copied-source-actually-runs` evals every one
+in a FRESH ns and requires it to compute what the installed function does.
+`stdlib-test/every-listed-function-documents-itself` pins that every listed name
+has both, and that every example PARSES. **The copy listener MUST be CAPTURE
+phase** — every modal's inner box carries `data-on:click="evt.stopPropagation()"`
+so a click inside doesn't close it, which means a bubble-phase listener on
+`document` never sees a click in a panel at all (verified: the bubble version
+fired zero times). `navigator.clipboard.writeText` also needs USER ACTIVATION,
+so a scripted `.click()` rejects with `NotAllowedError` and cannot test it.
 **Typed cell errors** are DONE (`errors` ns): a failing cell reports
 `{:error msg :code kw}`, not just a message. `errors/classify` places any
 Throwable on a small closed set of Excel's codes — `:excel-error` from
