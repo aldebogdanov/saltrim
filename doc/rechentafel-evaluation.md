@@ -281,6 +281,24 @@ stdlib aggregates, `xlsx.clj`, and any user formula that assumed a flat seq. It
 is a breaking change to saved formulas' runtime shape, so it needs a considered
 migration (probably: keep flat as the default and add a `#area`/2D form).
 
+> **Update — D shipped**, as exactly the additive migration this paragraph
+> guessed at: `$A1:B2` stays flat row-major and `#area A1:B2` is new. Nothing
+> saved changed meaning and no stdlib aggregate was touched.
+>
+> Two corrections to the analysis above. First, **`excel/->rv` already turned a
+> collection-of-collections into a 2D area** — the adapter was never the missing
+> piece, the LANGUAGE was: there was no way to write a nested range, so you had
+> to spell `(vector $A1:B1 $A2:B2)` row by row or call `xl/as-rows`.
+>
+> Second, this was not only an enabler for future array functions, it was a live
+> CORRECTNESS bug, and the preceding PR had just widened it. Making all ~414
+> `xl/` functions mechanically reachable meant `TRANSPOSE`, `INDEX`, `MDETERM`,
+> `MINVERSE` and the `LINEST` family were all reachable with a flat column,
+> where they answer for the wrong rectangle without erroring. Imports were
+> protected — `demote-verify!` compares against Excel's cache and demoted them —
+> but hand-written formulas had no such oracle. `INDEX(A1:B2,2,1)` and
+> `MDETERM(A1:B2)` now import LIVE and correct instead of demoting.
+
 ### E. Dynamic arrays / spill — a ready-made blueprint for a future feature
 
 `eval.cljc` implements the Excel-365 spill model: `wb[:spills]` maps
@@ -500,7 +518,7 @@ Worth raising with the author, since the collaboration is welcome:
 | 3 | **F** — volatile audit (`today` never refires) | S | Correctness | File as a bug now, independent of everything else |
 | 4 | **H** — benchmark shapes for the Spindel engine | S | High info | Answers questions we currently guess at |
 | 5 | **G** — offline POI oracle for the adapter | S–M | High | Reuses POI already on the classpath |
-| 6 | **D** — 2D range shape | M | High | Gates the array/lookup functions; breaking, needs a plan |
+| 6 | **D** — 2D range shape | M | High | ✅ DONE as ADDITIVE `#area` — nothing breaking was needed |
 | 7 | **B1** — importer: POI RPN → rechentafel AST | M | High | ✅ DONE. Note: the "fewer demotions" estimate was optimistic — see below |
 | 8 | **B2** — live xlsx export (real formulas) | M–L | Very high | ✅ DONE (`xlformula` ns) — export's #1 documented limitation is gone |
 | 9 | **K** — named regions / table refs | M | Medium | Cheap-win candidate, SaltRim-native design |

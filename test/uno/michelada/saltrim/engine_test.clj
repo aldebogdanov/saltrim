@@ -946,6 +946,76 @@
               (for [i (range 1 n)]
                 [(str "A" (inc i)) {:value (str "=(inc $A" i ")")}]))))
 
+(deftest area-ranges-carry-their-shape
+  ;; `$A1:B2` expands ROW-MAJOR FLAT, so [1 2 3 4] cannot say whether it was
+  ;; 2x2, 1x4 or 4x1. `excel/->rv` turns a flat collection into a COLUMN, so a
+  ;; shape-sensitive Excel function silently answered for the wrong rectangle.
+  ;; `#area A1:B2` groups the refs into rows and fixes that, without changing
+  ;; what `$A1:B2` means to every formula already saved.
+  (let [s (mk)]
+    (put s "A1" "1") (put s "B1" "2")
+    (put s "A2" "3") (put s "B2" "4")
+    (testing "the flat form is unchanged"
+      (put s "C1" "=$A1:B2")
+      (is (= [1 2 3 4] (v s "C1")))
+      (put s "C2" "=(sum $A1:B2)")
+      (is (= 10 (v s "C2"))))
+    (testing "the area form is a vector of rows"
+      (put s "D1" "=#area A1:B2")
+      (is (= [[1 2] [3 4]] (v s "D1"))))
+    (testing "and that is what makes a shape-sensitive Excel function right"
+      (put s "D2" "=(xl/TRANSPOSE #area A1:B2)")
+      (is (= [1 3 2 4] (v s "D2")) "the transpose of [[1 2] [3 4]]")
+      (put s "D3" "=(xl/MDETERM #area A1:B2)")
+      (is (= -2 (v s "D3")) "1*4 - 2*3; meaningless on a flat column"))
+    (testing "areas stay reactive like any other range"
+      (put s "A1" "10")
+      (is (= [[10 2] [3 4]] (v s "D1")))
+      (is (= 34 (v s "D3")) "10*4 - 2*3"))
+    (put s "A1" "1")                                  ; back to [[1 2] [3 4]]
+    (testing "OUR aggregates do not care which spelling you used"
+      ;; the trap this nearly shipped with: `filter number?` over [[1 2] [3 4]]
+      ;; keeps NOTHING, so every blank-skipping aggregate answered 0 (or nil)
+      ;; for an area — silently, which is the worst way to be wrong
+      (put s "B2" "")                              ; and a blank inside the block
+      (doseq [[flat area f] [["F1" "G1" "sum"] ["F2" "G2" "mean"] ["F3" "G3" "xmax"]
+                             ["F4" "G4" "xmin"] ["F5" "G5" "median"] ["F6" "G6" "product"]
+                             ["F7" "G7" "stdev"] ["F8" "G8" "variance"]]]
+        (put s flat (str "=(" f " $A1:B2)"))
+        (put s area (str "=(" f " #area A1:B2)")))
+      (sh/settle! s)
+      (doseq [i (range 1 9)]
+        (is (= (sh/value s (str "F" i)) (sh/value s (str "G" i)))
+            (str "flat and area must agree (row " i ")"))))
+    (testing "but clojure.core stays Clojure — an area really is rows"
+      (put s "H1" "=(map sum #area A1:B2)")
+      (is (= [3 3] (vec (v s "H1"))) "per-row sums, which is what an area is FOR")
+      (put s "H2" "=(count #area A1:B2)")
+      (is (= 2 (v s "H2")) "two rows, not four cells"))
+    (testing "a single row or column is an area too, just a thin one"
+      (put s "E1" "=#area A1:B1")
+      (is (= [[1 2]] (v s "E1"))))
+    (testing "and the cap is shared with plain ranges"
+      (is (thrown-with-msg? Exception #"covers 6000 cells \(max 5000\)"
+                            (put s "F1" "=(count #area A1:A6000)"))))))
+
+(deftest area-refs-follow-the-sheet
+  ;; an #area endpoint has to move on paste and on insert/delete exactly like a
+  ;; $-range endpoint, or a structural edit silently re-points it
+  (testing "paste shifts both corners"
+    (is (= "=(xl/TRANSPOSE #area B2:C3)"
+           (formula/shift-refs "=(xl/TRANSPOSE #area A1:B2)" 1 1))))
+  (testing "inserting a row above grows/moves it"
+    (is (= "=(xl/TRANSPOSE #area A2:B3)"
+           (formula/insert-shift "=(xl/TRANSPOSE #area A1:B2)" :row 0 1))))
+  (testing "deleting a row inside it shrinks it"
+    (is (= "=(xl/TRANSPOSE #area A1:B1)"
+           (formula/delete-shift "=(xl/TRANSPOSE #area A1:B2)" :row 0))))
+  (testing "and the source round-trips through unparse unchanged"
+    (let [form (:form (formula/parse "(xl/TRANSPOSE #area A1:B2)" nil))]
+      (is (= "(xl/TRANSPOSE #area A1:B2)" (formula/unparse form)))
+      (is (= form (:form (formula/parse (formula/unparse form) nil)))))))
+
 (deftest bulk-load-does-not-cascade
   ;; `load-document!` used to be a loop over `set-cell!`, which rebuilds the
   ;; dependents of every cell it structurally replaces. During a load that is

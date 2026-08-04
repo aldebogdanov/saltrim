@@ -457,6 +457,15 @@
              " / " [:span {:style kbd} "#cells A1:A3"] "."]
             [:p {:style p} "e.g. " [:span {:style kbd} "=(+ $A1 $B1)"] " · "
              [:span {:style kbd} "=(reduce + $A1:A3)"]]
+            [:p {:style p} [:span {:style kbd} "$A1:B2"] " is FLAT and row-major — "
+             [:span {:style kbd} "[A1 B1 A2 B2]"] " — which is what you want for "
+             [:span {:style kbd} "sum"] ", " [:span {:style kbd} "map"] " and the rest. "
+             "When a function needs to know the rectangle's SHAPE, write "
+             [:span {:style kbd} "#area A1:B2"] " instead: it gives you a vector of "
+             "ROWS, " [:span {:style kbd} "[[A1 B1] [A2 B2]]"] ". Excel's "
+             [:span {:style kbd} "xl/"] " functions are defined over rectangles, so "
+             [:span {:style kbd} "=(xl/TRANSPOSE #area A1:B2)"] " is right where the "
+             "flat form would quietly transpose a single column."]
             [:p {:style p} "It is ordinary Clojure inside: " [:span {:style kbd} "let"] ", "
              [:span {:style kbd} "fn"] " and the " [:span {:style kbd} "#(…)"]
              " literal all work — e.g. "

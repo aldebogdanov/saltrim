@@ -157,6 +157,30 @@
    catalog's ordering."
   (delay (set excel/exposed-names)))
 
+(defn- areafy
+  "Hand a true RECTANGLE to an Excel function as a rectangle, not a flat list.
+
+   `excel/->rv` turns a flat collection into a COLUMN, so `TRANSPOSE(A1:B2)`
+   translated with `$A1:B2` transposes a 4x1 and answers `[1 2 3 4]` where Excel
+   says `[1 3 2 4]` — silently, and for every shape-sensitive function
+   (`INDEX`, `MMULT`, `MINVERSE`, the `LINEST` family). `#area` keeps the shape.
+
+   Only ranges wider than one column AND taller than one row are converted: a
+   1xN or Nx1 has no shape to lose, and leaving those flat keeps the common
+   column-aggregate case exactly as it was. This applies to the MECHANICAL tiers
+   only — the hand-written mappings above are OUR semantics over flat
+   collections (`sum` and friends filter with `number?`, which a nested vector
+   would defeat)."
+  [args]
+  (mapv (fn [a]
+          (if (formula/range-ref? a)
+            (let [[_ p q] a
+                  {ca :ci ra :ri} (addr/parse p)
+                  {cb :ci rb :ri} (addr/parse q)]
+              (if (and (not= ca cb) (not= ra rb)) (formula/area-marker p q) a))
+            a))
+        args))
+
 (defn- borrowed-or-xl
   "An Excel function with no hand-written mapping, translated anyway.
 
@@ -170,10 +194,11 @@
    still checks every one against Excel's own cached value, so a translation
    that computes something else degrades to exactly the old behaviour."
   [n args]
-  (cond
-    (@from-excel-name n)     (apply list (@from-excel-name n) args)
-    (@xl-names n)            (apply list (symbol "xl" n) args)
-    :else                    (unsupported! (str "function " n))))
+  (let [args (areafy args)]
+    (cond
+      (@from-excel-name n)   (apply list (@from-excel-name n) args)
+      (@xl-names n)          (apply list (symbol "xl" n) args)
+      :else                  (unsupported! (str "function " n)))))
 
 (defn- fname->form
   "One Excel function call (name + already-translated args) as a SaltRim form."

@@ -30,6 +30,40 @@ References shift on paste (see below). The `$` forms are shorthand for the
 underlying reader tags — `$A1` for `#cell A1`, and `$A1:A3` for `#cells A1:A3` —
 which you can also write out in full if you prefer.
 
+**Rectangles with their shape.** `$A1:B2` is flat and row-major, which is what
+`sum`, `map` and friends want. A 2×2 and a 4×1 therefore look identical once
+read, and some functions need to tell them apart. Write `#area A1:B2` for those:
+it yields a vector of **rows**, `[[A1 B1] [A2 B2]]`.
+
+| form | value of a 2×2 block |
+|---|---|
+| `$A1:B2` | `[1 2 3 4]` |
+| `#area A1:B2` | `[[1 2] [3 4]]` |
+
+Excel's functions are defined over rectangles, so this is the difference between
+a right and a wrong answer for the shape-sensitive ones:
+
+```clojure
+=(xl/TRANSPOSE #area A1:B2)   ; [[1 3] [2 4]]  — correct
+=(xl/TRANSPOSE $A1:B2)        ; [1 2 3 4]      — transposed a single column
+```
+
+The .xlsx importer emits `#area` automatically wherever a workbook passes a true
+rectangle to an Excel function. Both forms cost the same and share the 5 000-cell
+cap; `#area` shifts on paste and follows row/column inserts exactly like `$A1:B2`.
+
+**The built-in aggregates don't care which one you use.** `sum`, `mean`,
+`median`, `xmin`, `xmax`, `product`, `stdev` and `variance` all work over the
+cells, so `(sum $A1:B2)` and `(sum #area A1:B2)` are the same number. Plain
+Clojure functions, on the other hand, see exactly what you wrote — which is the
+point of having the shape:
+
+```clojure
+=(count $A1:B2)        ; 4  — cells
+=(count #area A1:B2)   ; 2  — rows
+=(map sum #area A1:B2) ; (3 7) — a total per row
+```
+
 **Relative references** point to a cell by *offset from the cell itself*, written
 `$<col><row>` where each of col/row is `_` (same index), `+N`, or `-N`. They are
 resolved per cell, so they **survive copy/paste unchanged** — copy one down or
