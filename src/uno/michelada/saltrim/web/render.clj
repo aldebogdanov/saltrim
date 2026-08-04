@@ -746,6 +746,18 @@
      ;; the matrix four are listed above under their own heading
      [cat (remove '#{det inverse} syms)])))
 
+(def ^:private borrowed-syms
+  "The stdlib names whose IMPLEMENTATION is Excel's, borrowed through
+   rechentafel — as opposed to the ones written here.
+
+   Per SYMBOL rather than per group, because the two do not line up: `det` and
+   `inverse` sit under `matrices` next to `transpose` and `matmul` but are
+   borrowed, and the borrowed `matrix` group holds `linest` and `trend`. A chip
+   that claimed otherwise would be wrong about the two things the distinction
+   decides — whether the semantics were chosen here, and whether ⧉ gives you a
+   few self-contained lines or 4KB plus a dependency."
+  (set lib/borrowed-syms))
+
 (def ^:private xl-only-names
   "The Excel functions with NO Clojure spelling — `xl/` and only `xl/`.
 
@@ -781,8 +793,14 @@
    helpers they need, ~5KB apiece and 1.2MB over the whole panel — a page-load
    cost every user would pay for the one function somebody eventually copies."
   [sym]
-  (let [{:keys [desc eg src fetch]} (lib/docs-for sym)]
-    [:span {:class "fnref" :data-tip (str desc "\n\n" eg)}
+  (let [{:keys [desc eg src fetch]} (lib/docs-for sym)
+        own? (not (borrowed-syms sym))]
+    [:span {:class (str "fnref" (when own? " own"))
+            :data-tip (str desc "\n\n" eg)}
+     [:span {:class "fnmark" :title (if own?
+                                      "SaltRim's own — semantics we chose"
+                                      "borrowed from Excel, implemented by rechentafel")}
+      (if own? "◆" "◇")]
      (str sym)
      (when (or src fetch)
        [:button (cond-> {:class "fncopy" :title (str "copy the source of " sym)}
@@ -827,6 +845,19 @@
               [:b "source"] " — helpers included, ready to paste into a Clojure "
               "project, for when a flattened or imported formula has to run "
               "outside SaltRim."]
+             ;; the mark is not decoration: it tells you whether the semantics
+             ;; were chosen here, and what ⧉ is about to put on your clipboard
+             [:p {:style (str p "margin-left:.4rem;color:var(--muted);")}
+              [:span {:class "fnmark" :style "color:var(--accent);"} "◆"]
+              " " [:b "ours"] " — written here, and the source is a few "
+              "self-contained lines. "
+              [:span {:class "fnmark"} "◇"]
+              " " [:b "borrowed"] " from Excel and implemented by "
+              [:a {:href "https://github.com/replikativ/rechentafel" :target "_blank"
+                   :rel "noopener" :style "color:var(--accent);"} "rechentafel"]
+              " (Apache-2.0): same name, Excel's numerics, and the source is "
+              "that implementation plus the value bridge — a few KB, and it "
+              "needs the library on your classpath."]
              (for [[cat syms] stdlib-reference]
                [:div {:style "margin:.35rem 0 .1rem .4rem;"}
                 [:div {:style "font:600 12px sans-serif;color:var(--muted);margin-bottom:.15rem;"}
@@ -1499,6 +1530,12 @@
                 "font:12px monospace;background:var(--panel);border:1px solid var(--grid);"
                 "border-radius:3px;padding:0 3px;margin:0 4px 5px 0;cursor:default;}"
                 ".fnref:hover{border-color:var(--accent);color:var(--accent);}"
+                ;; ◆ ours / ◇ borrowed. Same shape filled and hollow rather than
+                ;; two different glyphs: at 284 chips the eye sorts them without
+                ;; reading either, and it survives a monochrome theme.
+                ".fnmark{font-size:8px;line-height:1;color:var(--muted);"
+                "margin-right:1px;cursor:help;}"
+                ".fnref.own .fnmark{color:var(--accent);}"
                 ".fnref::after{content:attr(data-tip);display:none;position:absolute;"
                 "left:0;top:calc(100% + 5px);z-index:60;width:21rem;max-width:60vw;"
                 "white-space:pre-wrap;font:12px/1.45 sans-serif;color:var(--fg);"

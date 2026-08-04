@@ -830,10 +830,17 @@ than a formatted date (upstream implements the numeric masks only), and the
 `excel` ns is JVM-only — rechentafel is `.cljc`, so a future client-side formula
 preview could use the same pack if the adapter were written portably.
 
-## `combina` with a fractional first argument never returns
+## `combina` never returns when its first argument is 0
 
-`(combina 0.5 2)` loops forever inside rechentafel — an upstream bug, reachable
-from any cell. It degrades to `#TIMEOUT!` through `sheet/`'s eval-timeout wedge
-rather than freezing the sheet, so this is a report to file upstream rather than
-an outage, but it is the only borrowed function known to do it and there is no
-argument validation in front of the borrowed half generally.
+`(combina 0 2)`, `(combina 0.5 2)` and even `(combina 0 0)` loop forever inside
+rechentafel. In `fn/math.cljc` the impl computes `n' = n + k - 1` and then
+`k' = (min k (- n' k))`, which is `n - 1` — so `n = 0` (after `long`
+truncation) makes `k'` negative, and the loop's `(if (= i k') …)` counts up from
+`i = 0` and can never reach it. `COMBIN` right above it guards with
+`(> k n)` → `#NUM!`; `COMBINA` has no equivalent guard.
+
+Reachable from any cell, but it degrades to `#TIMEOUT!` through `sheet/`'s
+eval-timeout wedge rather than freezing the sheet, so this is a report to file
+upstream rather than an outage here. It is the only borrowed function known to
+do it; there is no argument validation in front of the borrowed half generally,
+and adding one per function is not the answer — the timeout is.
