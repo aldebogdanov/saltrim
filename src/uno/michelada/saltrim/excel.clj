@@ -247,6 +247,12 @@
   (let [out (apply set/union (vals excluded))]
     (vec (sort (remove out (rf/registered-names))))))
 
+(defn arity
+  "[min max] argument counts for an Excel function, from upstream's registry —
+   the one piece of per-function metadata rechentafel carries. nil if unknown."
+  [xl-name]
+  (:arity (rf/lookup xl-name)))
+
 (def catalog
   "`exposed-names` grouped for the help modal, in rechentafel's own module
    order. Written out rather than derived: the grouping is not recoverable at

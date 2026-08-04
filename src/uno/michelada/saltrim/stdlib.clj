@@ -389,3 +389,134 @@
           'as-rows excel/as-rows
           'pi      Math/PI}
          hand-written))
+
+;; --- reference copy for the ƒ panel ----------------------------------------
+;;
+;; The panel used to list bare names, which tells a user that `xround` exists
+;; and nothing about what it does or how it differs from `round`. These are the
+;; functions whose semantics we CHOSE, so nobody else's documentation covers
+;; them — the borrowed half can point at Excel's name and be understood, this
+;; half cannot. `docs-for` falls back to a generated entry for those, so every
+;; name in the panel has something to say.
+
+(def ^:private hand-docs
+  "{sym {:desc one line :eg a runnable example}} for the hand-written half."
+  '{;; math
+    abs      {:desc "Absolute value."                          :eg "(abs $A1)"}
+    ceil     {:desc "Round UP to a whole number. Excel's round-to-a-multiple is `ceiling-math`."
+              :eg "(ceil $A1)"}
+    floor    {:desc "Round DOWN to a whole number. Excel's round-to-a-multiple is `floor-math`."
+              :eg "(floor $A1)"}
+    round    {:desc "Round to the nearest whole number. For decimal places use `xround`."
+              :eg "(round $A1)"}
+    sqrt     {:desc "Square root."                             :eg "(sqrt $A1)"}
+    pow      {:desc "Raise to a power."                        :eg "(pow $A1 2)"}
+    exp      {:desc "e raised to a power."                     :eg "(exp $A1)"}
+    ln       {:desc "Natural logarithm."                       :eg "(ln $A1)"}
+    log10    {:desc "Base-10 logarithm."                       :eg "(log10 $A1)"}
+    sign     {:desc "-1, 0 or 1, matching the sign of the number." :eg "(sign $A1)"}
+    sum      {:desc "Adds the numbers in a range. Blank cells and text are skipped."
+              :eg "(sum $A1:A9)"}
+    product  {:desc "Multiplies the numbers in a range, skipping blanks."
+              :eg "(product $A1:A9)"}
+    pi       {:desc "The constant π. A value, not a function — write it bare."
+              :eg "(* pi (pow $A1 2))"}
+    ;; matrices
+    transpose {:desc "Flips a rectangle over its diagonal. Needs an #area, not a flat range."
+               :eg "(transpose #area A1:C2)"}
+    matmul    {:desc "Matrix product. Both sides are #area rectangles; the result is one too."
+               :eg "(matmul #area A1:C2 #area E1:F3)"}
+    ;; stats
+    mean     {:desc "Arithmetic mean, skipping blanks. `avg` is the same function."
+              :eg "(mean $A1:A9)"}
+    avg      {:desc "Arithmetic mean, skipping blanks. Alias of `mean`."
+              :eg "(avg $A1:A9)"}
+    median   {:desc "Middle value, skipping blanks."           :eg "(median $A1:A9)"}
+    variance {:desc "Population variance, skipping blanks."    :eg "(variance $A1:A9)"}
+    stdev    {:desc "Population standard deviation, skipping blanks."
+              :eg "(stdev $A1:A9)"}
+    xmin     {:desc "Smallest number in a range, skipping blanks. Plain `min` is clojure.core's and is not blank-safe."
+              :eg "(xmin $A1:A9)"}
+    xmax     {:desc "Largest number in a range, skipping blanks."
+              :eg "(xmax $A1:A9)"}
+    ;; text
+    upper    {:desc "Upper-case a string."                     :eg "(upper $A1)"}
+    lower    {:desc "Lower-case a string."                     :eg "(lower $A1)"}
+    trim     {:desc "Strip leading and trailing whitespace."   :eg "(trim $A1)"}
+    join     {:desc "Join a range into one string with a separator."
+              :eg "(join \", \" $A1:A9)"}
+    split    {:desc "Split a string on a separator, giving a vector of parts."
+              :eg "(split $A1 \",\")"}
+    str-replace {:desc "Replace every occurrence of a substring."
+                 :eg "(str-replace $A1 \"old\" \"new\")"}
+    starts-with? {:desc "Does the string begin with this prefix?"
+                  :eg "(starts-with? $A1 \"INV-\")"}
+    ends-with?   {:desc "Does the string end with this suffix?"
+                  :eg "(ends-with? $A1 \".pdf\")"}
+    includes?    {:desc "Does the string contain this substring?"
+                  :eg "(includes? $A1 \"urgent\")"}
+    blank?       {:desc "True for an empty cell or a string of only whitespace."
+                  :eg "(if (blank? $A1) 0 $A1)"}
+    ;; dates — ISO yyyy-MM-dd strings throughout
+    today        {:desc "Today's date as an ISO string. Recomputes when the sheet does, not on a clock."
+                  :eg "(today)"}
+    year         {:desc "Year of an ISO date string."          :eg "(year $A1)"}
+    month        {:desc "Month (1-12) of an ISO date string."  :eg "(month $A1)"}
+    day          {:desc "Day of the month of an ISO date string." :eg "(day $A1)"}
+    days-between {:desc "Whole days from the first date to the second."
+                  :eg "(days-between $A1 $B1)"}
+    ;; excel-compat — what the .xlsx importer targets
+    xround   {:desc "Excel's ROUND: round to N decimal places, half away from zero."
+              :eg "(xround $A1 2)"}
+    xdate    {:desc "Excel's DATE: build an ISO date string from year, month, day."
+              :eg "(xdate 2026 3 15)"}
+    xvlookup {:desc "Excel's VLOOKUP, EXACT match only. Table width is explicit; column is 1-based."
+              :eg "(xvlookup $A1 $B1:D9 3 2)"}
+    excel-truthy {:desc "Excel's truthiness: 0 is false, other numbers are true. The importer wraps conditions in this."
+                  :eg "(if (excel-truthy $A1) 1 0)"}
+    as-rows  {:desc "Reshape a flat range into rows of N. `#area` is usually what you want instead."
+              :eg "(as-rows 2 $A1:B4)"}
+    ;; errors
+    if-error {:desc "Value of the expression, or the fallback if it fails. Guards the EXPRESSION, not an error arriving from a referenced cell."
+              :eg "(if-error (/ $A1 $B1) 0)"}
+    if-na    {:desc "Like `if-error`, but only catches #N/A."
+              :eg "(if-na (xvlookup $A1 $B1:C9 2 2) \"not found\")"}
+    error-type {:desc "The error an expression raises as a keyword (:div0 :na :value :ref :name :num), or nil if it succeeds."
+                :eg "(error-type (/ $A1 $B1))"}
+    error?     {:desc "Does this expression fail?"             :eg "(error? (/ $A1 $B1))"}})
+
+(defn- arity-phrase [xl-name]
+  (let [[mn mx] (excel/arity xl-name)]
+    (cond (and mn mx (= mn mx)) (str mn " argument" (when (not= 1 mn) "s"))
+          (and mn mx)           (str mn "-" mx " arguments")
+          mn                    (str mn " or more arguments")
+          :else                 nil)))
+
+(def ^:private borrowed-origin
+  "sym -> the Excel name it was borrowed from, for EVERY borrowed function.
+   `excel-name` deliberately omits the date-shaped ones (their signatures differ
+   across the .xlsx boundary); documentation has no such problem and wants them
+   all."
+  (into {} (for [n borrowed-names] [(kebab n) n])))
+
+(defn- placeholders
+  "`n` runnable argument slots. Real cell refs rather than `…`, because the
+   panel's copy button puts this straight into a cell and a template that errors
+   on paste is a worse first impression than one you have to re-point."
+  [n]
+  (str/join " " (for [i (range n)] (str "$" (char (+ (int \A) i)) "1"))))
+
+(defn docs-for
+  "{:desc :eg} for a stdlib name. Hand-written entries are curated; a borrowed
+   name generates one from the Excel function it is, plus upstream's arity —
+   which is honest, and is the thing a spreadsheet user actually wants to know
+   (that `stdev-p` IS `STDEV.P`) rather than prose invented here."
+  [sym]
+  (or (hand-docs sym)
+      (when-let [xl (borrowed-origin sym)]
+        (let [n (min 4 (max 1 (or (first (excel/arity xl)) 1)))]
+          {:desc (str "Excel's " xl
+                      (when-let [a (arity-phrase xl)] (str " — " a))
+                      (when (date-shape xl)
+                        ". Dates are ISO yyyy-MM-dd strings here, not serials"))
+           :eg   (str "(" sym " " (placeholders n) ")")}))))

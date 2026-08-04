@@ -727,18 +727,37 @@
 
 (def ^:private stdlib-reference
   "Read-only reference of the built-in functions (always available, can't be
-   edited), grouped by category. The hand-written groups are spelled out here;
-   the borrowed ones come from `stdlib/catalog-syms`, so the panel cannot drift
-   from what is actually installed."
+   edited), grouped by category, as SYMBOLS — each one gets its own chip with a
+   description and a copyable example, so the panel is a reference rather than a
+   word list. The hand-written groups are spelled out here; the borrowed ones
+   come from `stdlib/catalog-syms`, so the panel cannot drift from what is
+   actually installed."
   (concat
-   [["core math"  "sum product abs ceil floor round sqrt pow exp ln log10 sign  ·  pi as-rows"]
-    ["core stats" "mean avg median variance stdev"]
-    ["core text"  "upper lower trim join split str-replace starts-with? ends-with? includes? blank?"]
-    ["core date"  "today year month day days-between  (ISO yyyy-MM-dd strings)"]
-    ["excel-compat" "excel-truthy xmin xmax xround xdate xvlookup  (Excel semantics — the .xlsx importer targets these)"]
-    ["errors" "if-error if-na error-type error?  (catch a failure in the expression; error-type gives :div0 :na :value :ref :name :num)"]]
+   [["core math"    '[sum product abs ceil floor round sqrt pow exp ln log10 sign pi]]
+    ["matrices"     '[transpose matmul det inverse]]
+    ["core stats"   '[mean avg median variance stdev xmin xmax]]
+    ["core text"    '[upper lower trim join split str-replace
+                      starts-with? ends-with? includes? blank?]]
+    ["core date"    '[today year month day days-between]]
+    ["excel-compat" '[excel-truthy xround xdate xvlookup as-rows]]
+    ["errors"       '[if-error if-na error-type error?]]]
    (for [[cat syms] lib/catalog-syms]
-     [cat (str/join " " syms)])))
+     ;; the matrix four are listed above under their own heading
+     [cat (remove '#{det inverse} syms)])))
+
+(defn- fn-chip
+  "One function in the reference: its name, the description and runnable example
+   from `stdlib/docs-for` as a hover tooltip, and a button that copies the
+   example. The tooltip is pure CSS (`content: attr(data-tip)`) — no per-chip
+   markup and nothing to position — and the copy is one delegated listener in
+   `app.cljs`, so 284 of these cost 284 spans and zero handlers."
+  [sym]
+  (let [{:keys [desc eg]} (lib/docs-for sym)]
+    [:span {:class "fnref" :data-tip (str desc "\n\n" eg)}
+     (str sym)
+     (when eg
+       [:button {:class "fncopy" :data-copy eg
+                 :title (str "copy  " eg)} "⧉"])]))
 
 (defn- defs-html
   "The definitions LIBRARY modal, toggled by $defspanel. The editable library
@@ -771,9 +790,14 @@
             [:details {:style "margin-top:.9rem;"}
              [:summary {:style "font:600 13px sans-serif;cursor:pointer;color:var(--muted);"}
               "Built-in functions (read-only)"]
-             (for [[cat names] stdlib-reference]
-               [:p {:style (str p "margin-left:.4rem;")}
-                [:b cat] ": " [:span {:style kbd} names]])]
+             [:p {:style (str p "margin-left:.4rem;color:var(--muted);")}
+              "Hover a name for what it does and an example; " [:span {:style kbd} "⧉"]
+              " copies the example ready to paste into a cell."]
+             (for [[cat syms] stdlib-reference]
+               [:div {:style "margin:.35rem 0 .1rem .4rem;"}
+                [:div {:style "font:600 12px sans-serif;color:var(--muted);margin-bottom:.15rem;"}
+                 cat]
+                [:div (map fn-chip syms)]])]
             ;; Excel interop. Deliberately second, deliberately folded, and
             ;; deliberately not called a stdlib: formulas are Clojure, and this
             ;; is the boundary for what comes out of (and goes back into) .xlsx.
@@ -1427,6 +1451,23 @@
                 ".toast.warn{background:var(--gold-bg);border-color:var(--gold);}"
                 ".btn.viol{background:var(--gold-bg);border-color:var(--gold);color:var(--fg);}"
                 ".violrow:hover{background:var(--accent-bg);}"
+                ;; ƒ-panel function reference: a chip per function, its docs in a
+                ;; CSS-only tooltip, and a copy button that appears on hover.
+                ".fnref{position:relative;display:inline-flex;align-items:center;gap:2px;"
+                "font:12px monospace;background:var(--panel);border:1px solid var(--grid);"
+                "border-radius:3px;padding:0 3px;margin:0 4px 5px 0;cursor:default;}"
+                ".fnref:hover{border-color:var(--accent);color:var(--accent);}"
+                ".fnref::after{content:attr(data-tip);display:none;position:absolute;"
+                "left:0;top:calc(100% + 5px);z-index:60;width:21rem;max-width:60vw;"
+                "white-space:pre-wrap;font:12px/1.45 sans-serif;color:var(--fg);"
+                "background:var(--bg);border:1px solid var(--line);border-radius:6px;"
+                "box-shadow:0 6px 20px rgba(0,0,0,.28);padding:.45rem .55rem;"
+                "text-align:left;pointer-events:none;}"
+                ".fnref:hover::after{display:block;}"
+                ".fncopy{border:0;background:none;color:var(--muted);cursor:pointer;"
+                "font:12px sans-serif;padding:0 1px;opacity:0;transition:opacity .1s;}"
+                ".fnref:hover .fncopy{opacity:1;}"
+                ".fncopy:hover{color:var(--accent);}"
                 ".toast.warn[data-addr]{text-decoration-color:var(--gold);}"
                 ;; ONE animation on an info card, not an entrance plus a
                 ;; lifetime: `animationend` is what removes the node, and a

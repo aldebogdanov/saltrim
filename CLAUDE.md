@@ -522,6 +522,19 @@ blanks). A test pins that: no name shadows clojure.core beyond the documented
 allowlist, and every borrowed name still exists upstream. `formula/stdlib` =
 `lib/stdlib` + the `#(…)` fn-literal macro (which stays with the desugaring).
 The ƒ panel's reference is GENERATED from `stdlib/catalog-syms`, so it can't drift.
+**Each function is a CHIP** with a hover tooltip (description + runnable example)
+and a ⧉ copy button, fed by `stdlib/docs-for`: hand-written entries are curated
+(nobody else documents OUR semantics), borrowed ones generate from the Excel
+name + upstream arity (`excel/arity`) — which is what a spreadsheet user
+actually wants to know, that `stdev-p` IS `STDEV.P`. Tooltips are pure CSS
+(`content:attr(data-tip)`), so 284 chips cost 284 spans and zero handlers.
+`stdlib-test/every-listed-function-documents-itself` pins that every listed name
+has both, and that every example PARSES. **The copy listener MUST be CAPTURE
+phase** — every modal's inner box carries `data-on:click="evt.stopPropagation()"`
+so a click inside doesn't close it, which means a bubble-phase listener on
+`document` never sees a click in a panel at all (verified: the bubble version
+fired zero times). `navigator.clipboard.writeText` also needs USER ACTIVATION,
+so a scripted `.click()` rejects with `NotAllowedError` and cannot test it.
 **Typed cell errors** are DONE (`errors` ns): a failing cell reports
 `{:error msg :code kw}`, not just a message. `errors/classify` places any
 Throwable on a small closed set of Excel's codes — `:excel-error` from

@@ -209,3 +209,34 @@
     (testing "and a shape mismatch names both shapes"
       (is (thrown-with-msg? Exception #"2x3 by 2x2"
                             (call 'matmul a [[1 2] [3 4]]))))))
+
+(deftest every-listed-function-documents-itself
+  ;; The ƒ panel renders a chip per function with a description and a copyable
+  ;; example from `docs-for`. A name with no entry would render a chip with an
+  ;; empty tooltip and no copy button — so this is what keeps the panel honest
+  ;; as the stdlib grows, the same way `catalog-syms` keeps the LIST honest.
+  (let [io-refusals '#{flush newline pr print printf println prn read read-line}
+        internal    '#{deleted-ref}
+        listed      (concat (remove (into io-refusals internal) (keys lib/hand-written))
+                            lib/borrowed-syms
+                            '[pi as-rows])]
+    (testing "every one has a description and an example"
+      (is (empty? (remove lib/docs-for listed))
+          "these have no docs-for entry")
+      (is (every? #(seq (:desc (lib/docs-for %))) listed))
+      (is (every? #(seq (:eg (lib/docs-for %))) listed)))
+    (testing "and every example PARSES as a formula"
+      ;; a copy button that hands you something the sheet rejects is worse than
+      ;; no copy button
+      (doseq [sym listed
+              :let [eg (:eg (lib/docs-for sym))]]
+        (is (some? (:form (formula/parse eg nil))) (str sym " -> " eg))))
+    (testing "the hand-written half says something specific, not a template"
+      (is (= "Adds the numbers in a range. Blank cells and text are skipped."
+             (:desc (lib/docs-for 'sum))))
+      (is (= "(sum $A1:A9)" (:eg (lib/docs-for 'sum)))))
+    (testing "the borrowed half names the Excel function and its arity"
+      (is (= "Excel's PMT — 3-5 arguments" (:desc (lib/docs-for 'pmt))))
+      (is (= "(pmt $A1 $B1 $C1)" (:eg (lib/docs-for 'pmt))))
+      (is (re-find #"ISO yyyy-MM-dd" (:desc (lib/docs-for 'eomonth)))
+          "and warns where the date representation differs from Excel's"))))
