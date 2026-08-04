@@ -2,28 +2,36 @@
   "Import an .xlsx workbook as SaltRim sheets — the reverse of `export`, but
    LIVE: Excel formulas are TRANSLATED to Clojure/SCI source, not snapshotted.
 
-   Translation rides POI's own formula parser: `FormulaParser/parse` returns
-   the formula as RPN `Ptg` tokens, which a small stack machine folds into a
-   SaltRim marker form (`formula/ref-marker` / `formula/range-marker`), then
-   `formula/unparse` prints as `=(…)` source. The vocabulary maps Excel
-   functions onto the stdlib (SUM→sum, AVERAGE→mean, IF→if + `excel-truthy`,
-   IFERROR→`if-error`, MIN/MAX→`xmin`/`xmax`, …).
+   Translation is a recursive walk over rechentafel's formula AST
+   (`rechentafel.parser/parse` takes the formula STRING that POI hands us and
+   returns structured nodes), folding it into a SaltRim marker form
+   (`formula/ref-marker` / `formula/range-marker`) that `formula/unparse` prints
+   as `=(…)` source. The vocabulary maps Excel functions onto the stdlib
+   (SUM→sum, AVERAGE→mean, IF→if + `excel-truthy`, IFERROR→`if-error`,
+   MIN/MAX→`xmin`/`xmax`, …).
 
-   Token model (verified empirically against POI 5.5.1):
-   - IF/CHOOSE arrive as a trailing FuncVarPtg with the full operand count;
-     the AttrPtg control tokens (optimizedIf/skip/space/…) are ignorable.
-   - single-range SUM never arrives as a function — it is AttrPtg(isSum),
-     popping ONE operand.
-   - post-BIFF \"future functions\" (IFERROR, …) arrive as a NameXPxg pushed
-     FIRST plus a trailing FuncVarPtg named \"#external#\" whose operand count
-     INCLUDES the NameXPxg.
+   It used to walk POI's RPN `Ptg` stream with a stack machine instead, and the
+   three hazards that cost the most to learn are worth recording, since they are
+   what an AST buys you: a single-range SUM never arrived as a function at all
+   (it was `AttrPtg(isSum)`, popping ONE operand), `IF`/`CHOOSE` arrived as a
+   TRAILING `FuncVarPtg`, and post-BIFF \"future functions\" like `IFERROR`
+   arrived as a `NameXPxg` pushed first plus a `#external#` `FuncVarPtg` whose
+   operand count INCLUDED the name token. None of that survives the move: an
+   AST node knows its own name and its own arguments. See
+   `spikes/11-excel-ast-import.clj` for the side-by-side.
 
-   Anything untranslatable (cross-sheet refs, named ranges, whole-column
-   ranges, unknown functions, …) falls back to the cell's CACHED value from
-   the file, with the original formula kept as an audit `:comment`. After the
-   sheet is built, a demote-and-verify pass compares every translated cell
-   against Excel's cached value and demotes mismatches the same way — imported
-   sheets are 100% correct-or-commented.
+   Anything untranslatable falls back to the cell's CACHED value from the file,
+   with the original formula kept as an audit `:comment`. The AST names each
+   refusal precisely — `cross-sheet reference to Sheet2`, `whole-col reference`,
+   `defined name Tax_Rate`, `structured table reference` — which matters because
+   that reason is what the audit comment shows a user. They stay refusals
+   because SaltRim has nowhere to put them, not because the parser hides them:
+   named regions and table refs are a roadmap item, spill refs another, a whole
+   column is ~1M cells against `max-range-cells`, and each Excel sheet imports
+   as its OWN SaltRim sheet so a cross-sheet ref has no target. After the sheet
+   is built, a demote-and-verify pass compares every translated cell against
+   Excel's cached value and demotes mismatches the same way — imported sheets
+   are 100% correct-or-commented.
 
    Values: dates become ISO yyyy-MM-dd strings (the stdlib date fns' format);
    integral doubles narrow to longs; text that SaltRim would misread (leading
@@ -31,6 +39,7 @@
    cell props + the `:format` mask (kept only when fmt.clj understands it);
    column/row sizes and the sheet defaults carry over."
   (:require [clojure.string :as str]
+            [rechentafel.parser :as xlp]
             [uno.michelada.saltrim.addr :as addr]
             [uno.michelada.saltrim.db :as db]
             [uno.michelada.saltrim.formula :as formula]
@@ -38,12 +47,7 @@
             [uno.michelada.saltrim.store :as store])
   (:import [java.io InputStream]
            [org.apache.poi.ss.usermodel CellType DateUtil FillPatternType HorizontalAlignment]
-           [org.apache.poi.ss.formula FormulaParsingWorkbook FormulaParser FormulaType]
-           [org.apache.poi.ss.formula.ptg Ptg IntPtg NumberPtg StringPtg BoolPtg MissingArgPtg
-            RefPtg AreaPtg NameXPxg AddPtg SubtractPtg MultiplyPtg DividePtg PowerPtg ConcatPtg
-            UnaryMinusPtg UnaryPlusPtg PercentPtg EqualPtg NotEqualPtg LessThanPtg LessEqualPtg
-            GreaterThanPtg GreaterEqualPtg ParenthesisPtg AttrPtg AbstractFunctionPtg]
-           [org.apache.poi.xssf.usermodel XSSFCell XSSFColor XSSFEvaluationWorkbook XSSFFont
+           [org.apache.poi.xssf.usermodel XSSFCell XSSFColor XSSFFont
             XSSFRow XSSFSheet XSSFWorkbook]))
 
 (def max-cells
@@ -60,7 +64,7 @@
    untranslatable — ranges expand statically to per-cell refs."
   4096)
 
-;; --- Ptg[] -> marker form -------------------------------------------------
+;; --- Excel AST -> marker form ----------------------------------------------
 
 (defn- unsupported!
   [reason]
@@ -75,29 +79,39 @@
     (long d)
     d))
 
-(defn- ref-form [^RefPtg p]
-  (formula/ref-marker (addr/make (.getColumn p) (.getRow p))))
-
-(defn- area-form [^AreaPtg p]
-  (let [r0 (.getFirstRow p) r1 (.getLastRow p)
-        c0 (.getFirstColumn p) c1 (.getLastColumn p)]
-    (when (> (* (inc (- r1 r0)) (inc (- c1 c0))) max-range-cells)
-      (unsupported! "range too large (whole column/row?)"))
-    (formula/range-marker (addr/make c0 r0) (addr/make c1 r1))))
-
 (def ^:private bin-op
-  {AddPtg '+ SubtractPtg '- MultiplyPtg '* DividePtg '/ PowerPtg 'pow ConcatPtg 'str
-   EqualPtg '= NotEqualPtg 'not= LessThanPtg '< LessEqualPtg '<=
-   GreaterThanPtg '> GreaterEqualPtg '>=})
+  "rechentafel's binary operator keywords -> the SaltRim/Clojure head symbol."
+  '{:plus + :minus - :mul * :div / :pow pow :concat str
+    :eq = :ne not= :lt < :le <= :gt > :ge >=})
 
-(defn- fname-token? [x] (and (seq? x) (= ::fname (first x))))
+(defn- ref->addr
+  "One `:ref` node as an A1 address, or a refusal naming what it actually was.
+   The AST knows; the caller only needs the reason to put in the audit comment."
+  [{:keys [sheet whole col row]}]
+  (when sheet (unsupported! (str "cross-sheet reference to " sheet)))
+  (when whole (unsupported! (str "whole-" (name whole) " reference")))
+  (formula/ref-marker (addr/make col row)))
+
+(defn- range-form
+  "A `:range` node as range sugar, refused past `max-range-cells` — a whole
+   column is ~1M cells and ranges expand statically to one ref per cell."
+  [{:keys [left right]}]
+  (let [a (second (ref->addr left)) b (second (ref->addr right))
+        {ca :ci ra :ri} (addr/parse a)
+        {cb :ci rb :ri} (addr/parse b)
+        n (* (inc (abs (- ca cb))) (inc (abs (- ra rb))))]
+    (when (> n max-range-cells)
+      (unsupported! (str "range covers " n " cells (max " max-range-cells ")")))
+    (formula/range-marker a b)))
 
 (defn- coll-arg
-  "One collection form from Excel aggregate args: a single range stays range
-   sugar; scalars become a vector; a mix flattens ranges into the rest."
+  "One collection form from Excel aggregate args: a single range (or array
+   constant, which is already a collection) stays as it is; scalars become a
+   vector; a mix flattens ranges into the rest."
   [args]
   (cond
-    (and (= 1 (count args)) (formula/range-ref? (first args))) (first args)
+    (and (= 1 (count args))
+         (or (formula/range-ref? (first args)) (vector? (first args)))) (first args)
     (some formula/range-ref? args) (list 'flatten (apply list 'vector args))
     :else (apply list 'vector args)))
 
@@ -168,58 +182,73 @@
       "VLOOKUP" (vlookup-form args)
       (unsupported! (str "function " n)))))
 
-(defn ptgs->form
-  "POI RPN tokens -> one SaltRim marker form (stack machine). Throws
-   (ex-info ::unsupported) on anything outside the vocabulary — the caller
-   falls back to the cached value."
-  [ptgs]
-  (let [stack (volatile! [])
-        push! (fn [x] (vswap! stack conj x))
-        pop-n! (fn [n]
-                 (let [st @stack]
-                   (when (< (count st) n) (unsupported! "malformed formula (stack underflow)"))
-                   (vreset! stack (subvec st 0 (- (count st) n)))
-                   (subvec st (- (count st) n))))]
-    (doseq [^Ptg p ptgs]
-      (cond
-        (instance? IntPtg p)        (push! (long (.getValue ^IntPtg p)))
-        (instance? NumberPtg p)     (push! (num-lit (.getValue ^NumberPtg p)))
-        (instance? StringPtg p)     (push! (.getValue ^StringPtg p))
-        (instance? BoolPtg p)       (push! (.getValue ^BoolPtg p))
-        (instance? MissingArgPtg p) (push! nil)
-        (instance? RefPtg p)        (push! (ref-form p))
-        (instance? AreaPtg p)       (push! (area-form p))
-        (instance? NameXPxg p)      (push! (list ::fname (.getNameName ^NameXPxg p)))
-        (bin-op (class p))          (let [[a b] (pop-n! 2)] (push! (list (bin-op (class p)) a b)))
-        (instance? UnaryMinusPtg p) (let [[x] (pop-n! 1)]
-                                      (push! (if (number? x) (- x) (list '- x))))
-        (instance? UnaryPlusPtg p)  nil
-        (instance? PercentPtg p)    (let [[x] (pop-n! 1)] (push! (list '/ x 100.0)))
-        (instance? ParenthesisPtg p) nil
-        (instance? AttrPtg p)       (when (.isSum ^AttrPtg p)
-                                      (let [[x] (pop-n! 1)] (push! (list 'sum (coll-arg [x])))))
-        (instance? AbstractFunctionPtg p)
-        (let [^AbstractFunctionPtg f p
-              args (pop-n! (.getNumberOfOperands f))
-              [name args] (if (= "#external#" (.getName f))
-                            (if (fname-token? (first args))
-                              [(second (first args)) (rest args)]
-                              (unsupported! "external function without a name"))
-                            [(.getName f) args])]
-          (when (some fname-token? args) (unsupported! "nested name token"))
-          (push! (fname->form name args)))
+(def ^:private sandbox-names
+  "Every name a translated formula can call. A `LET` local that shadows one is
+   renamed rather than refused (see `safe-local`)."
+  (delay (set (map str (keys formula/stdlib)))))
 
-        :else (unsupported! (.getSimpleName (class p)))))
-    (let [st @stack]
-      (if (= 1 (count st))
-        (first st)
-        (unsupported! "malformed formula (unbalanced)")))))
+(defn- safe-local
+  "An Excel `LET` variable as a symbol that cannot shadow a callable name.
+   Shadowing is legal Clojure right up until the body CALLS the name —
+   `LET(sum,5,SUM(A1:A3)+sum)` would translate to `(let [sum 5] (+ (sum …) sum))`
+   and blow up. Proving the body never calls it needs a second walk; a suffix
+   needs none, and `rate`/`sum`/`text` really are stdlib functions."
+  [nm]
+  (loop [x nm] (if (@sandbox-names x) (recur (str x "_")) (symbol x))))
+
+(defn ast->form
+  "One rechentafel AST node -> a SaltRim marker form. `scope` maps the Excel
+   `LET` names currently in scope to the symbols they were translated as.
+
+   Throws (ex-info ::unsupported) on anything outside the vocabulary — the
+   caller falls back to the cell's cached value. Every refusal names the
+   construct it refused, because that string becomes the cell's audit comment."
+  ([node] (ast->form node {}))
+  ([{:keys [op] :as n} scope]
+   (let [go #(ast->form % scope)]
+     (case op
+       :num    (num-lit (:value n))
+       :str    (:value n)
+       :bool   (:value n)
+       :ref    (ref->addr n)
+       :range  (range-form n)
+       :binop  (list (bin-op (:sym n)) (go (:left n)) (go (:right n)))
+       :unop   (let [v (go (:arg n))]
+                 (case (:sym n)
+                   :minus (if (number? v) (- v) (list '- v))
+                   :plus  v))
+       :postop (case (:sym n)
+                 :percent (list '/ (go (:arg n)) 100.0)
+                 (unsupported! (str "postfix " (name (:sym n)))))
+       :call   (fname->form (:name n) (mapv go (:args n)))
+       ;; `{1,2,3}` is a row and `{1,2;3,4}` a rectangle; a single row flattens
+       ;; so `SUM({1,2,3})` reads as `(sum [1 2 3])`
+       :array  (let [rows (mapv #(mapv go %) (:rows n))]
+                 (if (= 1 (count rows)) (first rows) rows))
+       :let    (let [[scope' pairs]
+                     (reduce (fn [[sc ps] [nm node]]
+                               (let [sym (safe-local nm)]
+                                 ;; each binding sees the ones before it, not itself
+                                 [(assoc sc nm sym) (conj ps sym (ast->form node sc))]))
+                             [scope []] (:bindings n))]
+                 (list 'let (vec pairs) (ast->form (:body n) scope')))
+       ;; a bare name is a LET local if one is in scope, else a defined name —
+       ;; which needs named regions (roadmap item K) before it can mean anything
+       :name   (or (scope (:value n))
+                   (unsupported! (str "defined name " (:value n))))
+       :err       (unsupported! (str "error literal " (:text n "")))
+       :table-ref (unsupported! (str "structured table reference to " (:table n)))
+       :spill-ref (unsupported! "spill reference (A1#)")
+       :intersect (unsupported! "range intersection")
+       (unsupported! (str "node " op))))))
 
 (defn translate-formula
   "Excel formula string -> SaltRim source \"=(…)\". Throws (::unsupported in
-   ex-data) when it can't be translated."
-  [fstr ^FormulaParsingWorkbook pwb sheet-idx]
-  (str "=" (formula/unparse (ptgs->form (FormulaParser/parse fstr pwb FormulaType/CELL (int sheet-idx))))))
+   ex-data) when it can't be translated. Takes only the string: the AST parser
+   needs no workbook context, which is why the sheet index and
+   `FormulaParsingWorkbook` this used to require are gone."
+  [fstr]
+  (str "=" (formula/unparse (ast->form (xlp/parse fstr)))))
 
 ;; --- cell values / styles --------------------------------------------------
 
@@ -306,7 +335,7 @@
   "One physical cell -> {:addr :value :style :cached :original :fallback} —
    :value nil means skip (blank); :cached/:original only for translated
    formulas; :fallback {:formula :reason} when translation failed."
-  [^XSSFCell c pwb sheet-idx]
+  [^XSSFCell c]
   (let [a (addr/make (.getColumnIndex c) (.getRowIndex c))
         [props dropped] (style-props c)
         base {:addr a :style props :dropped-mask dropped}]
@@ -322,7 +351,7 @@
       (let [fstr (.getCellFormula c)
             cv   (cached-value c)]
         (try
-          (assoc base :value (translate-formula fstr pwb sheet-idx)
+          (assoc base :value (translate-formula fstr)
                  :cached cv :original fstr)
           (catch Exception e
             (-> base
@@ -348,10 +377,10 @@
      :dcw (max 24 (Math/round (+ (* 7.0 dcw-chars) 5.0)))
      :drh (max 12 (Math/round (* drh-pts (/ 4.0 3.0))))}))
 
-(defn- read-tab [^XSSFWorkbook wb pwb idx]
+(defn- read-tab [^XSSFWorkbook wb idx]
   (let [^XSSFSheet s (.getSheetAt wb idx)
         cells (vec (for [^XSSFRow row (seq s), ^XSSFCell c (seq row)
-                         :let [m (read-cell c pwb idx)]
+                         :let [m (read-cell c)]
                          :when (:value m)]
                      m))
         doc   (into {} (for [{:keys [addr value style]} cells]
@@ -374,8 +403,7 @@
    :report} …]}. Throws on the total-cell cap."
   [^InputStream in]
   (with-open [wb (XSSFWorkbook. in)]
-    (let [pwb  (XSSFEvaluationWorkbook/create wb)
-          tabs (mapv #(read-tab wb pwb %) (range (.getNumberOfSheets wb)))
+    (let [tabs (mapv #(read-tab wb %) (range (.getNumberOfSheets wb)))
           total (reduce + (map #(get-in % [:report :cells]) tabs))]
       (when (> total max-cells)
         (throw (ex-info (str "workbook too large: " total " cells (max " max-cells ")")

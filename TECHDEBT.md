@@ -386,10 +386,23 @@ of presentation. Intentional limits / future polish:
 
 ## xlsx import (feat/xlsx-import)
 
-`/import` translates Excel formulas to Clojure via POI `FormulaParser` RPN;
+`/import` translates Excel formulas to Clojure by walking **rechentafel's
+formula AST** (`rechentafel.parser/parse` over the string POI hands us);
 everything outside the vocabulary falls back to the cached value + a `comment`,
 and a verify pass demotes translated cells that disagree with Excel's cache.
-Deferred (all land as commented values today, so sheets stay correct):
+
+It walked POI's RPN `Ptg` stream with a hand-written stack machine until the
+AST rewrite (see `spikes/11-excel-ast-import.clj`) — behaviour-identical on
+every formula the old path translated, minus the three token-order hazards
+(`AttrPtg(isSum)`, trailing `FuncVarPtg`, `#external#` + `NameXPxg`) and minus
+the `FormulaParsingWorkbook`/sheet-index plumbing. `translate-formula` now
+takes only the string, which is also what a "paste an Excel formula" input mode
+would need.
+
+Deferred (all land as commented values today, so sheets stay correct). The AST
+names each of these precisely, so the refusal REASON in the audit comment is now
+the construct rather than a POI token class — what is missing is somewhere to
+put them, not the ability to see them:
 
 - **SUMIF / COUNTIF / AVERAGEIF criteria strings** (`">5"`, `"a*"`) need a
   small criteria parser; map onto `filter` + the aggregate.
@@ -397,10 +410,17 @@ Deferred (all land as commented values today, so sheets stay correct):
   semantics; only exact match (`FALSE`) translates.
 - **Cross-sheet references** (`Other!A1`, 3D areas) — SaltRim has no
   cross-sheet refs yet; revisit if/when it does.
-- **Named ranges** — could resolve through POI's workbook names into plain
-  refs at translate time.
-- **Whole-column/row ranges** (`A:A`) — ranges expand statically; needs a
-  bounded "used range" clamp to translate safely.
+- **Named ranges + structured table refs** (`Tax_Rate`, `Sales[Amount]`) —
+  arrive as `:name` / `:table-ref` nodes. Could resolve through POI's workbook
+  names into plain refs at translate time; properly, they want SaltRim named
+  regions (roadmap item K).
+- **Spill refs** (`A1#`) and **range intersection** (`A1:A3 B1:B3`) — `:spill-ref`
+  and `:intersect` nodes; spill needs dynamic arrays (roadmap item E).
+- **Error literals** (`=#N/A`) — the stdlib has `if-error`/`if-na`/`error-type`
+  to CATCH an error but nothing to RAISE one, so `:err` nodes have no target.
+- **Whole-column/row ranges** (`A:A`) — ranges expand statically to one ref per
+  cell, so a whole column is ~1M of them against `max-range-cells` (4096); needs
+  a bounded "used range" clamp to translate safely.
 - **Merged regions** — imported as the top-left value only (no merge concept).
 - **Excel `=` text comparison is case-insensitive**; ours is exact. Verify
   demotes any cell where this changes the result.
