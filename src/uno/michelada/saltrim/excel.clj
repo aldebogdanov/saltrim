@@ -117,8 +117,17 @@
 
 (defn <-rv
   "rechentafel tagged value -> SaltRim value. An error value THROWS, named the
-   way a spreadsheet user knows it; an area flattens back to a row-major
-   vector, matching how SaltRim ranges already read."
+   way a spreadsheet user knows it.
+
+   An area comes back with its SHAPE: a genuine rectangle (more than one row AND
+   more than one column) becomes a vector of ROW vectors, exactly what `#area`
+   reads as, while a single row or column flattens — it has no shape to keep,
+   and flattening it is what every range-shaped result has always done.
+
+   The rectangle case is the one that matters: `TRANSPOSE`, `MINVERSE`, `MMULT`
+   and the `LINEST` family all RETURN matrices, and flattening those made them
+   unusable — you could not feed one into the next, and `[1 3 2 4]` cannot say
+   which of three rectangles it is. Same argument as `#area` on the way in."
   [t]
   (case (:t t)
     :num   (num-out (:v t))
@@ -127,7 +136,10 @@
     :blank nil
     :err   (throw (ex-info (get error-display (:v t) (str "#" (name (:v t))))
                            {:excel-error (:v t)}))
-    :area  (mapv <-rv (apply concat (:values t)))
+    :area  (let [rows (:values t)]
+             (if (and (> (count rows) 1) (> (count (first rows)) 1))
+               (mapv (fn [r] (mapv <-rv r)) rows)
+               (mapv <-rv (apply concat rows))))
     (throw (ex-info (str "unexpected Excel result " (pr-str t)) {:value t}))))
 
 ;; --- calling --------------------------------------------------------------

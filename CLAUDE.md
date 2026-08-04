@@ -475,6 +475,19 @@ halves of the stdlib: OUR aggregates take cells and ignore shape;
 **clojure.core stays Clojure**, so `(count #area A1:B2)` is 2 rows (not 4 cells)
 and `(map sum #area A1:B2)` is the per-row totals — which is what an area is FOR
 on that side.
+**MATRICES are native now**: `transpose` `matmul` (hand-written — four lines of
+Clojure, and going through `excel/call` would tag-convert every element to
+answer what Clojure answers directly) plus `det` `inverse` `linest` `trend`
+(borrowed; pivoting and conditioning are the numerics worth inheriting).
+`stdlib` had excluded MMULT/TRANSPOSE/LINEST for want of 2D ranges — `#area`
+removed the reason, and nobody should reach for `xl/MMULT` to multiply two
+matrices. This also required `excel/<-rv` to STOP flattening: a genuine
+rectangle result (>1 row AND >1 col) now returns rows, so `MINVERSE`/`MMULT`
+compose — `(matmul m (inverse m))` is the identity, and used to be four loose
+numbers. A 1xN/Nx1 result still flattens (no shape to keep). The importer maps
+`MMULT`/`TRANSPOSE` in its HAND-WRITTEN tier (they are ours, not borrowed) and
+areafies them there itself, since only the mechanical tiers do that
+automatically.
 **The function vocabulary is THREE TIERS**, and only the first is a decision:
 `fname->form`'s hand-written cases (where we chose different semantics —
 `MIN`→`xmin` skips blanks, `VLOOKUP`→`xvlookup` is exact-match only), then
