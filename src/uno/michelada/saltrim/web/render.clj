@@ -545,10 +545,22 @@
 
             [:div {:style h3} "Labels and comments"]
             [:p {:style p} "Two more properties in the same row describe the cell rather than paint it. "
-             [:span {:style kbd} "label"] " NAMES it — a short identifier shown instead of the address in "
-             "the 🕸 dependency graph. " [:span {:style kbd} "comment"] " is a note ABOUT it: the cell gets "
+             [:span {:style kbd} "label"] " NAMES it, and a name is a reference: label a cell "
+             [:span {:style kbd} "rate"] " and any formula can say " [:span {:style kbd} "$rate"]
+             " instead of its address. The label also replaces the address in the 🕸 dependency graph."]
+            [:p {:style p} "Put the " [:b "same"] " label on several cells and the name means all of them, "
+             "in row-major order — that is a named range: " [:span {:style kbd} "=(sum $sales)"]
+             ". If they form a full rectangle, " [:span {:style kbd} "#area sales"]
+             " gives it as rows, for " [:span {:style kbd} "transpose"] " / "
+             [:span {:style kbd} "matmul"] " and friends."]
+            [:p {:style p} "A name follows its cell: insert a row above it and every "
+             [:span {:style kbd} "$rate"] " still finds it. A name nothing carries is "
+             [:span {:style kbd} "#NAME?"] " — write the formula first and label the cell after, if you like. "
+             "An address always wins, so a cell labelled " [:span {:style kbd} "q1"]
+             " is not reachable as " [:span {:style kbd} "$q1"] "."]
+            [:p {:style p} [:span {:style kbd} "comment"] " is a note ABOUT the cell: it gets "
              "a small corner flag and shows the text on hover. The .xlsx importer leaves its audit trail "
-             "as comments."]
+             "as comments, and turns a workbook's defined names into labels."]
 
             [:div {:style h3} "Insert / delete rows and columns"]
             [:p {:style p} "The " [:span {:style kbd} "insert"] " buttons (format row) add a blank row/column "

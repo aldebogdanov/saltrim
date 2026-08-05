@@ -55,12 +55,14 @@
       :else                                       nil)))
 
 (defn classify
-  "Throwable -> a code from `display-names`. Checks, in order: an Excel error
-   named by `excel/call`; a `deleted-ref`; the exception class; then the
-   message. Anything unrecognised is `:error`."
+  "Throwable -> a code from `display-names`. Checks, in order: a code the
+   thrower stated outright; an Excel error named by `excel/call`; a
+   `deleted-ref`; the exception class; then the message. Anything unrecognised
+   is `:error`."
   [^Throwable e]
   (let [d (ex-data e)]
-    (or (:excel-error d)
+    (or (when (contains? display-names (:code d)) (:code d))
+        (:excel-error d)
         (when (:ref d) :ref)
         (from-message e)
         (condp instance? e
