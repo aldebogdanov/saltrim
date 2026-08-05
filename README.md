@@ -171,18 +171,6 @@ hand-written: math (`sum`, `product`, `round`, `sqrt`, `pow`, `sign`, …), stat
 (`mean`/`avg`, `median`, `variance`, `stdev`), text (`upper`, `lower`, `trim`,
 `join`, `split`, `str-replace`, `includes?`, …), dates over ISO `yyyy-MM-dd`
 strings (`today`, `year`, `month`, `day`, `days-between`), and excel-compat
-helpers (`excel-truthy`, `xmin`, `xmax`, `xround`, `xdate`, `xvlookup`) that the
-.xlsx importer targets.
-
-On top of that sit **~230 functions borrowed from Excel's library** and given
-Clojure names — the numerics a spreadsheet is expected to have, without the
-spreadsheet:
-
-A **stdlib** is available bare in every formula. The core of it is
-hand-written: math (`sum`, `product`, `round`, `sqrt`, `pow`, `sign`, …), stats
-(`mean`/`avg`, `median`, `variance`, `stdev`), text (`upper`, `lower`, `trim`,
-`join`, `split`, `str-replace`, `includes?`, …), dates over ISO `yyyy-MM-dd`
-strings (`today`, `year`, `month`, `day`, `days-between`), and excel-compat
 helpers (`if-error`, `excel-truthy`, `xmin`, `xmax`, `xround`, `xdate`,
 `xvlookup`) that the .xlsx importer targets.
 
@@ -632,9 +620,16 @@ becomes the same label on every cell of it. A name may also be an expression or
 another name, and a sheet-scoped one shadows a global of the same name (Excel's
 own rules); those without a cell to sit on are resolved inline instead.
 
+**Structured table references** resolve to the cells they cover:
+`SUM(Sales[Qty])` becomes `=(sum $B2:B4)`. Column ranges (`Sales[[Qty]:[Price]]`),
+band specifiers (`[#Headers]`, `[#Data]`, `[#Totals]`, `[#All]`), the bare table
+name, and the this-row form (`Sales[@Qty]`, resolved against the row the formula
+sits on) all work. SaltRim gains no table *object* — sorting, filtering, banded
+styling and auto-extension stay behind in Excel; only the reference crosses.
+
 **Anything untranslatable** (cross-sheet references, whole-column ranges,
-structured table references, other functions) is imported as its last
-**computed value**, with the original Excel formula kept as the cell's `comment`. Every
+other functions) is imported as its last **computed value**, with the original
+Excel formula kept as the cell's `comment`. Every
 translated formula is then **verified against Excel's own cached value** —
 mismatches (e.g. Excel's blank-as-zero arithmetic) are demoted to values the
 same way. An imported sheet is always *correct-or-commented*; the import report

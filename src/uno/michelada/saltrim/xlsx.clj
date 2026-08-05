@@ -310,6 +310,70 @@
   [nm]
   (loop [x nm] (if (@sandbox-names x) (recur (str x "_")) (symbol x))))
 
+;; --- structured table references --------------------------------------------
+;;
+;; `Sales[Amount]`, `Sales[[#Data],[Amount]]`, `Sales[@Amount]`. A table is a
+;; named rectangle whose columns are addressable by HEADER, which is exactly the
+;; geometry POI already knows, so this resolves the same way a defined name does:
+;; to the cells it stands for, at import.
+;;
+;; What it deliberately does not do is create a table CONCEPT in SaltRim. Excel's
+;; tables carry sorting, filtering, banded styling and auto-extension; a
+;; reference is the only part a formula needs, and inventing the rest to support
+;; the part nobody asked for would be a feature, not an import.
+
+(def ^:private table-bands
+  "Which rows an area specifier selects, given the table's own geometry."
+  {:headers (fn [{:keys [sr hdr]}] (when (pos? hdr) [sr sr]))
+   :totals  (fn [{:keys [er tot]}] (when (pos? tot) [er er]))
+   :data    (fn [{:keys [sr er hdr tot]}] [(+ sr hdr) (- er tot)])
+   :all     (fn [{:keys [sr er]}] [sr er])})
+
+(defn- table-cols
+  "[first-col last-col] (absolute) for a structured reference's column
+   specifiers, or the whole table when it names none."
+  [{:keys [sc ec cols] :as t} specs nm]
+  (let [idx  (fn [c] (or (get cols c)
+                         (unsupported! (str "table column " nm "[" c "]"))))
+        picked (for [s specs
+                     :when (#{:column :column-range} (:kind s))
+                     i (case (:kind s)
+                         :column       [(idx (:name s))]
+                         :column-range [(idx (:from s)) (idx (:to s))])]
+                 i)]
+    (if (seq picked)
+      [(+ sc (apply min picked)) (+ sc (apply max picked))]
+      [sc ec])))
+
+(defn- table-form
+  "A `:table-ref` node as a SaltRim ref or range marker."
+  [{:keys [table specifiers]} ctx]
+  (let [nm (or table (unsupported! "structured reference with no table name"))
+        t  (or (get (:tables ctx) nm)
+               (unsupported! (str "structured table reference to " nm)))]
+    (when-not (= (:sheet t) (:tab ctx))
+      (unsupported! (str "table " nm " is on sheet " (:sheet t))))
+    (let [[c0 c1] (table-cols t specifiers nm)
+          areas   (keep #(when (= :area (:kind %)) (:value %)) specifiers)
+          band    (or (first areas) :data)
+          [r0 r1] (if (= :this-row band)
+                    ;; `[@Amount]` means "this column, MY row" — the one piece of
+                    ;; a structured reference that depends on where it is written
+                    (let [a (or (:addr ctx)
+                                (unsupported! (str nm "[@…] outside a cell")))
+                          r (:ri (addr/parse a))]
+                      [r r])
+                    (or ((table-bands band) t)
+                        (unsupported! (str "table " nm " has no " (name band) " row"))))
+          n       (* (inc (- c1 c0)) (inc (- r1 r0)))]
+      (when (neg? (- r1 r0))
+        (unsupported! (str "table " nm " has no " (name band) " rows")))
+      (when (> n max-range-cells)
+        (unsupported! (str "table " nm " covers " n " cells (max " max-range-cells ")")))
+      (if (= 1 n)
+        (formula/ref-marker (addr/make c0 r0))
+        (formula/range-marker (addr/make c0 r0) (addr/make c1 r1))))))
+
 (declare ast->form)
 
 (defn- resolve-name
@@ -332,6 +396,11 @@
   [nm scope ctx]
   (let [target (get (:names ctx) nm)]
     (cond
+      ;; a bare TABLE name is a structured reference to its data body —
+      ;; `SUM(Sales)` and `SUM(Sales[#Data])` are the same thing in Excel
+      (and (nil? target) (get (:tables ctx) nm))
+      (table-form {:table nm} ctx)
+
       (nil? target)             (unsupported! (str "defined name " nm))
       ((:seen ctx #{}) nm)      (unsupported! (str "defined name " nm " refers to itself"))
       ;; the name is becoming a LABEL on the cells it points at, so keep it:
@@ -387,7 +456,7 @@
        :name   (or (scope (:value n))
                    (resolve-name (:value n) scope ctx))
        :err       (unsupported! (str "error literal " (:text n "")))
-       :table-ref (unsupported! (str "structured table reference to " (:table n)))
+       :table-ref (table-form n ctx)
        :spill-ref (unsupported! "spill reference (A1#)")
        :intersect (unsupported! "range intersection")
        (unsupported! (str "node " op))))))
@@ -491,6 +560,9 @@
   ([c] (read-cell c nil))
   ([^XSSFCell c ctx]
   (let [a (addr/make (.getColumnIndex c) (.getRowIndex c))
+        ;; `Sales[@Amount]` resolves against the row it is WRITTEN on, so the
+        ;; translation context has to know which cell it is translating
+        ctx (some-> ctx (assoc :addr a))
         [props dropped] (style-props c)
         base {:addr a :style props :dropped-mask dropped}]
     (condp = (.getCellType c)
@@ -554,6 +626,26 @@
                              [(.getNameName n) (.getRefersToFormula n)])))]
     (merge (entries #(= -1 %)) (entries #(= idx %)))))
 
+(defn- workbook-tables
+  "Every table in the workbook, by name: its rectangle, its header/totals rows,
+   its columns by header, and which sheet it is on.
+
+   Workbook-wide rather than per-sheet, because a table NAME is global in Excel
+   — so a formula can reference one that lives on another tab, and that has to
+   refuse by saying where the table actually is rather than that it does not
+   exist."
+  [^XSSFWorkbook wb]
+  (into {}
+        (for [i (range (.getNumberOfSheets wb))
+              :let [^XSSFSheet s (.getSheetAt wb i)]
+              ^org.apache.poi.xssf.usermodel.XSSFTable t (.getTables s)]
+          [(.getName t)
+           {:sheet (.getSheetName wb i)
+            :sc (.getStartColIndex t) :ec (.getEndColIndex t)
+            :sr (.getStartRowIndex t) :er (.getEndRowIndex t)
+            :hdr (.getHeaderRowCount t) :tot (.getTotalsRowCount t)
+            :cols (into {} (map-indexed (fn [j c] [(.getName c) j]) (.getColumns t)))}])))
+
 (defn- name-labels
   "{name [addr …]} for the defined names that point straight at cells ON THIS
    TAB, so the name can become their `:label` and survive into the formulas.
@@ -583,7 +675,8 @@
 
 (defn- read-tab [^XSSFWorkbook wb idx]
   (let [^XSSFSheet s (.getSheetAt wb idx)
-        base  {:tab (.getSheetName wb idx) :names (defined-names wb idx)}
+        base  {:tab (.getSheetName wb idx) :names (defined-names wb idx)
+               :tables (workbook-tables wb)}
         lbls  (name-labels base)
         ctx   (assoc base :labelled (set (keys lbls)))
         ;; addr -> the name to label it with. Two names on one cell is legal in

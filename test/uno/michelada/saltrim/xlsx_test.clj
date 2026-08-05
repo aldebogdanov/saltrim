@@ -10,8 +10,10 @@
             [uno.michelada.saltrim.store :as store]
             [uno.michelada.saltrim.xlsx :as xlsx])
   (:import [java.io ByteArrayInputStream ByteArrayOutputStream]
+           [org.apache.poi.ss SpreadsheetVersion]
            [org.apache.poi.ss.usermodel FillPatternType HorizontalAlignment IndexedColors]
-           [org.apache.poi.xssf.usermodel XSSFFormulaEvaluator XSSFWorkbook]))
+           [org.apache.poi.ss.util AreaReference CellReference]
+           [org.apache.poi.xssf.usermodel XSSFCell XSSFFormulaEvaluator XSSFWorkbook]))
 
 (use-fixtures :each (fn [t] (db/start-mem!) (try (t) (finally (mount/stop)))))
 
@@ -27,6 +29,32 @@
     (.toByteArray bos)))
 
 (defn- in-stream [^bytes b] (ByteArrayInputStream. b))
+
+(defn- formula!
+  "Set a cell's formula through the XML, plus the cached value Excel would have
+   written, bypassing POI's own formula parser.
+
+   POI can neither PARSE nor EVALUATE a structured reference —
+   `setCellFormula(\"SUM(Sales[Qty])\")` throws \"Specified named range Sales
+   does not exist\" — so a workbook that uses one cannot be built the ordinary
+   way, and no cached value would come out of `evaluateAllFormulaCells`. Excel
+   writes both happily; this is a limitation of the fixture, not of the thing
+   under test. Supplying the cached value is what lets `demote-verify!` do its
+   job here instead of demoting every translated cell for want of an answer to
+   compare against."
+  [^XSSFCell c ^String f cached]
+  (.setStringValue (.addNewF (.getCTCell c)) f)
+  (.setCellValue c (double cached)))
+
+(defn- raw-bytes
+  "Serialise WITHOUT evaluating formulas — POI's evaluator cannot read a
+   structured reference either, so there are no cached values for these cells.
+   The importer keeps the formula live regardless; `demote-verify!` simply has
+   nothing to check it against."
+  ^bytes [^XSSFWorkbook wb]
+  (let [bos (ByteArrayOutputStream.)]
+    (.write wb bos) (.close wb)
+    (.toByteArray bos)))
 
 ;; --- translator --------------------------------------------------------------
 
@@ -303,6 +331,70 @@
     (is (= "=$A3" (xlsx/translate-formula "Data!A3" {:tab "Data"})))
     (is (thrown-with-msg? Exception #"cross-sheet reference to Other"
                           (xlsx/translate-formula "Other!A3" {:tab "Data"})))))
+
+;; --- structured table references --------------------------------------------
+
+(defn- table-wb
+  "A workbook with a real Excel TABLE and formulas in every structured shape."
+  ^bytes []
+  (let [wb (XSSFWorkbook.)
+        s  (.createSheet wb "Data")
+        put (fn [r c v] (let [cl (cell s r c)]
+                          (if (string? v) (.setCellValue cl ^String v)
+                              (.setCellValue cl (double v)))))]
+    (doseq [[r vs] (map-indexed vector [["Item" "Qty" "Price"]
+                                        ["a" 1 10] ["b" 2 20] ["c" 3 30]])]
+      (doseq [[c v] (map-indexed vector vs)] (put r c v)))
+    (doto (.createTable s (AreaReference. (CellReference. "A1") (CellReference. "C4")
+                                          SpreadsheetVersion/EXCEL2007))
+      (.setName "Sales")
+      (.setDisplayName "Sales"))
+    (formula! (cell s 1 4) "Sales[@Qty]*Sales[@Price]" 10)  ; E2 — this row
+    (formula! (cell s 5 0) "SUM(Sales[Qty])" 6)             ; A6 — one column
+    (formula! (cell s 6 0) "SUM(Sales[[Qty]:[Price]])" 66)  ; A7 — a column range
+    (formula! (cell s 7 0) "SUM(Sales)" 66)                 ; A8 — the data body
+    (formula! (cell s 8 0) "COUNTA(Sales[#Headers])" 3)     ; A9 — the header band
+    (raw-bytes wb)))
+
+(deftest structured-table-references-resolve-to-their-cells
+  (db/upsert-user! {:uid "dev-ann" :name "Ann"})
+  (xlsx/import! (in-stream (table-wb)) "dev-ann" "tbl")
+  (let [{:keys [sh]} (store/load-record "dev-ann__tbl")]
+    (try
+      (testing "a column is its data band, without the header"
+        (is (= "=(sum $B2:B4)" (sheet/raw sh "A6")))
+        (is (= 6 (sheet/value sh "A6"))))
+      (testing "a column RANGE spans them"
+        (is (= "=(sum $B2:C4)" (sheet/raw sh "A7")))
+        (is (= 66 (sheet/value sh "A7"))))
+      (testing "the bare table name is its data body"
+        (is (= "=(sum $A2:C4)" (sheet/raw sh "A8"))))
+      (testing "a band specifier picks the header row"
+        (is (= "=(count (remove nil? $A1:C1))" (sheet/raw sh "A9")))
+        (is (= 3 (sheet/value sh "A9"))))
+      (testing "and [@col] resolves against the row it is written on"
+        (is (= "=(* $B2 $C2)" (sheet/raw sh "E2")))
+        (is (= 10 (sheet/value sh "E2"))))
+      (finally (sheet/close! sh)))))
+
+(deftest table-refusals-say-what-they-were
+  (let [T {"Sales" {:sheet "Data" :sc 0 :ec 2 :sr 0 :er 3 :hdr 1 :tot 0
+                    :cols {"Item" 0 "Qty" 1 "Price" 2}}
+           "Costs" {:sheet "Other" :sc 0 :ec 1 :sr 0 :er 2 :hdr 1 :tot 0
+                    :cols {"K" 0 "V" 1}}}
+        bad (fn [f & [addr]]
+              (try (xlsx/translate-formula f (cond-> {:tab "Data" :tables T}
+                                               addr (assoc :addr addr)))
+                   nil
+                   (catch Exception e
+                     (:uno.michelada.saltrim.xlsx/unsupported (ex-data e)))))]
+    (is (= "table column Sales[Nope]" (bad "SUM(Sales[Nope])")))
+    (is (= "structured table reference to Ghost" (bad "SUM(Ghost[X])")))
+    (is (= "table Costs is on sheet Other" (bad "SUM(Costs[V])"))
+        "a table name is workbook-global, so say where it actually is")
+    (is (= "table Sales has no totals row" (bad "Sales[#Totals]")))
+    (is (= "Sales[@…] outside a cell" (bad "Sales[@Qty]"))
+        "this-row needs to know which row")))
 
 (deftest import-caps
   (with-redefs [xlsx/max-cells 3]

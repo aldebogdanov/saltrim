@@ -436,8 +436,22 @@ token-order hazards baked in — a single-range `SUM` arriving as `AttrPtg(isSum
 `IF`/`CHOOSE` as a TRAILING `FuncVarPtg`, `IFERROR` as `NameXPxg` + `#external#`
 — and none of them exist for a node that knows its own name and arguments.
 Every refusal NAMES the construct (`cross-sheet reference to Other`,
-`structured table reference to Sales`) because that string becomes the cell's
+`whole-col reference`) because that string becomes the cell's
 audit `:comment`.
+**STRUCTURED TABLE REFS resolve** (`xlsx/workbook-tables` + `table-form`):
+`Sales[Qty]` → `$B2:B4`. POI already knows the geometry (`getStartColIndex` …,
+`getHeaderRowCount`, `findColumnIndex`), so a reference is column span ×
+row band — `table-bands` maps `[#Headers]`/`[#Data]`/`[#Totals]`/`[#All]`, the
+default band is DATA, and `[@col]` takes the row from `ctx :addr`, which is why
+`read-cell` stamps the cell being translated into the context. A bare table name
+is its data body (`resolve-name` falls through to the tables map). Tables are
+collected WORKBOOK-wide because a table name is global, so one on another tab
+refuses by saying where it is. No table OBJECT is created: Excel's tables carry
+sorting/filtering/banding/auto-extension and a formula needs none of it.
+Fixtures must write these formulas through the XML (`.addNewF`) and supply the
+cached value by hand — POI can neither parse nor evaluate a structured
+reference, so `setCellFormula` throws and `demote-verify!` would otherwise
+demote every translated cell for want of an answer to compare against.
 **A `:label` IS a NAME you can reference** — `$rate` reads the cell labelled
 `rate`, and the SAME label on several cells is a named range (`$sales`
 row-major; `#area sales` as rows, when they form a full rectangle). Resolution

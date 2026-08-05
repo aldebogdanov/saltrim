@@ -452,10 +452,18 @@ roadmap, informed by rechentafel rather than copied from it.
 > `(def sales "B2:B10")` + `$(sales)`, which is what this item observed in the
 > first place.
 >
-> Structured table refs (`Sales[Amount]`) are still open. They resolve the same
-> way — POI's `XSSFTable` gives the area and the header names, so the rectangle
-> is computable at import — and `[@col]` additionally needs the referring cell's
-> row, which the importer has. That is the remaining half.
+> **Now DONE in full.** Structured table refs resolve the same way: POI's
+> `XSSFTable` gives the area, the header/totals rows and the column names, so
+> `Sales[Qty]` is a column span crossed with a row band, and `[@col]` takes its
+> row from the cell being translated. A bare table name is its data body.
+>
+> And the ergonomic layer this item asked for arrived from the other direction —
+> not as a `:table` prop but as `:label`, which already NAMED a cell and now
+> resolves in formulas: `$rate` reads the cell labelled `rate`, and the same
+> label on several cells is a named range (`$sales`, or `#area sales` for the
+> rectangle). Resolution is at parse, so it costs nothing at recompute time.
+> That is the "steal the ergonomics, not the implementation" outcome, reached by
+> making an existing mechanism mean something rather than by adding one.
 
 ---
 
@@ -541,7 +549,7 @@ Worth raising with the author, since the collaboration is welcome:
 | 6 | **D** — 2D range shape | M | High | ✅ DONE as ADDITIVE `#area` — nothing breaking was needed |
 | 7 | **B1** — importer: POI RPN → rechentafel AST | M | High | ✅ DONE. Note: the "fewer demotions" estimate was optimistic — see below |
 | 8 | **B2** — live xlsx export (real formulas) | M–L | Very high | ✅ DONE (`xlformula` ns) — export's #1 documented limitation is gone |
-| 9 | **K** — named regions / table refs | M | Medium | Cheap-win candidate, SaltRim-native design |
+| 9 | **K** — named regions / table refs | M | Medium | ✅ DONE — labels became names (`$rate`), table refs resolve at import |
 | 10 | **E** — dynamic arrays / spill | L | Very high | Roadmap-grade; blueprint exists; do last |
 
 Items 1–5 are each a self-contained PR and none of them touch the reactive
