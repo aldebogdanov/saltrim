@@ -96,25 +96,49 @@
   '{:plus + :minus - :mul * :div / :pow pow :concat str
     :eq = :ne not= :lt < :le <= :gt > :ge >=})
 
+;; The translation CONTEXT: what a formula needs to know beyond its own text.
+;;
+;;   {:tab    "Data"          the sheet being imported, so a reference that
+;;                            names it is local rather than cross-sheet
+;;    :names  {"Tax_Rate" "Data!$B$1"}   the workbook's defined names
+;;    :seen   #{"Tax_Rate"}}  names already being resolved, so a name defined
+;;                            in terms of itself refuses instead of recurring
+;;
+;; nil means "no workbook" — `translate-formula` on a bare string still works,
+;; and every name is then unresolvable, exactly as before.
+
+(defn- local-sheet?
+  "Does this reference's sheet prefix name the tab we are importing?
+
+   Cell formulas rarely qualify a local reference, but a DEFINED NAME always
+   does — `refersToFormula` comes back as `Data!$B$1` even for a name used only
+   within Data. Without this every resolved name would refuse itself as
+   cross-sheet."
+  [sheet ctx]
+  (and sheet (:tab ctx) (= sheet (:tab ctx))))
+
 (defn- ref->addr
   "One `:ref` node as an A1 address, or a refusal naming what it actually was.
    The AST knows; the caller only needs the reason to put in the audit comment."
-  [{:keys [sheet whole col row]}]
-  (when sheet (unsupported! (str "cross-sheet reference to " sheet)))
-  (when whole (unsupported! (str "whole-" (name whole) " reference")))
-  (formula/ref-marker (addr/make col row)))
+  ([node] (ref->addr node nil))
+  ([{:keys [sheet whole col row]} ctx]
+   (when (and sheet (not (local-sheet? sheet ctx)))
+     (unsupported! (str "cross-sheet reference to " sheet)))
+   (when whole (unsupported! (str "whole-" (name whole) " reference")))
+   (formula/ref-marker (addr/make col row))))
 
 (defn- range-form
   "A `:range` node as range sugar, refused past `max-range-cells` — a whole
    column is ~1M cells and ranges expand statically to one ref per cell."
-  [{:keys [left right]}]
-  (let [a (second (ref->addr left)) b (second (ref->addr right))
-        {ca :ci ra :ri} (addr/parse a)
-        {cb :ci rb :ri} (addr/parse b)
-        n (* (inc (abs (- ca cb))) (inc (abs (- ra rb))))]
-    (when (> n max-range-cells)
-      (unsupported! (str "range covers " n " cells (max " max-range-cells ")")))
-    (formula/range-marker a b)))
+  ([node] (range-form node nil))
+  ([{:keys [left right]} ctx]
+   (let [a (second (ref->addr left ctx)) b (second (ref->addr right ctx))
+         {ca :ci ra :ri} (addr/parse a)
+         {cb :ci rb :ri} (addr/parse b)
+         n (* (inc (abs (- ca cb))) (inc (abs (- ra rb))))]
+     (when (> n max-range-cells)
+       (unsupported! (str "range covers " n " cells (max " max-range-cells ")")))
+     (formula/range-marker a b))))
 
 (defn- coll-arg
   "One collection form from Excel aggregate args: a single range (or array
@@ -279,22 +303,54 @@
   [nm]
   (loop [x nm] (if (@sandbox-names x) (recur (str x "_")) (symbol x))))
 
+(declare ast->form)
+
+(defn- resolve-name
+  "A workbook DEFINED NAME as the thing it refers to.
+
+   Excel stores a name's target as a formula string of its own — `Tax_Rate` is
+   `Data!$B$1`, `Sales` is `Data!$B$2:$B$10`, and a name may even be an
+   expression (`=Data!$B$1*2`). So resolution is the translator calling itself:
+   parse what the name refers to, translate THAT, and splice it in. Every
+   refusal the ordinary path can make — cross-sheet, whole-column, over the
+   range cap — applies unchanged, and a name pointing at another name resolves
+   for free.
+
+   The name itself does not survive into the formula. Excel resolves a name to
+   an address at parse time too, and keeping it would mean a runtime indirection
+   (`$(…)`) that costs a structural rebuild on every edit. What SaltRim offers
+   instead, for names you write yourself, is `(def sales \"B2:B10\")` in the
+   sheet's definitions library plus `$(sales)` — the same idea, opted into per
+   formula rather than imposed on every imported one."
+  [nm scope ctx]
+  (let [target (get (:names ctx) nm)]
+    (cond
+      (nil? target)             (unsupported! (str "defined name " nm))
+      ((:seen ctx #{}) nm)      (unsupported! (str "defined name " nm " refers to itself"))
+      :else
+      (let [ast (try (xlp/parse target)
+                     (catch Exception _
+                       (unsupported! (str "defined name " nm " refers to " target))))]
+        (ast->form ast scope (update ctx :seen (fnil conj #{}) nm))))))
+
 (defn ast->form
   "One rechentafel AST node -> a SaltRim marker form. `scope` maps the Excel
-   `LET` names currently in scope to the symbols they were translated as.
+   `LET` names currently in scope to the symbols they were translated as, and
+   `ctx` carries the workbook around it (see the context comment above).
 
    Throws (ex-info ::unsupported) on anything outside the vocabulary — the
    caller falls back to the cell's cached value. Every refusal names the
    construct it refused, because that string becomes the cell's audit comment."
-  ([node] (ast->form node {}))
-  ([{:keys [op] :as n} scope]
-   (let [go #(ast->form % scope)]
+  ([node] (ast->form node {} nil))
+  ([node scope] (ast->form node scope nil))
+  ([{:keys [op] :as n} scope ctx]
+   (let [go #(ast->form % scope ctx)]
      (case op
        :num    (num-lit (:value n))
        :str    (:value n)
        :bool   (:value n)
-       :ref    (ref->addr n)
-       :range  (range-form n)
+       :ref    (ref->addr n ctx)
+       :range  (range-form n ctx)
        :binop  (list (bin-op (:sym n)) (go (:left n)) (go (:right n)))
        :unop   (let [v (go (:arg n))]
                  (case (:sym n)
@@ -312,13 +368,13 @@
                      (reduce (fn [[sc ps] [nm node]]
                                (let [sym (safe-local nm)]
                                  ;; each binding sees the ones before it, not itself
-                                 [(assoc sc nm sym) (conj ps sym (ast->form node sc))]))
+                                 [(assoc sc nm sym) (conj ps sym (ast->form node sc ctx))]))
                              [scope []] (:bindings n))]
-                 (list 'let (vec pairs) (ast->form (:body n) scope')))
-       ;; a bare name is a LET local if one is in scope, else a defined name —
-       ;; which needs named regions (roadmap item K) before it can mean anything
+                 (list 'let (vec pairs) (ast->form (:body n) scope' ctx)))
+       ;; a bare name is a LET local if one is in scope, else one of the
+       ;; workbook's DEFINED NAMES, resolved to what it refers to
        :name   (or (scope (:value n))
-                   (unsupported! (str "defined name " (:value n))))
+                   (resolve-name (:value n) scope ctx))
        :err       (unsupported! (str "error literal " (:text n "")))
        :table-ref (unsupported! (str "structured table reference to " (:table n)))
        :spill-ref (unsupported! "spill reference (A1#)")
@@ -327,11 +383,14 @@
 
 (defn translate-formula
   "Excel formula string -> SaltRim source \"=(…)\". Throws (::unsupported in
-   ex-data) when it can't be translated. Takes only the string: the AST parser
-   needs no workbook context, which is why the sheet index and
-   `FormulaParsingWorkbook` this used to require are gone."
-  [fstr]
-  (str "=" (formula/unparse (ast->form (xlp/parse fstr)))))
+   ex-data) when it can't be translated.
+
+   The AST parser needs no workbook, which is why the sheet index and
+   `FormulaParsingWorkbook` this used to require are gone. `ctx` is optional and
+   carries only what the TEXT cannot say: which tab this is, and what the
+   workbook's defined names point at."
+  ([fstr] (translate-formula fstr nil))
+  ([fstr ctx] (str "=" (formula/unparse (ast->form (xlp/parse fstr) {} ctx)))))
 
 ;; --- cell values / styles --------------------------------------------------
 
@@ -418,7 +477,8 @@
   "One physical cell -> {:addr :value :style :cached :original :fallback} —
    :value nil means skip (blank); :cached/:original only for translated
    formulas; :fallback {:formula :reason} when translation failed."
-  [^XSSFCell c]
+  ([c] (read-cell c nil))
+  ([^XSSFCell c ctx]
   (let [a (addr/make (.getColumnIndex c) (.getRowIndex c))
         [props dropped] (style-props c)
         base {:addr a :style props :dropped-mask dropped}]
@@ -434,7 +494,7 @@
       (let [fstr (.getCellFormula c)
             cv   (cached-value c)]
         (try
-          (assoc base :value (translate-formula fstr)
+          (assoc base :value (translate-formula fstr ctx)
                  :cached cv :original fstr)
           (catch Exception e
             (-> base
@@ -443,7 +503,7 @@
                        :fallback {:formula fstr
                                   :reason (or (::unsupported (ex-data e)) (.getMessage e))})
                 (assoc-in [:style :comment] (str "XLSX: =" fstr))))))
-      (assoc base :value nil))))
+      (assoc base :value nil)))))
 
 (defn- read-sizing [^XSSFSheet s used-cols]
   (let [dcw-chars (.getDefaultColumnWidth s)
@@ -460,10 +520,34 @@
      :dcw (max 24 (Math/round (+ (* 7.0 dcw-chars) 5.0)))
      :drh (max 12 (Math/round (* drh-pts (/ 4.0 3.0))))}))
 
+(defn- defined-names
+  "The workbook's defined names, as {name refers-to-formula}, for the sheet at
+   `idx`.
+
+   A name is either GLOBAL (`getSheetIndex` -1) or scoped to one sheet, and a
+   sheet-scoped name shadows a global of the same name — so the global map is
+   built first and the local one merged over it. Skipped: POI's built-in names
+   (print areas, `_xlnm.*`), function names, and anything whose target is
+   missing, since none of those can appear in a cell formula."
+  [^XSSFWorkbook wb idx]
+  (let [ns' (try (.getAllNames wb) (catch Exception _ nil))
+        keep? (fn [^org.apache.poi.ss.usermodel.Name n]
+                (and (not (.isFunctionName n))
+                     (not (.isDeleted n))
+                     (some? (.getNameName n))
+                     (not (str/starts-with? (str (.getNameName n)) "_xlnm"))
+                     (some? (try (.getRefersToFormula n) (catch Exception _ nil)))))
+        entries (fn [pred]
+                  (into {} (for [^org.apache.poi.ss.usermodel.Name n ns'
+                                 :when (and (keep? n) (pred (.getSheetIndex n)))]
+                             [(.getNameName n) (.getRefersToFormula n)])))]
+    (merge (entries #(= -1 %)) (entries #(= idx %)))))
+
 (defn- read-tab [^XSSFWorkbook wb idx]
   (let [^XSSFSheet s (.getSheetAt wb idx)
+        ctx   {:tab (.getSheetName wb idx) :names (defined-names wb idx)}
         cells (vec (for [^XSSFRow row (seq s), ^XSSFCell c (seq row)
-                         :let [m (read-cell c)]
+                         :let [m (read-cell c ctx)]
                          :when (:value m)]
                      m))
         doc   (into {} (for [{:keys [addr value style]} cells]

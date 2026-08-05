@@ -436,7 +436,23 @@ token-order hazards baked in — a single-range `SUM` arriving as `AttrPtg(isSum
 `IF`/`CHOOSE` as a TRAILING `FuncVarPtg`, `IFERROR` as `NameXPxg` + `#external#`
 — and none of them exist for a node that knows its own name and arguments.
 Every refusal NAMES the construct (`cross-sheet reference to Other`,
-`defined name Tax_Rate`) because that string becomes the cell's audit `:comment`.
+`structured table reference to Sales`) because that string becomes the cell's
+audit `:comment`.
+**DEFINED NAMES resolve** (`xlsx/defined-names` + `resolve-name`): Excel stores a
+name's target as a formula string of its own (`Tax_Rate` → `Data!$B$1`), so
+resolution is the translator CALLING ITSELF on that string — which gets ranges,
+expressions (`=Data!$B$1*2`) and a name-over-a-name for free, and keeps every
+refusal (cross-sheet, whole-column, range cap) unchanged. A `:seen` set refuses a
+self-referential name instead of overflowing the stack. That needed a
+translation CONTEXT — `{:tab :names :seen}` threaded through `ast->form` — whose
+other job is that a reference qualified with the tab being imported (`Data!$B$1`)
+is LOCAL, not cross-sheet: a defined name is always sheet-qualified, so without
+that every resolved name refused itself. `translate-formula` still takes a bare
+string (ctx optional). The name does NOT survive into the formula: Excel resolves
+it to an address at parse time too, and keeping it would mean a `$(…)` runtime
+indirection, which costs a structural rebuild of every dynamic dependent on ANY
+edit. The native idiom for a named range is `(def sales "B2:B10")` + `$(sales)`,
+opted into per formula.
 Spike: `spikes/11-excel-ast-import.clj`.
 **EXPORT goes back the same way** (`xlformula` ns): SaltRim marker form -> Excel
 AST -> `rechentafel.unparse`, so precedence, escaping and `$`-absolute refs are
