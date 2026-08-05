@@ -438,7 +438,36 @@ token-order hazards baked in — a single-range `SUM` arriving as `AttrPtg(isSum
 Every refusal NAMES the construct (`cross-sheet reference to Other`,
 `structured table reference to Sales`) because that string becomes the cell's
 audit `:comment`.
-**DEFINED NAMES resolve** (`xlsx/defined-names` + `resolve-name`): Excel stores a
+**A `:label` IS a NAME you can reference** — `$rate` reads the cell labelled
+`rate`, and the SAME label on several cells is a named range (`$sales`
+row-major; `#area sales` as rows, when they form a full rectangle). Resolution
+happens at **parse**, against the sheet's `:labels` index, so `deps` / the cycle
+check / the compiler see the ordinary ref markers an address-written formula
+produces — a name therefore costs NOTHING at recompute time, unlike `$(…)`,
+whose target is only known while the body runs and which rebuilds its dependents
+on every edit. The price is paid where it belongs: `:nreaders` (name →
+formulas using it) drives a structural rebuild when a label MOVES, arrives or
+goes. `$name` is tried after the address and relative forms, so **an address
+always wins** (a cell labelled `q1` is unreachable as `$q1` — that is column Q
+row 1), and `shift-refs` matching the same address shape is what keeps a real
+name from shifting on paste. Only a LITERAL label names a cell (`sheet/name-of`):
+a computed one would let any edit restructure formulas elsewhere. An unresolved
+name is `#NAME?` at COMPUTE time, not a refused write (`sheet/unresolved` emits a
+call on a host fn object, the `if-error` trick) — you must be able to write the
+formula before labelling the cell, and a formula must survive its label being
+removed, since `:nreaders` is what re-installs it. `load-document!` indexes
+labels in a step 0 BEFORE values, because labels are style props and styles load
+last. `errors/classify` now honours an explicit `:code` in ex-data. Also fixed
+in passing: `formula/ref-marker` CANONICALISES, so `$a1` no longer depends on a
+cell nobody can write.
+**DEFINED NAMES become labels** (`xlsx/name-labels`): a name pointing straight at
+cells on the tab is set as their `:label`, and the formula keeps it —
+`=A1*Tax_Rate` imports as `=(* $A1 $Tax_Rate)`, a named RANGE as the same label
+on every cell of it. `coll-arg` flattens a name argument whatever it is, because
+the importer cannot know whether `Sales` labels one cell or nine (a scalar must
+be wrapped to be summable, a range must not be or `COUNT` answers 1). Names with
+no cell to sit on — an expression like `=Data!$B$1*2` — are still resolved
+inline: (`xlsx/defined-names` + `resolve-name`): Excel stores a
 name's target as a formula string of its own (`Tax_Rate` → `Data!$B$1`), so
 resolution is the translator CALLING ITSELF on that string — which gets ranges,
 expressions (`=Data!$B$1*2`) and a name-over-a-name for free, and keeps every

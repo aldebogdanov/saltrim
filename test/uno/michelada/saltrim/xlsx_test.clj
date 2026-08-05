@@ -249,9 +249,13 @@
     (testing "a name resolves to its target, and the formula stays LIVE"
       (let [{:keys [sh]} (store/load-record "dev-ann__named-Data")]
         (try
-          (is (= "=(* $A1 $A3)" (sheet/raw sh "A5")))
+          ;; the NAME survives: it became the label of the cell it points at
+          (is (= "=(* $A1 $Rate)" (sheet/raw sh "A5")))
+          (is (= "Rate" (sheet/style-value sh "A3" :label)))
           (is (= 20.0 (sheet/value sh "A5")))
-          (is (= "=(sum $A1:A2)" (sheet/raw sh "A6")) "a named RANGE too")
+          (is (= "=(sum (flatten (vector $Sales)))" (sheet/raw sh "A6"))
+              "a named RANGE too — the same label on every cell of it")
+          (is (= ["A1" "A2"] (sheet/labelled sh "Sales")))
           (is (= 300 (sheet/value sh "A6")))
           (is (= "=(* $A3 2)" (sheet/raw sh "A7")) "a name may be an expression")
           (is (= 0.4 (sheet/value sh "A7")))

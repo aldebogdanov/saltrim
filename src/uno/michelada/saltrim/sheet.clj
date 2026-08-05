@@ -31,6 +31,8 @@
         meta     (atom {})
         dyn      (atom {})        ; addr -> #{resolved dynamic-ref targets} (see rt/lookup-dyn)
         readers  (atom {})        ; addr -> #{addrs whose :deps name it} (inverse of :meta)
+        labels   (atom {})        ; label -> sorted [addr …]  (the cells carrying it)
+        nreaders (atom {})        ; label -> #{addrs of formulas written as $label}
         slow     (atom nil)       ; the cell that wedged the sheet, if any (see below)
         styles   (atom {})
         cols     (atom {})        ; ci -> width-px  (sparse; falls back to @dcw)
@@ -42,6 +44,7 @@
         rt       (ctx/create-execution-context
                   {:metadata {:registry registry :vals vals :meta meta :dyn dyn}})]
     {:rt rt :registry registry :vals vals :meta meta :dyn dyn :readers readers
+     :labels labels :nreaders nreaders
      :slow slow :styles styles
      :cols cols :rows rows :dcw dcw :drh drh :sci sci :defs defs}))
 
@@ -61,6 +64,126 @@
       (re-matches #"[-+]?\d+" t)                (Long/parseLong t)
       (re-matches #"[-+]?\d*\.\d+([eE]\d+)?" t) (Double/parseDouble t)
       :else                                     t)))
+
+;; --- names (cell labels, referenced as `$label`) ----------------------------
+;;
+;; A cell's `:label` used to do one job: title its node in the dependency-graph
+;; view. It is also, already, a NAME for the cell — so `$sales` reads it, and the
+;; same label on several cells names all of them.
+;;
+;; Resolution happens at PARSE, against `:labels`, so what reaches `deps`, the
+;; cycle check and the compiler is the ordinary ref markers an address-written
+;; formula produces. Nothing downstream knows the difference, which is why this
+;; costs nothing at recompute time — unlike `$(…)`, whose target is only known
+;; while the body runs and which therefore rebuilds its dependents on every edit.
+;;
+;; The price is paid where it belongs: when a LABEL moves, every formula written
+;; against that name has to be re-resolved. `:nreaders` is that index.
+
+(def MAX-NAME-CELLS
+  "Cap on the cells one name may stand for — the same reason `MAX-RANGE-CELLS`
+   exists: a name expands statically to one ref per cell."
+  formula/MAX-RANGE-CELLS)
+
+(defn name-of
+  "The NAME a `:label` source defines, or nil.
+
+   Only a LITERAL label names a cell. A label may be a formula like any other
+   style prop (`=(str \"Q\" $A1)`), and a name that recomputes would mean every
+   formula written against it needs a structural rebuild whenever some other
+   cell changes — which is precisely the cost this design exists to avoid. A
+   computed label still titles the cell's node in the graph view."
+  [raw]
+  (let [t (some-> raw str str/trim)]
+    (when-not (or (str/blank? t) (str/starts-with? t "=")) t)))
+
+(defn- row-major [addrs]
+  (vec (sort-by (fn [a] (let [{:keys [ci ri]} (addr/parse a)] [ri ci])) addrs)))
+
+(defn labelled
+  "The addresses carrying `nm`, in row-major order."
+  [{:keys [labels]} nm]
+  (get @labels nm))
+
+(defn- rectangle
+  "`addrs` as a vector of ROW vectors when they form a FULL rectangle, else nil.
+   `#area sales` needs a real shape; a scattered or ragged group has none."
+  [addrs]
+  (let [ps   (map addr/parse addrs)
+        cs   (distinct (map :ci ps))
+        rs   (distinct (map :ri ps))
+        want (* (count cs) (count rs))]
+    (when (and (= want (count addrs))
+               (= (count cs) (inc (- (apply max cs) (apply min cs))))
+               (= (count rs) (inc (- (apply max rs) (apply min rs)))))
+      (vec (for [r (sort rs)]
+             (vec (for [c (sort cs)] (addr/make c r))))))))
+
+(defn- unresolved
+  "A form that FAILS when the cell computes, rather than when it is written.
+
+   A name that does not resolve is `#NAME?`, exactly as in Excel — not a refused
+   edit. You must be able to write `=(* $A1 $rate)` before labelling the cell
+   `rate`, and a formula that already reads a name must survive that label being
+   removed, because `:nreaders` is what re-installs it when the name comes back.
+   A refusal at write time would lose the formula in both cases.
+
+   Emitted as a call on a host fn OBJECT, the same trick `if-error` uses: no
+   helper var has to exist inside the sandbox for the generated form to call."
+  [msg code]
+  (list (fn [] (throw (ex-info msg {:code code})))))
+
+(defn- resolver
+  "The `resolve` fn `formula/parse` uses: a name and a shape -> marker form."
+  [sheet]
+  (fn [nm shape]
+    (let [addrs (labelled sheet nm)]
+      (cond
+        (empty? addrs)
+        (unresolved (str "no cell is labelled `" nm "`") :name)
+
+        (> (count addrs) MAX-NAME-CELLS)
+        (unresolved (str "`" nm "` covers " (count addrs) " cells (max "
+                         MAX-NAME-CELLS ")")
+                    :num)
+
+        (= :area shape)
+        (if-let [rows (rectangle addrs)]
+          (cons 'vector (for [row rows] (cons 'vector (map formula/ref-marker row))))
+          (unresolved (str "the cells labelled `" nm "` are not a rectangle") :ref))
+
+        (= 1 (count addrs)) (formula/ref-marker (first addrs))
+        :else               (cons 'vector (map formula/ref-marker addrs))))))
+
+(defn- reindex-names!
+  "Point `:nreaders` at the names `addr`'s formula uses now, dropping the ones it
+   used before. Same contract as `reindex-readers!` — it reads the OLD names out
+   of `:meta`, so it runs BEFORE the write that replaces them."
+  [{:keys [meta nreaders]} addr new-names]
+  (let [old (set (get-in @meta [addr :names]))
+        new (set new-names)]
+    (when (not= old new)
+      (swap! nreaders
+             (fn [idx]
+               (as-> idx i
+                 (reduce (fn [m n] (let [s (disj (get m n) addr)]
+                                     (if (seq s) (assoc m n s) (dissoc m n))))
+                         i (remove new old))
+                 (reduce (fn [m n] (update m n (fnil conj #{}) addr))
+                         i (remove old new))))))))
+
+(defn- reindex-labels!
+  "Move `addr` from label `old` to label `new` in the `:labels` index. Returns
+   the names whose meaning changed, so the caller can rebuild what reads them."
+  [{:keys [labels]} addr old new]
+  (when (not= old new)
+    (swap! labels
+           (fn [idx]
+             (cond-> idx
+               old (as-> i (let [v (vec (remove #{addr} (get i old)))]
+                             (if (seq v) (assoc i old v) (dissoc i old))))
+               new (update new #(row-major (conj (set %) addr))))))
+    (remove nil? [old new])))
 
 (defn- reindex-readers!
   "Point the `:readers` index at `addr`'s NEW dependencies and drop the edges its
@@ -160,6 +283,7 @@
           (swap! registry dissoc addr)
           (swap! vals dissoc addr)
           (reindex-readers! sheet addr nil)
+          (reindex-names! sheet addr nil)
           (swap! meta dissoc addr)
           (swap! dyn dissoc addr)
           true)
@@ -179,6 +303,7 @@
             (reset! vs v)
             (swap! vals assoc addr vs)))
         (reindex-readers! sheet addr nil)
+          (reindex-names! sheet addr nil)
         (swap! meta assoc addr {:raw raw :kind :literal})
         (swap! dyn dissoc addr)
         (if (= prev-kind :literal)
@@ -188,7 +313,8 @@
               true)))
 
       :formula
-      (let [{:keys [form deps]} (formula/parse (subs (str/trim raw) 1) addr)
+      (let [{:keys [form deps names]}
+            (formula/parse (subs (str/trim raw) 1) addr (resolver sheet))
             _  (when (would-cycle? sheet addr deps)
                  (throw (ex-info "circular reference" {:addr addr :deps deps})))
             sp (formula/compile @sci form addr)]
@@ -198,7 +324,9 @@
         (swap! dyn dissoc addr)
         (swap! registry assoc addr sp)
         (reindex-readers! sheet addr deps)
+        (reindex-names! sheet addr names)
         (swap! meta assoc addr (cond-> {:raw raw :kind :formula :deps deps}
+                                 (seq names)             (assoc :names names)
                                  (formula/dynamic? form) (assoc :dyn? true)))
         true))))
 
@@ -422,19 +550,47 @@
           {:raw raw :kind :formula :deps deps :spin (formula/compile @sci form)}))
       :else {:raw raw :kind :literal :deps #{} :spin nil})))
 
+(declare rebuild-name-readers!)
+
 (defn set-style!
   "Set style PROP (keyword, e.g. :bg) of `addr` from raw source. Blank removes
-   it. Returns the sheet."
+   it. Returns the sheet.
+
+   `:label` is the one prop that means something outside the style layer: it
+   NAMES the cell, so every formula written `$label` has to be re-resolved when
+   it moves, arrives or goes away."
   [{:keys [rt styles] :as sheet} addr prop raw]
   (check-addr! addr)                 ; styled cells are laid out too — same bound
   (let [addr (addr/canon addr)]      ; and keyed the same way (see addr/canon)
     (binding [ec/*execution-context* rt]
-      (when-let [old (get-in @styles [addr prop])]
-        (when-let [sp (:spin old)] (spin-core/cleanup-spin! sp)))
-      (if-let [e (compile-style sheet addr raw)]
-        (swap! styles assoc-in [addr prop] e)
-        (swap! styles update addr dissoc prop))))
+      (let [was (when (= :label prop) (name-of (get-in @styles [addr prop :raw])))]
+        (when-let [old (get-in @styles [addr prop])]
+          (when-let [sp (:spin old)] (spin-core/cleanup-spin! sp)))
+        (if-let [e (compile-style sheet addr raw)]
+          (swap! styles assoc-in [addr prop] e)
+          (swap! styles update addr dissoc prop))
+        (when (= :label prop)
+          (when-let [changed (reindex-labels! sheet addr was (name-of raw))]
+            (rebuild-name-readers! sheet changed))))))
   sheet)
+
+(defn- rebuild-name-readers!
+  "Re-install every formula written against one of `names`, so it re-resolves to
+   where the label is NOW. A rebuild rather than a recompute: the addresses the
+   formula awaits are baked in at parse, which is the whole reason a name costs
+   nothing until it moves."
+  [{:keys [meta nreaders] :as sheet} names]
+  (doseq [nm    names
+          addr  (get @nreaders nm)
+          :let  [raw (get-in @meta [addr :raw])]
+          :when raw]
+    (try (write-cell! sheet addr raw)
+         (catch Exception e
+           ;; a name that no longer resolves is the cell's error to report, not
+           ;; a reason to refuse the label edit that caused it
+           (swap! meta assoc addr {:raw raw :kind :error
+                                   :err (.getMessage e)
+                                   :errcode (errors/classify e)})))))
 
 (defn- rebuild-styles!
   "Recompile every style formula that references one of `addrs`. Called by
@@ -804,6 +960,15 @@
         loaded  (volatile! #{})
         styled  (volatile! #{})]
     (binding [ec/*execution-context* rt]
+      ;; 0. LABELS first, and from the raw source rather than the compiled style
+      ;; layer: a formula in step 1 may be written `$sales`, and a name that
+      ;; resolves to nothing is a `#NAME?` cell. Styles are only installed in
+      ;; step 3, so without this pass every name in the document would fail to
+      ;; resolve exactly once — on the load that was supposed to restore it.
+      (doseq [[addr {:keys [style]}] entries
+              :let [nm (name-of (:label style))]
+              :when nm]
+        (reindex-labels! sheet addr nil nm))
       ;; 1. every value cell, with no dependent cascade
       (doseq [[addr {:keys [value]}] entries :when value]
         (try (write-cell! sheet addr value)
@@ -813,6 +978,7 @@
                ;; this REPLACES the meta entry, so the deps it used to declare
                ;; have to leave the index with it
                (reindex-readers! sheet addr nil)
+               (reindex-names! sheet addr nil)
                (swap! meta assoc addr {:raw value :kind :error
                                        :err (.getMessage e)
                                        :errcode (errors/classify e)}))))

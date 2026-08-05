@@ -143,12 +143,19 @@
 (defn- coll-arg
   "One collection form from Excel aggregate args: a single range (or array
    constant, which is already a collection) stays as it is; scalars become a
-   vector; a mix flattens ranges into the rest."
+   vector; a mix flattens ranges into the rest.
+
+   A NAME is flattened whatever it is. `SUM(Sales)` cannot know here whether
+   `Sales` labels one cell or nine — that is a fact about the sheet, settled
+   when the formula is parsed against it — and the two want opposite treatment:
+   a scalar must be wrapped to be summable, a range must not be wrapped or
+   `COUNT` answers 1. `(flatten (vector …))` is right for both."
   [args]
   (cond
     (and (= 1 (count args))
          (or (formula/range-ref? (first args)) (vector? (first args)))) (first args)
-    (some formula/range-ref? args) (list 'flatten (apply list 'vector args))
+    (or (some formula/range-ref? args) (some formula/name-ref? args))
+    (list 'flatten (apply list 'vector args))
     :else (apply list 'vector args)))
 
 (def ^:private boolish-heads
@@ -327,6 +334,10 @@
     (cond
       (nil? target)             (unsupported! (str "defined name " nm))
       ((:seen ctx #{}) nm)      (unsupported! (str "defined name " nm " refers to itself"))
+      ;; the name is becoming a LABEL on the cells it points at, so keep it:
+      ;; `=A1*Tax_Rate` arrives as `=(* $A1 $Tax_Rate)` and still reads like the
+      ;; workbook it came from
+      ((:labelled ctx #{}) nm)  (formula/name-marker nm)
       :else
       (let [ast (try (xlp/parse target)
                      (catch Exception _
@@ -543,11 +554,47 @@
                              [(.getNameName n) (.getRefersToFormula n)])))]
     (merge (entries #(= -1 %)) (entries #(= idx %)))))
 
+(defn- name-labels
+  "{name [addr …]} for the defined names that point straight at cells ON THIS
+   TAB, so the name can become their `:label` and survive into the formulas.
+
+   SaltRim labels a cell, and a labelled cell is referenced as `$label` — which
+   is what a defined name IS. So `Tax_Rate` becomes the label of the cell it
+   names, `Sales` the label of every cell in its range (the same label on
+   several cells is exactly a named range), and `=A1*Tax_Rate` imports as
+   `=(* $A1 $Tax_Rate)` rather than having the name resolved away.
+
+   Only names that resolve to a plain reference or range qualify. A name defined
+   as an EXPRESSION (`=Data!$B$1*2`) has no cell to sit on and is still inlined,
+   as is anything the translator refuses."
+  [ctx]
+  (into {}
+        (for [[nm target] (:names ctx)
+              :let [addrs (try
+                            (let [{:keys [op] :as ast} (xlp/parse target)]
+                              (case op
+                                :ref   [(second (ref->addr ast ctx))]
+                                :range (let [[_ a b] (range-form ast ctx)]
+                                         (addr/range-cells a b))
+                                nil))
+                            (catch Exception _ nil))]
+              :when (and (seq addrs) (<= (count addrs) formula/MAX-RANGE-CELLS))]
+          [nm (vec addrs)])))
+
 (defn- read-tab [^XSSFWorkbook wb idx]
   (let [^XSSFSheet s (.getSheetAt wb idx)
-        ctx   {:tab (.getSheetName wb idx) :names (defined-names wb idx)}
+        base  {:tab (.getSheetName wb idx) :names (defined-names wb idx)}
+        lbls  (name-labels base)
+        ctx   (assoc base :labelled (set (keys lbls)))
+        ;; addr -> the name to label it with. Two names on one cell is legal in
+        ;; Excel and a cell has one label, so the last one wins; both still
+        ;; resolve, since the loser is inlined by `resolve-name`.
+        label-of (into {} (for [[nm addrs] lbls, a addrs] [a nm]))
         cells (vec (for [^XSSFRow row (seq s), ^XSSFCell c (seq row)
-                         :let [m (read-cell c ctx)]
+                         :let [m (read-cell c ctx)
+                               m (cond-> m
+                                   (label-of (:addr m))
+                                   (assoc-in [:style :label] (label-of (:addr m))))]
                          :when (:value m)]
                      m))
         doc   (into {} (for [{:keys [addr value style]} cells]

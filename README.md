@@ -77,6 +77,38 @@ point of having the shape:
 names — no `xl/` prefix needed. Hand one a flat `$A1:B2` and it tells you so
 rather than quietly computing something else.
 
+### Naming cells
+
+Give a cell a **label** (format row **🎨** → `label`) and the name becomes a
+reference. `$rate` reads the cell labelled `rate`, wherever it is:
+
+```clojure
+=(* $A1 $rate)                ; instead of =(* $A1 $B7)
+```
+
+Put the **same** label on several cells and the name means all of them, in
+row-major order — a named range:
+
+```clojure
+=(sum $sales)                 ; every cell labelled `sales`
+=(transpose #area grid)       ; and as rows, if they form a full rectangle
+```
+
+A name costs nothing to use: it is resolved when the formula is written, so what
+the engine sees is an ordinary reference. Two consequences worth knowing:
+
+- **A name follows its cell.** Insert a row above the labelled cell and every
+  `$rate` still finds it — no reference rewriting, because the label moved with
+  the cell. Move the label to a different cell and the formulas re-point there.
+- **An address always wins.** A cell labelled `q1` is not reachable as `$q1`;
+  that spelling is already column Q, row 1. Names with digits at the end are
+  worth avoiding.
+
+A name nothing carries reads `#NAME?`, so you can write the formula first and
+label the cell afterwards. Labels that are themselves formulas (`=(str "Q" $A1)`)
+still title the graph node but do not name the cell — a name that recomputes
+would mean any edit anywhere could restructure formulas elsewhere.
+
 **Relative references** point to a cell by *offset from the cell itself*, written
 `$<col><row>` where each of col/row is `_` (same index), `+N`, or `-N`. They are
 resolved per cell, so they **survive copy/paste unchanged** — copy one down or
@@ -345,7 +377,7 @@ Two properties in the same dropdown describe a cell instead of painting it:
 
 | Property | Purpose |
 |----------|---------|
-| `label` | **names** the cell — a short identifier shown instead of its address in the 🕸 dependency graph |
+| `label` | **names** the cell — say `$label` in any formula instead of its address, and see the name in the 🕸 dependency graph |
 | `comment` | a **note about** the cell — free prose for whoever reads the sheet next |
 
 A commented cell is marked with a small flag in its top-right corner and shows
@@ -489,8 +521,8 @@ dependency depth. Click a node to select that cell.
 
 To make nodes readable, give a cell a **label**: open the format row (**🎨**),
 pick `label` in the property dropdown, and type a name (e.g. `revenue`). The
-graph then shows the name instead of the address (`A1`). Labels are display-only
-for now (you still reference cells by address / `$A1` in formulas).
+graph then shows the name instead of the address (`A1`) — and formulas can use
+it too, see [Naming cells](#naming-cells).
 
 > On large real-world tables the graph gets dense — it's intentionally a simple
 > first version (capped, basic layout); zoom/filtering are future polish.
@@ -594,12 +626,11 @@ Values, styling, number-format masks and column/row sizes carry over; dates
 become ISO strings (`2024-03-15`); text that looks like a number or a formula
 is protected with a leading apostrophe (`'123` — works when typing, too).
 
-**Defined names** are resolved to what they point at: `=A1*Tax_Rate` arrives as
-`=(* $A1 $B$1)`, live. A name may be a cell, a range, an expression, or another
-name, and a sheet-scoped one shadows a global of the same name — the same rules
-Excel uses. The *name* itself doesn't survive into the formula (Excel resolves it
-to an address too); to name a range in SaltRim, put `(def sales "B2:B10")` in the
-sheet's ƒ library and write `$(sales)`.
+**Defined names become labels.** `=A1*Tax_Rate` arrives as `=(* $A1 $Tax_Rate)`,
+live, with `Tax_Rate` as the label of the cell it named — and a named *range*
+becomes the same label on every cell of it. A name may also be an expression or
+another name, and a sheet-scoped one shadows a global of the same name (Excel's
+own rules); those without a cell to sit on are resolved inline instead.
 
 **Anything untranslatable** (cross-sheet references, whole-column ranges,
 structured table references, other functions) is imported as its last

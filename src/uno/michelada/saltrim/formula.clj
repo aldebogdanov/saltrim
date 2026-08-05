@@ -56,12 +56,37 @@
 ;; --- parse --------------------------------------------------------------
 
 (defn ref-marker
-  "The parsed representation of a cell reference: (::ref \"A1\")."
-  [addr] (list ::ref addr))
+  "The parsed representation of a cell reference: (::ref \"A1\").
+
+   The address is CANONICALISED. Addresses are keys — in `:meta`, in `:readers`,
+   in the datom key — and the renderer only ever asks for the canonical form, so
+   a formula written `$a1` used to depend on a cell nobody could ever write."
+  [a] (list ::ref (cond-> a (addr/valid? a) addr/canon)))
 
 (defn ref?
   "Is `x` a parsed cell-ref marker?"
   [x] (and (seq? x) (= ::ref (first x))))
+
+(defn name-marker
+  "The parsed representation of a reference BY NAME — `$sales`, or `#area sales`
+   when `shape` is `:area`: (::name \"sales\" :flat|:area).
+
+   A name is a cell's `:label`, which until now only titled its node in the
+   graph view. The same label on several cells names all of them, so a name
+   denotes one cell or a group of them.
+
+   The marker never survives `parse`: given a resolver (which is to say, given a
+   sheet), it is replaced by the ordinary ref markers the label currently points
+   at, so DEPS, the cycle check, compilation and reactivity all see exactly what
+   an address-written formula produces. Resolving at parse rather than at
+   runtime is the whole point — a runtime indirection is `$(…)`, and that costs
+   a structural rebuild of every dynamic dependent on any edit."
+  ([nm] (name-marker nm :flat))
+  ([nm shape] (list ::name nm shape)))
+
+(defn name-ref?
+  "Is `x` a parsed name marker?"
+  [x] (and (seq? x) (= ::name (first x))))
 
 (defn dynref-marker
   "The parsed representation of a DYNAMIC cell/range reference `$(expr)`:
@@ -151,9 +176,11 @@
               (expand-range a b)))
    ;; #area A1:B2 -> (vector (vector (::ref "A1") (::ref "B1"))
    ;;                        (vector (::ref "A2") (::ref "B2")))
+   ;; #area sales -> the same, from the cells LABELLED `sales`, which must form
+   ;;                a full rectangle (resolved against the sheet, see `parse`)
    'area  (fn [sym]
             (let [[a b] (str/split (str sym) #":")]
-              (expand-area a b)))})
+              (if b (expand-area a b) (name-marker (str sym) :area))))})
 
 (defn deps
   "Cell addresses referenced by a marker form."
@@ -180,6 +207,20 @@
       (if b
         (expand-range a b)
         (ref-marker a)))))
+
+;; `$sales` — a `$`-ref to a NAME rather than an address, where the name is a
+;; cell's `:label`. Tried only after the address and relative forms, so an
+;; ADDRESS ALWAYS WINS: a cell labelled `q1` is not reachable as `$q1`, because
+;; that spelling is already column Q row 1. (`shift-refs` matches the same
+;; address shape, which is what keeps a real name from being shifted on paste.)
+(def ^:private name-ref-re #"\$([\p{L}_][\p{L}\p{N}_.?!*+<>=-]*)")
+
+(defn- name-ref
+  "Marker for a `$name` symbol, or nil if `x` isn't one."
+  [x]
+  (when (symbol? x)
+    (when-let [[_ nm] (re-matches name-ref-re (name x))]
+      (name-marker nm))))
 
 ;; A RELATIVE `$`-ref names a cell by OFFSET from the owner cell, so it survives
 ;; copy/paste unchanged (re-resolved per destination) — the inverse of the
@@ -330,12 +371,18 @@
   (list 'fn (pct-params body) (pct-alias body (apply list body))))
 
 (defn parse
-  "Formula string (without leading =) -> {:form :deps}.
+  "Formula string (without leading =) -> {:form :deps :names}.
 
    Bare `$A1` / `$A3:D8` symbols are terse sugar for `#cell A1` / `#cells A3:D8`
    (see `dollar-ref`) — usable in any formula. `$(expr)` is a DYNAMIC ref
    (see `dynref-marker`); refs inside its expression are ordinary static deps
    (they drive re-resolution), the computed target is not.
+
+   `$sales` is a reference BY NAME — a cell's `:label` (see `name-marker`), and
+   `#area sales` the 2D form. `resolve` turns a name into the addresses it
+   currently stands for; without one the markers survive, which is what
+   `unparse` needs to write the name back out. `:names` reports the names the
+   formula used, so the sheet can rebuild it when a label moves.
 
    The source is read wrapped in parens (so a top-level `$(…)` — two reader
    forms — survives), fused, and must then be EXACTLY ONE form. That also
@@ -347,8 +394,9 @@
    `await` edge) without retyping the address. `$val` is only meaningful where
    an owner exists; in a plain value formula it stays an unknown symbol and SCI
    rejects it at compile."
-  ([s] (parse s nil))
-  ([s self]
+  ([s] (parse s nil nil))
+  ([s self] (parse s self nil))
+  ([s self resolve]
    (let [forms (fuse-dynrefs (edn/read-string {:readers readers}
                                               (str "(" (desugar-fn-literals s) "\n)")))
          _     (walk/postwalk
@@ -363,9 +411,21 @@
                 (fn [x]
                   (cond
                     (and self (= '$val x)) (ref-marker self)
-                    :else                  (or (rel-ref x self) (dollar-ref x) x)))
-                (first forms))]
-     {:form form :deps (deps form)})))
+                    :else (or (rel-ref x self) (dollar-ref x) (name-ref x) x)))
+                (first forms))
+         names (let [acc (volatile! #{})]
+                 (walk/postwalk (fn [x] (when (name-ref? x) (vswap! acc conj (second x))) x)
+                                form)
+                 @acc)
+         ;; resolve names LAST, so `deps` sees ordinary refs and nothing
+         ;; downstream — cycle check, compile, reactivity — knows the
+         ;; difference between a formula written by name and one by address
+         form  (cond-> form
+                 (and resolve (seq names))
+                 (->> (walk/postwalk
+                       (fn [x] (if (name-ref? x) (resolve (second x) (nth x 2)) x)))))]
+     (cond-> {:form form :deps (deps form)}
+       (seq names) (assoc :names names)))))
 
 ;; --- unparse (inverse of parse) ------------------------------------------
 
@@ -435,6 +495,9 @@
   [form]
   (cond
     (ref? form)       (str "$" (second form))
+    (name-ref? form)  (if (= :area (nth form 2))
+                        (str "#area " (second form))
+                        (str "$" (second form)))
     (dynref? form)    (str "$" (unparse (second form)))
     (range-ref? form) (str "$" (nth form 1) ":" (nth form 2))
     (area-ref? form)  (str "#area " (nth form 1) ":" (nth form 2))
