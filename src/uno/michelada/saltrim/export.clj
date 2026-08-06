@@ -16,6 +16,7 @@
    italic / alignment / number-format. Only the workbook WRITER is used here."
   (:require [clojure.string :as str]
             [uno.michelada.saltrim.addr :as addr]
+            [uno.michelada.saltrim.formula :as formula]
             [uno.michelada.saltrim.sheet :as sheet]
             [uno.michelada.saltrim.xlformula :as xlformula])
   (:import (java.io ByteArrayOutputStream)
@@ -121,6 +122,56 @@
         s (if (str/blank? s) "Sheet1" s)]
     (subs s 0 (min 31 (count s)))))
 
+(def ^:private excel-name-re
+  "What Excel accepts as a defined name: starts with a letter or underscore,
+   then letters/digits/underscore/dot, and must not read as a cell address."
+  #"(?i)^[a-z_][a-z0-9_.]*$")
+
+(defn- exportable-name?
+  [nm addrs]
+  (and (re-matches excel-name-re nm)
+       (not (addr/valid? nm))                       ; `q1` is a cell, not a name
+       (<= (count nm) 255)
+       (seq addrs)))
+
+(defn- contiguous
+  "[top-left bottom-right] when `addrs` fill a rectangle exactly, else nil.
+   Excel's defined names take one area; a scattered label has no single one, so
+   it is left out rather than exported as something it is not."
+  [addrs]
+  (let [ps (map addr/parse addrs)
+        cs (map :ci ps) rs (map :ri ps)
+        c0 (apply min cs) c1 (apply max cs)
+        r0 (apply min rs) r1 (apply max rs)]
+    (when (= (count addrs) (* (inc (- c1 c0)) (inc (- r1 r0))))
+      [(addr/make c0 r0) (addr/make c1 r1)])))
+
+(defn- absolutize
+  "\"I1\" -> \"$I$1\". Split on the letter/digit boundary rather than a regex
+   REPLACEMENT, where `$` starts a group reference and escaping it is its own
+   small trap."
+  [a]
+  (let [i (count (take-while #(Character/isLetter ^char %) a))]
+    (str "$" (subs a 0 i) "$" (subs a i))))
+
+(defn- write-names!
+  "Write the sheet's labels into the workbook as defined names."
+  [wb ws labels]
+  (doseq [[nm addrs] labels
+          :when (exportable-name? nm addrs)
+          :let [[tl br] (contiguous addrs)]
+          :when tl
+          ;; the whole target is built BEFORE anything is created: `createName`
+          ;; registers the name immediately, so a throw half way through used to
+          ;; leave a name behind that referred to nothing
+          :let [target (str "'" (.getSheetName ws) "'!" (absolutize tl)
+                            (when (not= tl br) (str ":" (absolutize br))))]]
+    ;; a name Excel will not take is not worth failing the whole export for
+    (try (doto (.createName wb)
+           (.setNameName nm)
+           (.setRefersToFormula target))
+         (catch Exception _ nil))))
+
 (defn workbook-bytes
   "A static .xlsx (byte[]) of sheet engine `sh`, tab named `sheet-name`."
   ^bytes [sh sheet-name]
@@ -162,7 +213,27 @@
               (catch Exception _ nil)))
           addrs (->> (concat (sheet/cells sh) (keys (sheet/document-styles sh)))
                      (filter addr/valid?) distinct)
+          ;; names we are about to write as defined names stay NAMES in the
+          ;; formulas; the rest resolve to addresses, since Excel would have
+          ;; nothing to look up
+          named-areas (into {} (for [[nm as] (sheet/all-labels sh)
+                                     :when (and (exportable-name? nm as) (contiguous as))]
+                                 [nm as]))
+          named (set (keys named-areas))
+          resolve-name
+          (let [addr-resolver (sheet/name-resolver sh)]
+            (fn [nm shape]
+              (if (named nm) (formula/name-marker nm shape) (addr-resolver nm shape))))
           live (atom 0)]
+      ;; Labels back out as the workbook's DEFINED NAMES — the exact inverse of
+      ;; what import does with them, so a label survives the round trip and the
+      ;; formulas can keep saying `Rate` instead of `I1`.
+      ;;
+      ;; BEFORE the cells, not after: POI resolves a name while PARSING the
+      ;; formula, so a `setCellFormula` that mentions one Excel does not know
+      ;; about yet is refused — and every named formula quietly fell back to its
+      ;; value.
+      (write-names! wb ws named-areas)
       (doseq [a addrs]
         (let [v    (sheet/value sh a)
               spec (style-spec sh a)
@@ -178,21 +249,32 @@
                   ;; disagrees with the sheet you are looking at is worse than one
                   ;; that just shows the error. The source is in the comment.
                   xl   (when (and fsrc (not (map? v)))
-                         (let [f (xlformula/try-excel fsrc)]
+                         (let [f (xlformula/try-excel fsrc resolve-name)]
                            (when (and f (<= (count f) MAX-FORMULA-CHARS)) f)))
+                  ;; Translating is not the same as POI being able to WRITE it.
+                  ;; `LET` is the case in hand: `xlformula` spells it correctly
+                  ;; and POI's own parser then refuses it. That throw used to
+                  ;; escape and take the WHOLE export down — one such cell and
+                  ;; the user got no file at all — so the attempt belongs inside
+                  ;; the per-cell fallback, which is where every other failure to
+                  ;; cross the boundary already lands.
+                  live? (boolean (when xl
+                                   (try (.setCellFormula cell xl) true
+                                        (catch Exception _
+                                          (.setBlank cell)
+                                          false))))
                   lbl  (prop sh a :label)
                   cmt  (prop sh a :comment)
                   note (cond-> []
                          cmt  (conj (str cmt))
-                         (and fsrc xl)       (conj (str "Formula: " fsrc))
-                         (and fsrc (not xl) (map? v))
+                         live? (conj (str "Formula: " fsrc))
+                         (and fsrc (not live?) (map? v))
                          (conj (str "Formula (errored here, so not exported live): " fsrc))
-                         (and fsrc (not xl) (not (map? v)))
+                         (and fsrc (not live?) (not (map? v)))
                          (conj (str "Formula (value only, no Excel equivalent): " fsrc))
                          lbl  (conj (str "Label: " lbl)))]
-              (if xl
-                (do (.setCellFormula cell xl)
-                    (set-cached! cell v)
+              (if live?
+                (do (set-cached! cell v)
                     (swap! live inc))
                 (set-value! cell v))
               (when cs (.setCellStyle cell cs))
