@@ -105,6 +105,12 @@
   [{:keys [labels]} nm]
   (get @labels nm))
 
+(defn all-labels
+  "{name [addr …]} for every name on the sheet — what EXPORT writes back out as
+   the workbook's defined names, so a label survives the round trip."
+  [{:keys [labels]}]
+  @labels)
+
 (defn- rectangle
   "`addrs` as a vector of ROW vectors when they form a FULL rectangle, else nil.
    `#area sales` needs a real shape; a scattered or ragged group has none."
@@ -133,8 +139,12 @@
   [msg code]
   (list (fn [] (throw (ex-info msg {:code code})))))
 
-(defn- resolver
-  "The `resolve` fn `formula/parse` uses: a name and a shape -> marker form."
+(defn name-resolver
+  "The `resolve` fn `formula/parse` uses: a name and a shape -> marker form.
+
+   Public because EXPORT needs it too: a formula written `$rate` has to reach
+   Excel as the address the name currently stands for, or it crosses the
+   boundary as a dead value."
   [sheet]
   (fn [nm shape]
     (let [addrs (labelled sheet nm)]
@@ -314,7 +324,7 @@
 
       :formula
       (let [{:keys [form deps names]}
-            (formula/parse (subs (str/trim raw) 1) addr (resolver sheet))
+            (formula/parse (subs (str/trim raw) 1) addr (name-resolver sheet))
             _  (when (would-cycle? sheet addr deps)
                  (throw (ex-info "circular reference" {:addr addr :deps deps})))
             sp (formula/compile @sci form addr)]

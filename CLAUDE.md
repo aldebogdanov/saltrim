@@ -497,6 +497,26 @@ indirection, which costs a structural rebuild of every dynamic dependent on ANY
 edit. The native idiom for a named range is `(def sales "B2:B10")` + `$(sales)`,
 opted into per formula.
 Spike: `spikes/11-excel-ast-import.clj`.
+**THE LOOP IS A FIXED POINT** (`roundtrip-test`): .xlsx -> SaltRim -> edits ->
+.xlsx -> SaltRim, over one POI-built workbook running from a bare number up to
+`Sales[@Qty]`. A SECOND lap changes nothing — no value, no formula source, no
+label — which is the assertion that catches drift a single clean lap hides.
+Proving it found three real bugs: (1) `.setCellFormula` sat OUTSIDE
+`try-excel`'s guard, so one `LET` cell (which translates fine and POI then
+refuses to parse) took down the WHOLE export — the attempt now lives inside the
+per-cell fallback; (2) a formula written `$rate` exported as a DEAD VALUE,
+because `source->excel` parsed without a resolver and `form->ast` refused the
+surviving name marker; (3) labels did not survive at all. Fixed by writing the
+sheet's labels back as the workbook's DEFINED NAMES (`export/write-names!`) —
+the exact inverse of import — which must happen BEFORE the cell loop, since POI
+resolves a name while PARSING and a formula mentioning an unknown one is
+refused. With the names in the file the formulas keep saying `Rate`, so
+`=(* $A1 $Rate)` -> `A1*Rate` -> `=(* $A1 $Rate)` is identity. Only two things
+deliberately cross as values: `LET` (POI cannot write it) and the date-shaped
+functions (`year` takes ISO strings; only `xl/` speaks serials). POI fixtures
+need `.addNewF` + a hand-set cached value for `LET`/structured refs, and
+per-cell evaluation, since `evaluateAllFormulaCells` aborts the sweep on the
+first formula it cannot read.
 **EXPORT goes back the same way** (`xlformula` ns): SaltRim marker form -> Excel
 AST -> `rechentafel.unparse`, so precedence, escaping and `$`-absolute refs are
 its problem. `/export.xlsx` is no longer a static snapshot — a formula Excel can

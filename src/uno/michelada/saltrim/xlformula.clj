@@ -160,6 +160,13 @@
 
        (and (seq? x) (= RANGE (first x))) (range-node (nth x 1) (nth x 2))
 
+       ;; A name that SURVIVED the resolver is one the export is also writing
+       ;; into the workbook as a defined name, so Excel can look it up — which
+       ;; is what lets `=(* $A1 $Rate)` cross as `A1*Rate` instead of `A1*I1`,
+       ;; and come back a name on the next import. Everything else was resolved
+       ;; to addresses before it got here.
+       (formula/name-ref? x) {:op :name :value (second x)}
+
        (seq? x)
        (let [[h & args] x
              n (count args)]
@@ -209,15 +216,22 @@
 (defn source->excel
   "SaltRim cell source (with or without the leading `=`) -> an Excel formula
    string WITHOUT a leading `=`, which is what POI's `setCellFormula` wants.
-   Throws (::unsupported in ex-data) when the formula has no Excel spelling."
-  [src]
-  (let [s (str/trim (str src))
-        s (if (str/starts-with? s "=") (subs s 1) s)]
-    (xlu/unparse (form->ast (:form (formula/parse s nil))))))
+   Throws (::unsupported in ex-data) when the formula has no Excel spelling.
+
+   `resolve` is the sheet's name resolver. A formula written `$rate` has to
+   reach Excel as the ADDRESS the label currently stands for — Excel has no
+   equivalent of a cell that names itself — and without one the name marker
+   survives into the form, `form->ast` refuses it, and a perfectly translatable
+   formula crosses as a dead value."
+  ([src] (source->excel src nil))
+  ([src resolve]
+   (let [s (str/trim (str src))
+         s (if (str/starts-with? s "=") (subs s 1) s)]
+     (xlu/unparse (form->ast (:form (formula/parse s nil resolve)))))))
 
 (defn try-excel
   "`source->excel`, or nil when the formula cannot cross the boundary. Export
    wants the fallback, not the exception — a cell that will not translate is a
    cell that gets its computed value, exactly as before."
-  [src]
-  (try (source->excel src) (catch Exception _ nil)))
+  ([src] (try-excel src nil))
+  ([src resolve] (try (source->excel src resolve) (catch Exception _ nil))))
