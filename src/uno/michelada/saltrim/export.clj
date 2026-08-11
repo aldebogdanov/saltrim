@@ -1,13 +1,24 @@
 (ns uno.michelada.saltrim.export
-  "Build a STATIC .xlsx snapshot of a loaded sheet (Apache POI). Formulas are NOT
-   translated to Excel: each cell exports its current COMPUTED value (numbers stay
-   numeric), carrying its presentation — fill / font colour / bold / italic /
-   alignment / number-format — and, for a formula cell, the original Clojure
-   source as a cell comment. So an exported workbook has no live formulas or
-   reactivity; it is a point-in-time copy. Only the workbook WRITER is used here."
+  "Build an .xlsx of a loaded sheet (Apache POI), LIVE where it can be.
+
+   A formula cell exports as a real Excel formula whenever `xlformula` can spell
+   it — so the workbook RECALCULATES in Excel rather than being a frozen wall of
+   numbers — with SaltRim's computed result written alongside as the cached
+   value, so it also opens showing the right thing before Excel recalculates.
+
+   Where it cannot be spelled (a call into the sheet's own `def` library, a
+   dynamic ref, any Clojure with no Excel name) the cell falls back to exactly
+   what every cell used to get: the computed VALUE, with the Clojure source kept
+   as a comment that now says the formula did not cross. The fallback is per
+   CELL, so a sheet that is 90% translatable exports 90% live.
+
+   Either way the cell carries its presentation — fill / font colour / bold /
+   italic / alignment / number-format. Only the workbook WRITER is used here."
   (:require [clojure.string :as str]
             [uno.michelada.saltrim.addr :as addr]
-            [uno.michelada.saltrim.sheet :as sheet])
+            [uno.michelada.saltrim.formula :as formula]
+            [uno.michelada.saltrim.sheet :as sheet]
+            [uno.michelada.saltrim.xlformula :as xlformula])
   (:import (java.io ByteArrayOutputStream)
            (org.apache.poi.ss.usermodel FillPatternType HorizontalAlignment)
            (org.apache.poi.xssf.usermodel XSSFWorkbook XSSFColor)))
@@ -57,6 +68,31 @@
     (map? v)     (.setCellValue cell (str "#ERR " (:error v)))   ; {:error msg}
     :else        (.setCellValue cell (str v))))
 
+(def ^:private MAX-FORMULA-CHARS
+  "Excel refuses a formula longer than this, and a refused formula takes the
+   whole file down rather than the one cell — so an over-long translation is
+   demoted to its value like any other untranslatable one. `xlformula` folds
+   ranges back up precisely so this stays rare."
+  8192)
+
+(defn- formula-src
+  "The cell's raw source if it is a formula, else nil."
+  [sh a]
+  (let [src (sheet/raw sh a)]
+    (when (and src (str/starts-with? (str/trim (str src)) "=")) src)))
+
+(defn- set-cached!
+  "SaltRim's computed result as the formula cell's CACHED value, so the workbook
+   opens showing numbers instead of blanks even before Excel recalculates. An
+   `{:error …}` gets none — Excel will produce its own error, and writing our
+   text would replace the formula with a string."
+  [cell v]
+  (cond
+    (number? v)  (.setCellValue cell (double v))
+    (boolean? v) (.setCellValue cell (boolean v))
+    (string? v)  (.setCellValue cell ^String v)
+    :else        nil))
+
 (def ^:private aligns
   {"left"   HorizontalAlignment/LEFT   "right"  HorizontalAlignment/RIGHT
    "center" HorizontalAlignment/CENTER "centre" HorizontalAlignment/CENTER
@@ -85,6 +121,56 @@
   (let [s (-> (str (or s "Sheet1")) (str/replace #"[:\\/?*\[\]]" " ") str/trim)
         s (if (str/blank? s) "Sheet1" s)]
     (subs s 0 (min 31 (count s)))))
+
+(def ^:private excel-name-re
+  "What Excel accepts as a defined name: starts with a letter or underscore,
+   then letters/digits/underscore/dot, and must not read as a cell address."
+  #"(?i)^[a-z_][a-z0-9_.]*$")
+
+(defn- exportable-name?
+  [nm addrs]
+  (and (re-matches excel-name-re nm)
+       (not (addr/valid? nm))                       ; `q1` is a cell, not a name
+       (<= (count nm) 255)
+       (seq addrs)))
+
+(defn- contiguous
+  "[top-left bottom-right] when `addrs` fill a rectangle exactly, else nil.
+   Excel's defined names take one area; a scattered label has no single one, so
+   it is left out rather than exported as something it is not."
+  [addrs]
+  (let [ps (map addr/parse addrs)
+        cs (map :ci ps) rs (map :ri ps)
+        c0 (apply min cs) c1 (apply max cs)
+        r0 (apply min rs) r1 (apply max rs)]
+    (when (= (count addrs) (* (inc (- c1 c0)) (inc (- r1 r0))))
+      [(addr/make c0 r0) (addr/make c1 r1)])))
+
+(defn- absolutize
+  "\"I1\" -> \"$I$1\". Split on the letter/digit boundary rather than a regex
+   REPLACEMENT, where `$` starts a group reference and escaping it is its own
+   small trap."
+  [a]
+  (let [i (count (take-while #(Character/isLetter ^char %) a))]
+    (str "$" (subs a 0 i) "$" (subs a i))))
+
+(defn- write-names!
+  "Write the sheet's labels into the workbook as defined names."
+  [wb ws labels]
+  (doseq [[nm addrs] labels
+          :when (exportable-name? nm addrs)
+          :let [[tl br] (contiguous addrs)]
+          :when tl
+          ;; the whole target is built BEFORE anything is created: `createName`
+          ;; registers the name immediately, so a throw half way through used to
+          ;; leave a name behind that referred to nothing
+          :let [target (str "'" (.getSheetName ws) "'!" (absolutize tl)
+                            (when (not= tl br) (str ":" (absolutize br))))]]
+    ;; a name Excel will not take is not worth failing the whole export for
+    (try (doto (.createName wb)
+           (.setNameName nm)
+           (.setRefersToFormula target))
+         (catch Exception _ nil))))
 
 (defn workbook-bytes
   "A static .xlsx (byte[]) of sheet engine `sh`, tab named `sheet-name`."
@@ -126,7 +212,28 @@
                 (.setCellComment cell c))
               (catch Exception _ nil)))
           addrs (->> (concat (sheet/cells sh) (keys (sheet/document-styles sh)))
-                     (filter addr/valid?) distinct)]
+                     (filter addr/valid?) distinct)
+          ;; names we are about to write as defined names stay NAMES in the
+          ;; formulas; the rest resolve to addresses, since Excel would have
+          ;; nothing to look up
+          named-areas (into {} (for [[nm as] (sheet/all-labels sh)
+                                     :when (and (exportable-name? nm as) (contiguous as))]
+                                 [nm as]))
+          named (set (keys named-areas))
+          resolve-name
+          (let [addr-resolver (sheet/name-resolver sh)]
+            (fn [nm shape]
+              (if (named nm) (formula/name-marker nm shape) (addr-resolver nm shape))))
+          live (atom 0)]
+      ;; Labels back out as the workbook's DEFINED NAMES — the exact inverse of
+      ;; what import does with them, so a label survives the round trip and the
+      ;; formulas can keep saying `Rate` instead of `I1`.
+      ;;
+      ;; BEFORE the cells, not after: POI resolves a name while PARSING the
+      ;; formula, so a `setCellFormula` that mentions one Excel does not know
+      ;; about yet is refused — and every named formula quietly fell back to its
+      ;; value.
+      (write-names! wb ws named-areas)
       (doseq [a addrs]
         (let [v    (sheet/value sh a)
               spec (style-spec sh a)
@@ -135,17 +242,46 @@
             (let [{:keys [ci ri]} (addr/parse a)
                   row  (or (.getRow ws ri) (.createRow ws ri))
                   cell (.createCell row ci)
-                  src  (sheet/raw sh a)
+                  fsrc (formula-src sh a)
+                  ;; a cell that ERRORS here does not export live, even when it
+                  ;; translates: Excel would compute its own answer from the same
+                  ;; formula and might well succeed, and an export that quietly
+                  ;; disagrees with the sheet you are looking at is worse than one
+                  ;; that just shows the error. The source is in the comment.
+                  xl   (when (and fsrc (not (map? v)))
+                         (let [f (xlformula/try-excel fsrc resolve-name)]
+                           (when (and f (<= (count f) MAX-FORMULA-CHARS)) f)))
+                  ;; Translating is not the same as POI being able to WRITE it.
+                  ;; `LET` is the case in hand: `xlformula` spells it correctly
+                  ;; and POI's own parser then refuses it. That throw used to
+                  ;; escape and take the WHOLE export down — one such cell and
+                  ;; the user got no file at all — so the attempt belongs inside
+                  ;; the per-cell fallback, which is where every other failure to
+                  ;; cross the boundary already lands.
+                  live? (boolean (when xl
+                                   (try (.setCellFormula cell xl) true
+                                        (catch Exception _
+                                          (.setBlank cell)
+                                          false))))
                   lbl  (prop sh a :label)
                   cmt  (prop sh a :comment)
                   note (cond-> []
-                         cmt (conj (str cmt))
-                         (and src (str/starts-with? (str/trim (str src)) "="))
-                         (conj (str "Formula: " src))
-                         lbl (conj (str "Label: " lbl)))]
-              (set-value! cell v)
+                         cmt  (conj (str cmt))
+                         live? (conj (str "Formula: " fsrc))
+                         (and fsrc (not live?) (map? v))
+                         (conj (str "Formula (errored here, so not exported live): " fsrc))
+                         (and fsrc (not live?) (not (map? v)))
+                         (conj (str "Formula (value only, no Excel equivalent): " fsrc))
+                         lbl  (conj (str "Label: " lbl)))]
+              (if live?
+                (do (set-cached! cell v)
+                    (swap! live inc))
+                (set-value! cell v))
               (when cs (.setCellStyle cell cs))
               (when (seq note) (add-comment! cell (str/join "\n" note)))))))
+      ;; make Excel recompute on open — the cached values we wrote are SaltRim's
+      ;; answers, and the point of exporting formulas is that Excel owns them now
+      (when (pos? @live) (.setForceFormulaRecalculation ws true))
       (let [baos (ByteArrayOutputStream.)]
         (.write wb baos)
         (.toByteArray baos)))))

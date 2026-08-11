@@ -862,3 +862,239 @@
       (is (< (- (System/currentTimeMillis) t0) (* 3 sh/EVAL-TIMEOUT-MS))))
     (testing "a LITERAL style still shows — it needs no computation"
       (is (= "navy" (sh/style-value s "A1" :fg))))))
+
+(defn- scanned-readers
+  "The `:readers` index recomputed from scratch by scanning `:meta` — what the
+   maintained one must always equal."
+  [s]
+  (reduce-kv (fn [idx a m] (reduce (fn [x d] (update x d (fnil conj #{}) a))
+                                   idx (:deps m)))
+             {} @(:meta s)))
+
+(defn- index-intact? [s] (= (scanned-readers s) @(:readers s)))
+
+(deftest reverse-index-tracks-every-write
+  ;; `:readers` is maintained rather than derived, so a write path that forgets
+  ;; to update it is not a slow answer but a wrong one: a dependent that never
+  ;; rebuilds, or a cycle that is not refused. Every path that can change a
+  ;; cell's :deps has to leave the index equal to a fresh scan of :meta.
+  (testing "the ordinary write paths"
+    (let [s (mk)]
+      (put s "A1" "1") (put s "A2" "2")
+      (put s "B1" "=(+ $A1 $A2)")
+      (is (= #{"B1"} (get @(:readers s) "A1")))
+      (is (index-intact? s))
+      (testing "formula -> shorter formula drops the abandoned edge"
+        (put s "B1" "=(inc $A1)")
+        (is (index-intact? s))
+        (is (nil? (get @(:readers s) "A2"))))
+      (testing "formula -> literal drops them all"
+        (put s "B1" "7")
+        (is (index-intact? s))
+        (is (empty? @(:readers s))))
+      (testing "and blanking does too"
+        (put s "B1" "=(inc $A1)")
+        (put s "B1" "")
+        (is (index-intact? s))
+        (is (empty? @(:readers s))))))
+  (testing "a REJECTED install leaves the index alone"
+    (let [s (mk)]
+      (put s "A1" "1")
+      (put s "B1" "=(inc $A1)")
+      (is (thrown? clojure.lang.ExceptionInfo (put s "A1" "=(inc $B1)")))
+      (is (index-intact? s) "the refused formula's deps must not be recorded")
+      (is (= 2 (v s "B1")))))
+  (testing "a load that errors a cell replaces its meta — and its edges"
+    (let [s (mk)]
+      (put s "A1" "1")
+      (put s "B1" "=(inc $A1)")
+      (sh/load-document! s {"B1" {:value "=(nope $A1)"}})   ; unknown fn -> :error
+      (is (index-intact? s))))
+  (testing "structural edits and a full reload"
+    (let [s (mk)]
+      (put s "A1" "1") (put s "A2" "=(inc $A1)") (put s "A3" "=(* $A2 $A1)")
+      (sh/insert-line! s :row 0)
+      (is (index-intact? s) "reshape rebuilds from the shifted document")
+      (sh/remove-line! s :row 1)
+      (is (index-intact? s) "and a delete leaves #REF! formulas behind")
+      (let [s2 (mk)]
+        (sh/load-document! s2 (sh/document s))
+        (is (index-intact? s2)))))
+  (testing "a random walk of edits never drifts"
+    (let [s     (mk)
+          addrs (vec (for [i (range 1 13)] (str "A" i)))
+          rnd   (java.util.Random. 42)]
+      (dotimes [_ 400]
+        (let [a   (nth addrs (.nextInt rnd (count addrs)))
+              b   (nth addrs (.nextInt rnd (count addrs)))
+              raw (case (.nextInt rnd 4)
+                    0 ""
+                    1 (str (.nextInt rnd 100))
+                    2 (str "=(inc $" b ")")
+                    3 (str "=(+ $" b " 1)"))]
+          (try (put s a raw) (catch clojure.lang.ExceptionInfo _ nil))))   ; cycles refused
+      (is (index-intact? s))
+      (is (seq @(:readers s)) "and the walk actually built some edges"))))
+
+(defn- back-to-front-chain
+  "A `chain` document — A1 = 0, A_i = (inc A_i-1) — whose iteration order is the
+   WORST case for a bulk load: every cell arrives before the one it references."
+  [n]
+  (into (sorted-map-by
+         (fn [a b] (compare (Long/parseLong (subs b 1)) (Long/parseLong (subs a 1)))))
+        (cons ["A1" {:value "0"}]
+              (for [i (range 1 n)]
+                [(str "A" (inc i)) {:value (str "=(inc $A" i ")")}]))))
+
+(deftest area-ranges-carry-their-shape
+  ;; `$A1:B2` expands ROW-MAJOR FLAT, so [1 2 3 4] cannot say whether it was
+  ;; 2x2, 1x4 or 4x1. `excel/->rv` turns a flat collection into a COLUMN, so a
+  ;; shape-sensitive Excel function silently answered for the wrong rectangle.
+  ;; `#area A1:B2` groups the refs into rows and fixes that, without changing
+  ;; what `$A1:B2` means to every formula already saved.
+  (let [s (mk)]
+    (put s "A1" "1") (put s "B1" "2")
+    (put s "A2" "3") (put s "B2" "4")
+    (testing "the flat form is unchanged"
+      (put s "C1" "=$A1:B2")
+      (is (= [1 2 3 4] (v s "C1")))
+      (put s "C2" "=(sum $A1:B2)")
+      (is (= 10 (v s "C2"))))
+    (testing "the area form is a vector of rows"
+      (put s "D1" "=#area A1:B2")
+      (is (= [[1 2] [3 4]] (v s "D1"))))
+    (testing "and that is what makes a shape-sensitive Excel function right"
+      (put s "D2" "=(transpose #area A1:B2)")
+      (is (= [[1 3] [2 4]] (v s "D2")) "the transpose of [[1 2] [3 4]]")
+      (put s "D3" "=(det #area A1:B2)")
+      (is (= -2 (v s "D3")) "1*4 - 2*3; meaningless on a flat column"))
+    (testing "areas stay reactive like any other range"
+      (put s "A1" "10")
+      (is (= [[10 2] [3 4]] (v s "D1")))
+      (is (= 34 (v s "D3")) "10*4 - 2*3"))
+    (put s "A1" "1")                                  ; back to [[1 2] [3 4]]
+    (testing "OUR aggregates do not care which spelling you used"
+      ;; the trap this nearly shipped with: `filter number?` over [[1 2] [3 4]]
+      ;; keeps NOTHING, so every blank-skipping aggregate answered 0 (or nil)
+      ;; for an area — silently, which is the worst way to be wrong
+      (put s "B2" "")                              ; and a blank inside the block
+      (doseq [[flat area f] [["F1" "G1" "sum"] ["F2" "G2" "mean"] ["F3" "G3" "xmax"]
+                             ["F4" "G4" "xmin"] ["F5" "G5" "median"] ["F6" "G6" "product"]
+                             ["F7" "G7" "stdev"] ["F8" "G8" "variance"]]]
+        (put s flat (str "=(" f " $A1:B2)"))
+        (put s area (str "=(" f " #area A1:B2)")))
+      (sh/settle! s)
+      (doseq [i (range 1 9)]
+        (is (= (sh/value s (str "F" i)) (sh/value s (str "G" i)))
+            (str "flat and area must agree (row " i ")"))))
+    (testing "but clojure.core stays Clojure — an area really is rows"
+      (put s "H1" "=(map sum #area A1:B2)")
+      (is (= [3 3] (vec (v s "H1"))) "per-row sums, which is what an area is FOR")
+      (put s "H2" "=(count #area A1:B2)")
+      (is (= 2 (v s "H2")) "two rows, not four cells"))
+    (testing "a single row or column is an area too, just a thin one"
+      (put s "E1" "=#area A1:B1")
+      (is (= [[1 2]] (v s "E1"))))
+    (testing "and the cap is shared with plain ranges"
+      (is (thrown-with-msg? Exception #"covers 6000 cells \(max 5000\)"
+                            (put s "F1" "=(count #area A1:A6000)"))))))
+
+(deftest area-refs-follow-the-sheet
+  ;; an #area endpoint has to move on paste and on insert/delete exactly like a
+  ;; $-range endpoint, or a structural edit silently re-points it
+  (testing "paste shifts both corners"
+    (is (= "=(xl/TRANSPOSE #area B2:C3)"
+           (formula/shift-refs "=(xl/TRANSPOSE #area A1:B2)" 1 1))))
+  (testing "inserting a row above grows/moves it"
+    (is (= "=(xl/TRANSPOSE #area A2:B3)"
+           (formula/insert-shift "=(xl/TRANSPOSE #area A1:B2)" :row 0 1))))
+  (testing "deleting a row inside it shrinks it"
+    (is (= "=(xl/TRANSPOSE #area A1:B1)"
+           (formula/delete-shift "=(xl/TRANSPOSE #area A1:B2)" :row 0))))
+  (testing "and the source round-trips through unparse unchanged"
+    (let [form (:form (formula/parse "(xl/TRANSPOSE #area A1:B2)" nil))]
+      (is (= "(xl/TRANSPOSE #area A1:B2)" (formula/unparse form)))
+      (is (= form (:form (formula/parse (formula/unparse form) nil)))))))
+
+(deftest bulk-load-does-not-cascade
+  ;; `load-document!` used to be a loop over `set-cell!`, which rebuilds the
+  ;; dependents of every cell it structurally replaces. During a load that is
+  ;; almost all of them: a document arrives in hash order, so most cells land
+  ;; before something they reference and each one re-triggers the cascade behind
+  ;; it. Measured at 111 SECONDS for a 300-cell chain loaded back-to-front, and
+  ;; 2.75 s for 1000 cells in hash order (doc/bench.md). The load is now one
+  ;; install pass plus one rebuild pass.
+  (testing "the worst possible order is still correct, and no longer quadratic"
+    (let [s  (mk)
+          t0 (System/currentTimeMillis)]
+      (sh/load-document! s (back-to-front-chain 300))
+      (sh/settle! s)
+      (let [ms (- (System/currentTimeMillis) t0)]
+        (is (= 299 (sh/value s "A300")) "the whole chain resolves")
+        (is (= 149 (sh/value s "A150")) "and so does the middle of it")
+        (is (< ms 20000)
+            (str "a back-to-front load must not cascade (took " ms "ms)")))))
+  (testing "a cell already on the sheet follows a spin the load replaced"
+    ;; the one case the deferred rebuild has to catch: B1's body has already RUN
+    ;; and captured A1's node, and the load hands A1 a new one (literal ->
+    ;; formula is a structural change). B1 is not in the document, so only the
+    ;; dependent closure reaches it.
+    (let [s (mk)]
+      (put s "A1" "1")
+      (put s "B1" "=(inc $A1)")
+      (is (= 2 (v s "B1")))
+      (sh/load-document! s {"A1" {:value "=(* 5 5)"}})
+      (is (= 26 (v s "B1")) "recomputed against the new node, not the dead one")))
+  (testing "and so does a style formula already on the sheet"
+    (let [s (mk)]
+      (put s "A1" "1")
+      (sh/set-style! s "B1" :bg "=(if (> $A1 10) \"tomato\" \"white\")")
+      (sh/settle! s)
+      (is (= "white" (sh/style-value s "B1" :bg)))
+      (sh/load-document! s {"A1" {:value "=(* 5 5)"}})
+      (sh/settle! s)
+      (is (= "tomato" (sh/style-value s "B1" :bg))))))
+
+(deftest large-ranges
+  ;; The JVM caps a method signature at 255 arguments, and Spindel's CPS
+  ;; transform makes one continuation argument per await — so awaits written out
+  ;; flat capped a formula at ~250 referenced cells, forty times below the
+  ;; advertised MAX-RANGE-CELLS. `=(sum $A1:A260)` died with a ClassFormatError
+  ;; at INSTALL time. The awaits are now looped (one site, one frame), so the
+  ;; ceiling is gone; these sizes all failed before.
+  (testing "a formula can reference far more than the old ~250-cell ceiling"
+    (doseq [n [260 500 1000]]
+      (let [s (sh/create-sheet)]
+        (doseq [i (range n)] (sh/set-cell! s (str "A" (inc i)) (str i)))
+        (sh/set-cell! s "B1" (str "=(sum $A1:A" n ")"))
+        (sh/settle! s)
+        (is (= (/ (* n (dec n)) 2) (sh/value s "B1"))
+            (str n " cells in one formula")))))
+  (testing "values arrive in range order, not merely as a set"
+    (let [s (sh/create-sheet)]
+      (doseq [i (range 300)] (sh/set-cell! s (str "A" (inc i)) (str i)))
+      (sh/set-cell! s "B1" "=(vec (take 5 $A1:A300))")
+      (sh/settle! s)
+      (is (= [0 1 2 3 4] (sh/value s "B1")))))
+  (testing "and stay reactive — an edit deep inside a big range recomputes"
+    (let [s (sh/create-sheet)]
+      (doseq [i (range 1000)] (sh/set-cell! s (str "A" (inc i)) "1"))
+      (sh/set-cell! s "B1" "=(sum $A1:A1000)")
+      (sh/settle! s)
+      (is (= 1000 (sh/value s "B1")))
+      (sh/set-cell! s "A700" "1000")
+      (sh/settle! s)
+      (is (= 1999 (sh/value s "B1")))))
+  (testing "a dynamic ref and a big static range coexist in one formula"
+    ;; the dyn path binds one local per site plus the value vector, so it does
+    ;; not reintroduce a per-cell local
+    (let [s (sh/create-sheet)]
+      (doseq [i (range 300)] (sh/set-cell! s (str "A" (inc i)) (str i)))
+      (sh/set-cell! s "C1" "5")
+      (sh/set-cell! s "B1" "=(+ (sum $A1:A300) $(str \"A\" $C1))")
+      (sh/settle! s)
+      (is (= 44854 (sh/value s "B1")))))
+  (testing "past the cap a range is refused at install, not left to wedge"
+    (let [s (sh/create-sheet)]
+      (is (thrown-with-msg? clojure.lang.ExceptionInfo #"covers 6000 cells \(max 5000\)"
+                            (sh/set-cell! s "B1" "=(sum $A1:A6000)"))))))

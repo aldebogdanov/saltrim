@@ -9,12 +9,16 @@
             [uno.michelada.saltrim.addr :as addr]
             [uno.michelada.saltrim.auth :as auth]
             [uno.michelada.saltrim.db :as db]
+            [uno.michelada.saltrim.errors :as errors]
+            [uno.michelada.saltrim.excel :as excel]
             [uno.michelada.saltrim.fmt :as fmt]
             [uno.michelada.saltrim.graph :as graph]
             [uno.michelada.saltrim.merge :as mrg]
             [uno.michelada.saltrim.sheet :as sheet]
+            [uno.michelada.saltrim.stdlib :as lib]
             [uno.michelada.saltrim.store :as store]
             [uno.michelada.saltrim.version :as version]
+            [uno.michelada.saltrim.xlsx :as xlsx]
             [uno.michelada.saltrim.constants :refer [CW RH GUT HDR OVER BAR]]
             [uno.michelada.saltrim.web.geom :refer [axis-x axis-y col-w covered in-window? rgba row-h span-px total-px url-decode url-encode view-base window]]
             [uno.michelada.saltrim.web.state :refer [def-editor-of owner-of session-view sessions* sheets*]]))
@@ -45,7 +49,9 @@
   (let [v    (sheet/value sh a)
         mask (sheet/style-value sh a :format)]   ; nil / string / {:error}
     (cond (nil? v) ""
-          (map? v) "#ERR"
+          ;; an error shows WHICH failure it is (#DIV/0!, #N/A, …); the message
+          ;; behind it rides the tooltip — see `cell-html`
+          (map? v) (errors/label v)
           (string? mask) (fmt/apply-mask mask v)
           :else (str v))))
 
@@ -208,6 +214,9 @@
         raw  (or (sheet/raw sh a) disp)
         srcs (sheet/style-srcs sh a)       ; {prop raw} -> echoed into the style bar
         note (let [c (sheet/style-value sh a :comment)] (when (string? c) (not-empty c)))
+        ;; the detail behind an error label — a cast failure's Java sentence, say.
+        ;; Nothing for a plain Excel error, whose message IS the label already.
+        why  (errors/detail (sheet/value sh a))
         ;; a failing assertion marks the cell (bottom-left wedge — `:comment`
         ;; owns the top-right one, and a cell can carry both)
         bad  (sheet/assert-violation sh a)
@@ -224,7 +233,7 @@
            :data-raw raw
            ;; both can be present: the comment is what the cell is FOR, the
            ;; violation what is wrong with it right now
-           :title (not-empty (str/join "\n" (remove nil? [note (when bad (str "⚠ " bad))])))
+           :title (not-empty (str/join "\n" (remove nil? [note why (when bad (str "⚠ " bad))])))
            :data-sty (when (seq srcs) (json/write-value-as-string srcs))
            ;; the cell fills its WHOLE slot (it used to stop a pixel short, which
            ;; is what left a gap between two cells sharing a bg) and the grid
@@ -449,6 +458,15 @@
              " / " [:span {:style kbd} "#cells A1:A3"] "."]
             [:p {:style p} "e.g. " [:span {:style kbd} "=(+ $A1 $B1)"] " · "
              [:span {:style kbd} "=(reduce + $A1:A3)"]]
+            [:p {:style p} [:span {:style kbd} "$A1:B2"] " is FLAT and row-major — "
+             [:span {:style kbd} "[A1 B1 A2 B2]"] " — which is what you want for "
+             [:span {:style kbd} "sum"] ", " [:span {:style kbd} "map"] " and the rest. "
+             "When a function needs to know the rectangle's SHAPE, write "
+             [:span {:style kbd} "#area A1:B2"] " instead: it gives you a vector of "
+             "ROWS, " [:span {:style kbd} "[[A1 B1] [A2 B2]]"] ". Excel's "
+             [:span {:style kbd} "xl/"] " functions are defined over rectangles, so "
+             [:span {:style kbd} "=(xl/TRANSPOSE #area A1:B2)"] " is right where the "
+             "flat form would quietly transpose a single column."]
             [:p {:style p} "It is ordinary Clojure inside: " [:span {:style kbd} "let"] ", "
              [:span {:style kbd} "fn"] " and the " [:span {:style kbd} "#(…)"]
              " literal all work — e.g. "
@@ -481,6 +499,22 @@
              [:span {:style kbd} "=(sum $B1:B20)"] " works even with empty rows. In plain arithmetic "
              "wrap a maybe-blank cell to treat it as zero: " [:span {:style kbd} "=(+ (or $B5 0) 1)"] "."]
 
+            [:div {:style h3} "When a cell fails"]
+            [:p {:style p} "A broken cell shows WHICH failure it is — "
+             [:span {:style kbd} "#DIV/0!"] ", " [:span {:style kbd} "#VALUE!"] ", "
+             [:span {:style kbd} "#N/A"] ", " [:span {:style kbd} "#REF!"] ", "
+             [:span {:style kbd} "#NAME?"] ", " [:span {:style kbd} "#NUM!"] " — with the details on "
+             "hover. " [:span {:style kbd} "#ERR"] " is the catch-all for anything else, and "
+             [:span {:style kbd} "#TIMEOUT!"] " means a formula never finished. Errors travel: a cell "
+             "reading a broken one breaks the same way."]
+            [:p {:style p} "Formulas can handle a failure instead of showing it: "
+             [:span {:style kbd} "=(if-error (/ $A1 $B1) 0)"] " falls back to 0, "
+             [:span {:style kbd} "if-na"] " catches ONLY a lookup miss (so a real bug still surfaces), "
+             "and " [:span {:style kbd} "error-type"] " / " [:span {:style kbd} "error?"] " let you "
+             "branch: " [:span {:style kbd} "=(if (= :na (error-type (vlookup …))) \"none\" \"ok\")"] ". "
+             "These guard the expression you wrap — they can't catch an error that arrived from "
+             "another cell, which reaches this one before the formula runs."]
+
             [:div {:style h3} "Reusable functions (ƒ)"]
             [:p {:style p} "The " [:span {:style kbd} "ƒ"] " button (top bar) opens this sheet's "
              "definitions library: write your own functions/constants as separate entries and call "
@@ -511,10 +545,22 @@
 
             [:div {:style h3} "Labels and comments"]
             [:p {:style p} "Two more properties in the same row describe the cell rather than paint it. "
-             [:span {:style kbd} "label"] " NAMES it — a short identifier shown instead of the address in "
-             "the 🕸 dependency graph. " [:span {:style kbd} "comment"] " is a note ABOUT it: the cell gets "
+             [:span {:style kbd} "label"] " NAMES it, and a name is a reference: label a cell "
+             [:span {:style kbd} "rate"] " and any formula can say " [:span {:style kbd} "$rate"]
+             " instead of its address. The label also replaces the address in the 🕸 dependency graph."]
+            [:p {:style p} "Put the " [:b "same"] " label on several cells and the name means all of them, "
+             "in row-major order — that is a named range: " [:span {:style kbd} "=(sum $sales)"]
+             ". If they form a full rectangle, " [:span {:style kbd} "#area sales"]
+             " gives it as rows, for " [:span {:style kbd} "transpose"] " / "
+             [:span {:style kbd} "matmul"] " and friends."]
+            [:p {:style p} "A name follows its cell: insert a row above it and every "
+             [:span {:style kbd} "$rate"] " still finds it. A name nothing carries is "
+             [:span {:style kbd} "#NAME?"] " — write the formula first and label the cell after, if you like. "
+             "An address always wins, so a cell labelled " [:span {:style kbd} "q1"]
+             " is not reachable as " [:span {:style kbd} "$q1"] "."]
+            [:p {:style p} [:span {:style kbd} "comment"] " is a note ABOUT the cell: it gets "
              "a small corner flag and shows the text on hover. The .xlsx importer leaves its audit trail "
-             "as comments."]
+             "as comments, and turns a workbook's defined names into labels."]
 
             [:div {:style h3} "Insert / delete rows and columns"]
             [:p {:style p} "The " [:span {:style kbd} "insert"] " buttons (format row) add a blank row/column "
@@ -618,11 +664,17 @@
 
             [:div {:style h3} "Export to Excel"]
             [:p {:style p} "The " [:span {:style kbd} "⬇ xlsx"] " button downloads the sheet as an "
-             ".xlsx file. It is a " [:b "static snapshot"] ": each cell exports its current "
-             [:b "computed value"] " (with its styling and number format) — "
-             [:b "not"] " its formula. The exported file has " [:b "no live formulas and no reactivity"]
-             "; editing a value in Excel won't recompute anything. Each formula's original "
-             "source is attached as a cell comment so the logic isn't lost."]
+             ".xlsx file, " [:b "live where it can be"] ": a formula whose functions have Excel "
+             "equivalents is written as a real Excel formula, so the workbook "
+             [:b "recalculates in Excel"] " — change an input there and the results follow. "
+             "SaltRim's own answer is stored as the cached value, so it opens showing the "
+             "right numbers straight away."]
+            [:p {:style p} "A formula with " [:b "no Excel spelling"] " — one calling your own "
+             "ƒ definitions, a dynamic " [:span {:style kbd} "$(…)"] " reference, or any Clojure "
+             "Excel has no function for — falls back to its " [:b "computed value"] " for that "
+             "cell only, so a mostly-translatable sheet exports mostly live. Either way the "
+             "original Clojure source is attached as a cell comment (saying so when the formula "
+             "didn't cross), and styling and number format come along. Borders do not."]
 
             [:div {:style h3} "Import from Excel"]
             [:p {:style p} "The " [:span {:style kbd} "⬆ xlsx"] " button imports an Excel workbook: "
@@ -688,12 +740,85 @@
 
 (def ^:private stdlib-reference
   "Read-only reference of the built-in functions (always available, can't be
-   edited), grouped by category."
-  [["math"  "sum product abs ceil floor round sqrt pow exp ln log10 sign"]
-   ["stats" "mean avg median variance stdev"]
-   ["text"  "upper lower trim join split str-replace starts-with? ends-with? includes? blank?"]
-   ["date"  "today year month day days-between  (ISO yyyy-MM-dd strings)"]
-   ["excel-compat" "if-error excel-truthy xmin xmax xround xdate xvlookup  (Excel semantics — the .xlsx importer targets these)"]])
+   edited), grouped by category, as SYMBOLS — each one gets its own chip with a
+   description and a copyable example, so the panel is a reference rather than a
+   word list. The hand-written groups are spelled out here; the borrowed ones
+   come from `stdlib/catalog-syms`, so the panel cannot drift from what is
+   actually installed."
+  (concat
+   [["core math"    '[sum product abs ceil floor round sqrt pow exp ln log10 sign pi]]
+    ["matrices"     '[transpose matmul det inverse]]
+    ["core stats"   '[mean avg median variance stdev xmin xmax]]
+    ["core text"    '[upper lower trim join split str-replace
+                      starts-with? ends-with? includes? blank?]]
+    ["core date"    '[today year month day days-between]]
+    ["excel-compat" '[excel-truthy xround xdate xvlookup as-rows]]
+    ["errors"       '[if-error if-na error-type error?]]]
+   (for [[cat syms] lib/catalog-syms]
+     ;; the matrix four are listed above under their own heading
+     [cat (remove '#{det inverse} syms)])))
+
+(def ^:private borrowed-syms
+  "The stdlib names whose IMPLEMENTATION is Excel's, borrowed through
+   rechentafel — as opposed to the ones written here.
+
+   Per SYMBOL rather than per group, because the two do not line up: `det` and
+   `inverse` sit under `matrices` next to `transpose` and `matmul` but are
+   borrowed, and the borrowed `matrix` group holds `linest` and `trend`. A chip
+   that claimed otherwise would be wrong about the two things the distinction
+   decides — whether the semantics were chosen here, and whether ⧉ gives you a
+   few self-contained lines or 4KB plus a dependency."
+  (set lib/borrowed-syms))
+
+(def ^:private xl-only-names
+  "The Excel functions with NO Clojure spelling — `xl/` and only `xl/`.
+
+   The panel used to list all 411 exposed names here, right under a stdlib that
+   already covers 267 of them, which reads as a wholesale duplicate and raises
+   the fair question of why both exist. They exist for different jobs: an
+   imported formula is translated to the Clojure name whenever there is one (the
+   stdlib's ~238 borrowed, plus the importer's ~36 hand-mapped), and `xl/` is
+   what is left over — the reason a workbook full of unfamiliar functions still
+   imports as something that RECALCULATES."
+  (set (remove (into (set lib/borrowed-names) xlsx/hand-mapped)
+               excel/exposed-names)))
+
+(defn- fn-chip
+  "One function in the reference: its name, a hover tooltip carrying the
+   description and a runnable example, and a button that copies the function's
+   SOURCE.
+
+   Source rather than the example, because of what people actually need it for:
+   you import a workbook or flatten a formula, end up with one large expression
+   full of `sum` / `xround` / `xvlookup`, and want to run that calculation in an
+   ordinary Clojure application where none of those names exist. The example is
+   for reading; the source is for taking away. `stdlib/source-for` brings the
+   private helpers along, so what lands in the clipboard compiles on its own.
+
+   The tooltip is pure CSS (`content: attr(data-tip)`) — no per-chip markup and
+   nothing to position — and the copy is one delegated listener in `app.cljs`,
+   so 284 of these cost 284 spans and zero handlers.
+
+   A hand-written function's source rides along in `data-copy`, a few lines each.
+   A BORROWED one carries only its name in `data-src`, and `app.cljs` asks
+   `/fnsrc` for it: those are rechentafel's real implementations with the
+   helpers they need, ~5KB apiece and 1.2MB over the whole panel — a page-load
+   cost every user would pay for the one function somebody eventually copies."
+  [sym]
+  (let [{:keys [desc eg src fetch]} (lib/docs-for sym)
+        own? (not (borrowed-syms sym))]
+    [:span {:class (str "fnref" (when own? " own"))
+            :data-tip (str desc "\n\n" eg)}
+     [:span {:class "fnmark" :title (if own?
+                                      "SaltRim's own — semantics we chose"
+                                      "borrowed from Excel, implemented by rechentafel")}
+      (if own? "◆" "◇")]
+     (str sym)
+     (when (or src fetch)
+       [:button (cond-> {:class "fncopy" :title (str "copy the source of " sym)}
+                  src   (assoc :data-copy src)
+                  fetch (assoc :data-src (str sym)))
+        "⧉"])]))
 
 (defn- defs-html
   "The definitions LIBRARY modal, toggled by $defspanel. The editable library
@@ -726,9 +851,58 @@
             [:details {:style "margin-top:.9rem;"}
              [:summary {:style "font:600 13px sans-serif;cursor:pointer;color:var(--muted);"}
               "Built-in functions (read-only)"]
-             (for [[cat names] stdlib-reference]
+             [:p {:style (str p "margin-left:.4rem;color:var(--muted);")}
+              "Hover a name for what it does and an example. "
+              [:span {:style kbd} "⧉"] " copies its "
+              [:b "source"] " — helpers included, ready to paste into a Clojure "
+              "project, for when a flattened or imported formula has to run "
+              "outside SaltRim."]
+             ;; the mark is not decoration: it tells you whether the semantics
+             ;; were chosen here, and what ⧉ is about to put on your clipboard
+             [:p {:style (str p "margin-left:.4rem;color:var(--muted);")}
+              [:span {:class "fnmark" :style "color:var(--accent);"} "◆"]
+              " " [:b "ours"] " — written here, and the source is a few "
+              "self-contained lines. "
+              [:span {:class "fnmark"} "◇"]
+              " " [:b "borrowed"] " from Excel and implemented by "
+              [:a {:href "https://github.com/replikativ/rechentafel" :target "_blank"
+                   :rel "noopener" :style "color:var(--accent);"} "rechentafel"]
+              " (Apache-2.0): same name, Excel's numerics, and the source is "
+              "that implementation plus the value bridge — a few KB, and it "
+              "needs the library on your classpath."]
+             (for [[cat syms] stdlib-reference]
+               [:div {:style "margin:.35rem 0 .1rem .4rem;"}
+                [:div {:style "font:600 12px sans-serif;color:var(--muted);margin-bottom:.15rem;"}
+                 cat]
+                [:div (map fn-chip syms)]])]
+            ;; Excel interop. Deliberately second, deliberately folded, and
+            ;; deliberately not called a stdlib: formulas are Clojure, and this
+            ;; is the boundary for what comes out of (and goes back into) .xlsx.
+            [:details {:style "margin-top:.4rem;"}
+             [:summary {:style "font:600 13px sans-serif;cursor:pointer;color:var(--muted);"}
+              (str "Excel interop — " (count xl-only-names) " more, under xl/")]
+             [:p {:style (str p "margin-left:.4rem;color:var(--muted);")}
+              "Only what has no Clojure name. Of Excel's "
+              (count excel/exposed-names) " functions, " (- (count excel/exposed-names)
+                                                            (count xl-only-names))
+              " are already listed above and an import translates to those — "
+              [:span {:style kbd} "PMT(…)"] " arrives as " [:span {:style kbd} "(pmt …)"]
+              ", not as " [:span {:style kbd} "xl/PMT"] ". These "
+              (count xl-only-names) " are the remainder, reachable under an "
+              [:span {:style kbd} "xl/"] " prefix — " [:span {:style kbd} "=(xl/DSUM …)"]
+              " — so an imported formula that uses one stays live instead of "
+              "collapsing to the number it last computed."]
+             [:p {:style (str p "margin-left:.4rem;color:var(--muted);")}
+              "Ranges arrive as a column; reshape with "
+              [:span {:style kbd} "xl/as-rows"] " when a function wants a table: "
+              [:span {:style kbd} "=(xl/VLOOKUP $A1 (xl/as-rows 2 $B1:C9) 2 false)"]
+              ". Dates here are Excel serials, not ISO strings: "
+              [:span {:style kbd} "=(xl/YEAR (xl/date->serial $A1))"] "."]
+             (for [[cat names] excel/catalog
+                   :let [names (filter xl-only-names names)]
+                   :when (seq names)]
                [:p {:style (str p "margin-left:.4rem;")}
-                [:b cat] ": " [:span {:style kbd} names]])]]]))))
+                [:b cat] ": " [:span {:style kbd} (str/join " " names)]])]]]))))
 
 (defn- props-html
   "Owner-only Sheet properties modal, toggled by $propspanel. Today: the sheet's
@@ -1362,6 +1536,29 @@
                 ".toast.warn{background:var(--gold-bg);border-color:var(--gold);}"
                 ".btn.viol{background:var(--gold-bg);border-color:var(--gold);color:var(--fg);}"
                 ".violrow:hover{background:var(--accent-bg);}"
+                ;; ƒ-panel function reference: a chip per function, its docs in a
+                ;; CSS-only tooltip, and a copy button that appears on hover.
+                ".fnref{position:relative;display:inline-flex;align-items:center;gap:2px;"
+                "font:12px monospace;background:var(--panel);border:1px solid var(--grid);"
+                "border-radius:3px;padding:0 3px;margin:0 4px 5px 0;cursor:default;}"
+                ".fnref:hover{border-color:var(--accent);color:var(--accent);}"
+                ;; ◆ ours / ◇ borrowed. Same shape filled and hollow rather than
+                ;; two different glyphs: at 284 chips the eye sorts them without
+                ;; reading either, and it survives a monochrome theme.
+                ".fnmark{font-size:8px;line-height:1;color:var(--muted);"
+                "margin-right:1px;cursor:help;}"
+                ".fnref.own .fnmark{color:var(--accent);}"
+                ".fnref::after{content:attr(data-tip);display:none;position:absolute;"
+                "left:0;top:calc(100% + 5px);z-index:60;width:21rem;max-width:60vw;"
+                "white-space:pre-wrap;font:12px/1.45 sans-serif;color:var(--fg);"
+                "background:var(--bg);border:1px solid var(--line);border-radius:6px;"
+                "box-shadow:0 6px 20px rgba(0,0,0,.28);padding:.45rem .55rem;"
+                "text-align:left;pointer-events:none;}"
+                ".fnref:hover::after{display:block;}"
+                ".fncopy{border:0;background:none;color:var(--muted);cursor:pointer;"
+                "font:12px sans-serif;padding:0 1px;opacity:0;transition:opacity .1s;}"
+                ".fnref:hover .fncopy{opacity:1;}"
+                ".fncopy:hover{color:var(--accent);}"
                 ".toast.warn[data-addr]{text-decoration-color:var(--gold);}"
                 ;; ONE animation on an info card, not an entrance plus a
                 ;; lifetime: `animationend` is what removes the node, and a
@@ -1642,7 +1839,8 @@
             [:button {:class "btn" :data-on:click "$propspanel=true" :title "sheet properties"} "⚙"])
           [:button {:class "btn" :data-on:click "$histpanel=true" :title "history — view an earlier revision"} "🕘"]
           ;; export: a plain download link (GET /export.xlsx), carrying the same
-          ;; access params as this page. A STATIC snapshot — values, not formulas.
+          ;; access params as this page. Formulas export LIVE where `xlformula`
+          ;; can spell them, computed values elsewhere (see export.clj).
           (let [q (if link-token
                     (str "?t=" (url-encode link-token) "&b=" (url-encode branch))
                     (str "?s=" (url-encode sname)
@@ -1650,9 +1848,9 @@
                          "&b=" (url-encode branch)))]
             [:a {:class "btn" :href (str "/export.xlsx" q) :download (str sname ".xlsx")
                  :style "text-decoration:none;"
-                 :title (str "Export to Excel (.xlsx) — a STATIC snapshot: computed values + "
-                             "styling only. No live formulas or reactivity (each formula's "
-                             "source is kept as a cell comment).")}
+                 :title (str "Export to Excel (.xlsx) — live formulas where Excel has an "
+                             "equivalent, computed values elsewhere. Styling and number format "
+                             "come along; each formula's source is kept as a cell comment.")}
              "⬇ xlsx"])
           ;; import: opens the multipart-form modal — each tab becomes a NEW sheet.
           ;; Re-opening clears any previous run's report (back to the form).

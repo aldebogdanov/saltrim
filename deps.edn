@@ -49,6 +49,15 @@
         ;; computed values + presentation. Only the workbook writer is used.
         org.apache.poi/poi-ooxml {:mvn/version "5.5.1"}
 
+        ;; rechentafel — a pure-Clojure Excel formula interpreter. We use ONLY its
+        ;; function pack (`rechentafel.functions` + `rechentafel.fn.*`): ~470
+        ;; POI-cross-validated Excel functions, callable standalone with no
+        ;; workbook and no evaluator. Its own engine (pull-based dirty/topo
+        ;; recalc) is deliberately NOT used — SaltRim's reactive Spindel graph is
+        ;; the opposite model. See doc/rechentafel-evaluation.md. Apache-2.0, so
+        ;; we depend rather than vendor. Young library: PIN the version.
+        org.replikativ/rechentafel {:mvn/version "0.1.5"}
+
         ;; Logging backend for POI (it logs through log4j-api). Without an impl,
         ;; POI prints "Log4j2 could not find a logging implementation …" and falls
         ;; back to a SimpleLogger. Pinned to the log4j-api version POI pulls;
@@ -63,6 +72,12 @@
   ;; Spikes are now REPL walkthroughs under spikes/ (eval at a dev REPL), not
   ;; cold-run mains — see spikes/README.md.
   :web {:main-opts ["-m" "uno.michelada.saltrim.web"]}
+
+  ;; Engine benchmarks (bench/). Pure in-memory sheets — no db, no server, no
+  ;; ports held. `clojure -M:bench [sizes…]`; see doc/bench.md for what the
+  ;; numbers mean and the last recorded run.
+  :bench {:extra-paths ["bench"]
+          :main-opts   ["-m" "uno.michelada.saltrim.bench.main"]}
 
   ;; ClojureScript builds /app.js from src (app.cljs + the shared .cljc) with the
   ;; plain CLJS compiler — no node/npm. Dev rebuilds the :simple bundle in-process
@@ -81,9 +96,11 @@
   ;; Build a runnable uberjar (java -jar target/saltrim-<v>.jar). Carries
   ;; clojurescript so `uber` compiles the :advanced /app.js before packaging;
   ;; `src` is on the path so the cljs compiler resolves the :main namespace.
+  ;; `test` is there for `cljs-test`, which compiles the CLJS suite the same way
+  ;; — it reaches the build JVM only, never the jar (`uber` names its own dirs).
   :build {:deps {io.github.clojure/tools.build {:mvn/version "0.10.14"}
                  org.clojure/clojurescript {:mvn/version "1.12.145"}}
-          :extra-paths ["src"]
+          :extra-paths ["src" "test"]
           :ns-default build}
 
   :test {:extra-paths ["test"]

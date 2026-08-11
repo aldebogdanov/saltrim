@@ -251,10 +251,28 @@ REMAINING:
   `clojure -M:web` (e.g. the preview launch config) 404s `app.js` until you run
   `clojure -T:build cljs` once (or start the nREPL). Documented in CLAUDE.md /
   README; revisit if it bites.
-- **No CLJS tests yet.** The shared `addr` cljc is covered on the CLJ side; the
-  fix for `(int char)`/`(int \A)` (bit-or in CLJS) is currently guarded only by
-  the `:advanced` compile + browser verification. A tiny cljs test build (or a
-  `clojure -M` cljc round-trip) would lock the CLJS path down.
+- **CLJS tests — DONE** (`clojure -T:build cljs-test`, step 2 of the gate). The
+  browser half used to be guarded by the `:advanced` compile and manual
+  verification alone, which is exactly where the CLJS-only bugs live: `(int
+  char)` is `bit-or` in CLJS, and `geom/span-count` has to agree with the
+  server's answer cell for cell or the right of the grid goes empty. Now
+  `addr_test` is `.cljc` and runs on both platforms, `geom-vectors.cljc` holds
+  one set of axis/span answers that BOTH `web.geom` and `app.cljs` are asserted
+  against, and `app_test` pins the `sr-*` bridge events a gesture produces.
+  Remaining gaps, deliberate:
+  - **`:simple`, not `:advanced`.** Property renaming — the reason for the
+    `aget`/`getAttribute` rule — is still only covered by `node --check` on the
+    real bundle. Testing it would mean externs for the fake DOM.
+  - **No layout.** `dom_stub` reports whatever sizes a test sets; nothing is
+    measured, so a CSS-level break (a wrong `flex`, a mispositioned overlay) is
+    still browser-only. The client never asks the DOM for cell geometry either,
+    so this costs less than it sounds.
+  - **The stub must be required before `app`** in every test namespace, because
+    `app.cljs` calls `addEventListener` at the top level. `:preloads` is the
+    explicit hook for that and the compiler honours it only under
+    `:optimizations :none`; if the ordering ever bites, that is the fix.
+  - **`request-view!`'s 70ms debounce is not asserted** — the timer outlives the
+    test that started it. `win-need` (what it would post) is covered instead.
 - **Datastar (1.0.2) is vendored and self-served** at `resources/public/datastar.js`
   → `/datastar.js`. DONE — it used to load from jsdelivr with the local path as a
   reader comment beside it, which made a CDN outage a blank page and put a
@@ -358,13 +376,36 @@ REMAINING:
 
 ## XLSX export (`export` ns) — deferred polish
 
-`/export.xlsx` writes a STATIC snapshot via Apache POI: computed values + a subset
-of presentation. Intentional limits / future polish:
+`/export.xlsx` writes a workbook that is LIVE where it can be, via Apache POI:
+real Excel formulas (`xlformula`) with SaltRim's answer as the cached value,
+computed values where a formula has no Excel spelling, plus a subset of
+presentation. Intentional limits / future polish:
 
-- **No formulas / reactivity, by design.** SaltRim formulas are Clojure, not Excel
-  syntax; we export the computed value and keep the source as a cell comment
-  rather than attempt a (lossy, partial) Clojure→Excel translation. The UI tooltip
-  + help modal warn about this.
+- **The formula fallback is per CELL and that is the design.** A formula calling
+  the sheet's own `def` library, a dynamic `$(…)` ref, or any Clojure with no
+  Excel name exports as its computed value with the source in a comment saying
+  so — the old behaviour, for that cell only. `xlformula` refuses rather than
+  approximates: there is no "close enough" translation, because a workbook that
+  recalculates to a different number than the sheet it came from is worse than
+  one that does not recalculate at all.
+- **A cell that ERRORS exports its value, never its formula**, even when the
+  formula translates perfectly. `=(/ 1 0)` is valid Excel and Excel would happily
+  compute `#DIV/0!` — but a cell might error here and NOT there (a blank input,
+  a type we are stricter about), and an export that quietly disagrees with the
+  sheet you are looking at is the one bug this feature must not have.
+- **Round-tripping is pinned, not assumed.** `xlformula-test` runs 29 formulas
+  out through the exporter and back through the importer and requires the source
+  to come back identical; `export-test/excel-recomputes-what-we-exported` hands
+  the file to POI's own Excel formula engine and requires its answers to match
+  SaltRim's. Both directions share `stdlib/excel-name`, so neither vocabulary can
+  grow without the other.
+- **Ranges are folded back up** (`xlformula/refs->range`) because `formula/parse`
+  expands `$A1:A3` into per-cell refs and documents that it never comes back.
+  The fold checks the run against `addr/range-cells` exactly, so a gappy list
+  stays a list. Without it `SUM(A1,…,A500)` would breach Excel's 8192-character
+  formula limit that `SUM(A1:A500)` sits nine characters inside — which is also
+  why an over-long translation demotes rather than being written and rejected by
+  Excel (a rejected formula takes the whole FILE down, not the one cell).
 - **Column widths / row heights are not exported.** Our sizes are pixels; POI uses
   1/256-character + twip units, and `autoSizeColumn` needs headless AWT fonts. Left
   at Excel defaults for now.
@@ -380,10 +421,29 @@ of presentation. Intentional limits / future polish:
 
 ## xlsx import (feat/xlsx-import)
 
-`/import` translates Excel formulas to Clojure via POI `FormulaParser` RPN;
+`/import` translates Excel formulas to Clojure by walking **rechentafel's
+formula AST** (`rechentafel.parser/parse` over the string POI hands us);
 everything outside the vocabulary falls back to the cached value + a `comment`,
 and a verify pass demotes translated cells that disagree with Excel's cache.
-Deferred (all land as commented values today, so sheets stay correct):
+
+It walked POI's RPN `Ptg` stream with a hand-written stack machine until the
+AST rewrite (see `spikes/11-excel-ast-import.clj`) — behaviour-identical on
+every formula the old path translated, minus the three token-order hazards
+(`AttrPtg(isSum)`, trailing `FuncVarPtg`, `#external#` + `NameXPxg`) and minus
+the `FormulaParsingWorkbook`/sheet-index plumbing. `translate-formula` now
+takes only the string, which is also what a "paste an Excel formula" input mode
+would need.
+
+The function vocabulary is three tiers — hand-mapped (chosen semantics), then
+`stdlib/excel-name` (~213 borrowed), then `xl/NAME` verbatim (~414). The last
+two were wired up after the AST rewrite made the gap obvious: `xl/` had always
+been documented as the reason an imported formula stays live rather than
+demoting, and the importer simply never reached for it.
+
+Deferred (all land as commented values today, so sheets stay correct). The AST
+names each of these precisely, so the refusal REASON in the audit comment is now
+the construct rather than a POI token class — what is missing is somewhere to
+put them, not the ability to see them:
 
 - **SUMIF / COUNTIF / AVERAGEIF criteria strings** (`">5"`, `"a*"`) need a
   small criteria parser; map onto `filter` + the aggregate.
@@ -391,10 +451,17 @@ Deferred (all land as commented values today, so sheets stay correct):
   semantics; only exact match (`FALSE`) translates.
 - **Cross-sheet references** (`Other!A1`, 3D areas) — SaltRim has no
   cross-sheet refs yet; revisit if/when it does.
-- **Named ranges** — could resolve through POI's workbook names into plain
-  refs at translate time.
-- **Whole-column/row ranges** (`A:A`) — ranges expand statically; needs a
-  bounded "used range" clamp to translate safely.
+- **Named ranges + structured table refs** (`Tax_Rate`, `Sales[Amount]`) —
+  arrive as `:name` / `:table-ref` nodes. Could resolve through POI's workbook
+  names into plain refs at translate time; properly, they want SaltRim named
+  regions (roadmap item K).
+- **Spill refs** (`A1#`) and **range intersection** (`A1:A3 B1:B3`) — `:spill-ref`
+  and `:intersect` nodes; spill needs dynamic arrays (roadmap item E).
+- **Error literals** (`=#N/A`) — the stdlib has `if-error`/`if-na`/`error-type`
+  to CATCH an error but nothing to RAISE one, so `:err` nodes have no target.
+- **Whole-column/row ranges** (`A:A`) — ranges expand statically to one ref per
+  cell, so a whole column is ~1M of them against `max-range-cells` (4096); needs
+  a bounded "used range" clamp to translate safely.
 - **Merged regions** — imported as the top-left value only (no merge concept).
 - **Excel `=` text comparison is case-insensitive**; ours is exact. Verify
   demotes any cell where this changes the result.
@@ -558,3 +625,237 @@ the longest plausible formula or comment, small enough to bound index growth and
 stay inside backend value limits. That needs numbers from a real sheet, plus a
 decision about what the app does when a write exceeds it (refuse at the UI, with
 a message, rather than throw at save).
+
+## Sheet load is order-dependent, and the order is a hash order — FIXED
+
+Found by the benchmark suite. Installing the SAME 300-cell dependency chain
+costs 897 ms in dependency order, 3.9 s in hash-map order, and **111.7 s**
+reversed — 125x between best and worst, on identical cells. At 1000 cells the
+`chain` shape builds in 3.3 s and loads in 32.4 s.
+
+The mechanism is the blank-cell rule doing its job at the worst possible moment.
+A formula whose reference does not exist yet binds a fresh nil-spin; filling
+that blank later is a STRUCTURAL change, so `set-cell!` rebuilds the dependents
+to capture the real node (this is what makes a reference to a not-yet-filled
+cell reactive at all — see the empty-cell note). Install a chain back-to-front
+and every single insert re-triggers that cascade over everything already placed.
+
+`load-document!` iterated the document MAP, so the order was whatever the hash
+gave — and `store/load-record` hands it exactly such a map. Nobody chose this
+order; it is not stable across Clojure versions either. So the time to open a
+sheet was decided by hashing.
+
+**Fixed** by the second of the two options weighed here — suppress the rebuild
+during the bulk load and do one pass at the end — because it is order-independent
+by construction rather than merely order-correct. (The first was: derive the dep
+graph from the document and install in topological order. Rejected: it only
+makes the good order likely, and it cannot help the interactive path.)
+
+`load-document!` now installs every cell with no cascade, then rebuilds ONE set:
+the dependent closure of what it loaded, computed from a single reverse-edge
+index rather than a scan per cell. That set is normally EMPTY, and the reason is
+worth keeping in mind before anyone "optimizes" the pass away or widens it —
+**a Spin body that has never run has captured nothing**. Nothing in the install
+pass derefs a spin, so a cell installed before its dependencies still awaits the
+finished registry entry when it eventually runs. Only cells ALREADY on the sheet
+can hold a dead node, and only `restore-line!` loads onto a populated sheet.
+
+On a populated sheet the loaded cells are rebuilt too, deliberately: resetting a
+literal's signal marks the old dependents dirty and the executor drains on its
+own thread, so one of them can run — and capture — while the pass is still
+going. That is cheap there (the snapshot is one line's worth of cells) and it is
+the only window in which a loaded cell can go stale.
+
+Measured after, on today's engine: 35 ms / 11 ms / 10 ms for the same three
+orders, and `chain` 1000 loads in 33 ms instead of 2.75 s. See `doc/bench.md`.
+
+## Cycle detection is O(depth) per install — FIXED
+
+Found by the benchmark suite once the load cascade above stopped hiding it.
+`would-cycle?` answered "can this new reference reach me?" by walking the forward
+dependency graph from scratch, every time. In a chain that walk is the entire
+ancestry, so installing n cells cost O(n²) — **~65% of the time to build a
+1000-deep chain** (332 ms with the check, 117 ms with it stubbed out), and the
+reason loading in DEPENDENCY order had become the slow order.
+
+The check itself is not optional: a cyclic formula deadlocks `await` into a
+StackOverflowError, so it has to run before `compile`, and it has to consider
+dynamic edges as well as static ones (see `rt/lookup-dyn`, which repeats it at
+run time for targets only known then).
+
+**Fixed** without touching the walk, and without the incremental topological
+order this entry originally proposed (keep a rank per cell, reorder only the
+region between the endpoints of a new edge) — that would have had to survive
+`remove-line!`, the reshape rebuilds and the dynamic edges recorded
+mid-evaluation, and it turned out not to be needed. A cycle through `addr` has
+to come back INTO it, so it needs an edge x -> addr. If nothing references
+`addr` there is no cycle to find, however deep the ancestry below it goes, and
+the walk is skipped outright. That is the common case: a fresh formula, the next
+cell down a column, every cell of an import in dependency order. A
+self-reference is the one cycle whose in-edge comes from the install itself, so
+`would-cycle?` checks it directly rather than leaving it to the walk —
+**remove that line and `=$A1` in A1 StackOverflows the sheet.**
+
+The cheap "does anything reference this?" answer comes from the `:readers`
+index (below). `chain` 1000 builds in 31 ms instead of 394 ms.
+
+## The `:readers` index is maintained, not derived
+
+`:readers` is `:meta`'s `:deps` inverted — `{addr #{addrs naming it}}` — and it
+exists because rendering an edit, rebuilding dependents and refusing a cycle all
+ask "who reads this cell?", which used to mean a `keep` over the entire sheet
+per question. Removing those scans is where the **60x edit improvement** came
+from (a write to the root of a 1000-deep chain: 83 ms -> 1.3 ms).
+
+The cost is that it has to be updated by hand, in `reindex-readers!`, on every
+path that changes a cell's `:deps` — and a missed update is not a slow answer
+but a wrong one: a dependent that never rebuilds (silently stale value) or a
+cycle that is not refused (StackOverflow). The paths today are the three
+branches of `write-cell!` plus `load-document!`'s error branch, which REPLACES a
+meta entry wholesale. `engine-test/reverse-index-tracks-every-write` pins it by
+comparing the maintained index against a fresh scan after each kind of write and
+after 400 random ones; deleting any single `reindex-readers!` call fails it.
+
+**If you add a path that writes `:deps` into `:meta`, it must call
+`reindex-readers!` first** (it reads the OLD deps from `:meta`, so ordering
+matters). The dynamic half of the reverse edges is deliberately NOT indexed:
+`:dyn` is written from `rt/lookup-dyn` on executor threads, it holds an entry
+only for cells that have a dynamic ref (usually none), and a second index kept
+in step across threads is a lock waiting to be got wrong.
+
+## A formula can await at most ~250 cells (JVM 255-argument limit) — FIXED
+
+Found by the benchmark suite, fixed in the same track. Left here because the
+shape of the fix is a constraint on any future change to `formula/compile`.
+
+`=(sum $A1:A250)` compiled; `=(sum $A1:A260)` failed to compile with
+`ClassFormatError: Too many arguments in method signature`. A range expands to
+one `await` per cell, and Spindel's CPS transform nests a continuation per await
+whose method signature carries every previously-bound local — so ~250 awaits
+exceeded the JVM's hard cap of 255 arguments.
+
+The fix: **awaits are looped, not written out flat**. One await site, one
+continuation frame reused via `recur`, values collected into a vector that
+reaches the SCI body through `apply`. No per-cell local exists, so nothing
+accumulates in a signature. Two rules that fall out of this and must survive
+future edits:
+
+- The addresses arrive as a runtime ARGUMENT, never as a literal in the emitted
+  code — a 5 000-element literal vector hits the other JVM limit, "Method code
+  too large".
+- `static-spin` is a plain `defn`, not an `eval`ed factory, because the shape no
+  longer varies per formula. That removed a per-`set-cell!` `eval` and is most
+  of why build/load got 9-30x faster; do not reintroduce a per-formula `eval` on
+  the static path.
+
+The dynamic path keeps the flat shape below `FLAT-AWAIT-LIMIT` (200 refs) and
+switches to the looped one above it. Not premature: a dynamic formula re-runs
+its address fns on every recompute and is structurally rebuilt on ANY edit, and
+making the looped shape unconditional cost the bench `dyn` shape 10.5 s against
+6.3 s at 1000 cells.
+
+What now bounds a range is TIME, not the argument cap — see `MAX-RANGE-CELLS`,
+lowered from a fictional 10 000 to a measured 5 000 so an oversized range is
+refused at install instead of wedging the sheet.
+
+## Errors as VALUES (so a guard can catch a propagated one)
+
+`errors` classifies a failure and the cell shows its code, and `if-error` /
+`if-na` / `error-type` let a formula branch — but only on a failure raised by
+the expression they wrap. An error arriving from a REFERENCED cell cannot be
+caught: `formula/compile` hoists every ref out of the body and awaits it before
+the body runs (the CPS breakpoints must be literal), so the exception reaches
+the cell before any guard exists. `(if-error (/ $A1 $B1) 0)` works;
+`(if-error $A1 0)` over an already-broken A1 does not. `errors-test`
+(`propagation-is-not-catchable`) pins the current behaviour so this cannot
+change silently.
+
+Excel does not have this problem because an error there is a VALUE that flows
+through every operator, first-error-wins. Matching that means cells returning
+`{:error …}` instead of throwing, and every operator becoming error-aware —
+otherwise `(+ <error> 1)` is a ClassCastException and `#NUM!` degrades to
+`#VALUE!`, losing the original cause. That is a formula-runtime change, not a
+patch: it touches the compiler, the stdlib, the aggregates (do they skip errors
+like blanks?) and `simplify`. Worth doing, worth its own design pass.
+
+## Excel interop (`xl/`) — deferred pieces
+
+The Excel library (`excel` ns, ~410 functions borrowed from rechentafel) landed
+behind an `xl/` namespace, for import/export interop only — the formula language
+stays Clojure. Four known seams are open. None of them silently lies; they
+either work or fail loudly.
+
+- **The native translation layer is DONE** (`stdlib` ns, ~230 borrowed
+  functions under kebab-cased Clojure names, ISO dates at the boundary). What it
+  consciously left out, and would be worth revisiting:
+  - **2D-shaped functions** — `MMULT`, `MINVERSE`, `MDETERM`, `TRANSPOSE`,
+    `LINEST`, `LOGEST`, `TREND`, `GROWTH` all take and/or return rectangles, and
+    a SaltRim range is flat. They stay `xl/`-only until ranges carry a shape
+    (next item).
+  - **Times of day.** `HOUR`/`MINUTE`/`SECOND`/`TIME`/`TIMEVALUE` are not
+    translated because SaltRim has no time-of-day convention — dates are ISO
+    `yyyy-MM-dd` strings with no clock part. Adding one is a design decision
+    (ISO-8601 datetime strings? a separate type?), not a translation.
+  - **`CEILING`/`FLOOR` proper** are absent: our `ceil`/`floor` are 1-arg and
+    must stay that way, so Excel's round-to-a-multiple pair is exposed under its
+    modern names `ceiling-math`/`floor-math`. Slightly surprising if you came
+    from Excel; the alternative was changing what `floor` means.
+  - **`EVEN`/`ODD`** are absent on purpose — as functions returning rounded
+    integers they sit one character away from clojure.core's `even?`/`odd?`
+    predicates, which is a footgun for the sake of two rarely-used roundings.
+
+- **Errors are messages, not values.** An Excel function that fails throws an
+  `ex-info` whose message is the spreadsheet name (`#DIV/0!`, `#N/A`) and whose
+  `ex-data` carries `{:excel-error :div0}`. The cell renders that as its
+  `{:error …}`, so the user sees the right word — but a *formula* still cannot
+  branch on it, because SaltRim has no error VALUE. Making the taxonomy real
+  (`#DIV/0! #VALUE! #REF! #NAME? #NUM! #N/A` as first-class values that
+  propagate) would give a genuine `IFNA` (today's `if-error` catches everything,
+  including real bugs), give cell assertions something precise to test, and fold
+  in the existing `deleted-ref` → `#REF!` case, which already reaches for this
+  taxonomy informally. The `ex-data` is already carrying the code for it.
+
+- **Ranges have no shape.** A SaltRim range expands to a FLAT row-major vector,
+  so `$A1:A3` and `$A1:C1` are indistinguishable once read. The adapter picks
+  the useful default — a flat argument becomes a single COLUMN, which is what
+  `SUM`/`SORT`/`UNIQUE`/`FILTER` need — and anything wanting a rectangle takes
+  an explicit `(as-rows w …)`. That is why the native `xvlookup` needs its width
+  argument too. Giving ranges a real shape (a vector of rows, or a flat vector
+  plus `{:rows :cols}`) is the actual fix and would make `VLOOKUP`, `INDEX`,
+  `MATCH`, `MMULT`, `TRANSPOSE` and binop broadcasting work without ceremony —
+  but it changes the runtime shape every existing formula sees, so it needs its
+  own PR and a migration story, not a drive-by.
+
+- **Volatile functions are excluded, and our own `today` has the bug they
+  would have.** `NOW`/`TODAY`/`RAND`/`RANDARRAY`/`RANDBETWEEN` are not exposed:
+  they depend on nothing, and SaltRim has no recalc sweep, so their value would
+  freeze at the cell's last structural rebuild and then differ across branches,
+  merges and as-of views. The native `today` in `formula/stdlib` is exactly that
+  bug already — a sheet open across midnight, or reloaded from the db months
+  later, shows a stale date. Needs a volatility policy (recompute on load? a
+  coarse timer? an explicit "as of" input cell?) before any of them are safe. If
+  `RAND` ever lands, seed it per sheet — a non-deterministic cell makes 3-way
+  merge meaningless.
+
+Also open, smaller: `TEXT` with a date mask returns the serial's digits rather
+than a formatted date (upstream implements the numeric masks only), and the
+`excel` ns is JVM-only — rechentafel is `.cljc`, so a future client-side formula
+preview could use the same pack if the adapter were written portably.
+
+## `combina` never returns when its first argument is 0
+
+`(combina 0 2)`, `(combina 0.5 2)` and even `(combina 0 0)` loop forever inside
+rechentafel. In `fn/math.cljc` the impl computes `n' = n + k - 1` and then
+`k' = (min k (- n' k))`, which is `n - 1` — so `n = 0` (after `long`
+truncation) makes `k'` negative, and the loop's `(if (= i k') …)` counts up from
+`i = 0` and can never reach it. `COMBIN` right above it guards with
+`(> k n)` → `#NUM!`; `COMBINA` has no equivalent guard.
+
+Reported upstream: https://github.com/replikativ/rechentafel/issues/2 — close
+this when a release carrying the fix is pinned in `deps.edn`.
+
+Reachable from any cell, but it degrades to `#TIMEOUT!` through `sheet/`'s
+eval-timeout wedge rather than freezing the sheet, so this is not an outage
+here. It is the only borrowed function known to
+do it; there is no argument validation in front of the borrowed half generally,
+and adding one per function is not the answer — the timeout is.

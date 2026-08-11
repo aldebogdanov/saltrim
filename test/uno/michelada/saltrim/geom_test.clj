@@ -4,6 +4,7 @@
    short of the viewport (empty strip to the right / below)."
   (:require [clojure.test :refer [deftest is testing use-fixtures]]
             [uno.michelada.saltrim.constants :refer [CW MAX-COLS MAX-ROWS MAX-WIN-COLS MAX-WIN-ROWS MINSZ RH WIN-COLS WIN-ROWS OVER]]
+            [uno.michelada.saltrim.geom-vectors :as gv]
             [uno.michelada.saltrim.sheet :as sheet]
             [uno.michelada.saltrim.web.geom :as geom]))
 
@@ -103,6 +104,31 @@
           (str "clamp-view on " (pr-str bad)))))
   (testing "the clamped view still renders"
     (is (seq (first (geom/window *sh* (geom/clamp-view {:r0 1e18 :c0 "x"})))))))
+
+;; --- agreement with the browser -----------------------------------------
+;; The client runs its own copy of this arithmetic (app.cljs), because only it
+;; knows the viewport and only it handles the wheel. Two implementations of one
+;; layout: when they disagree the far edge of the grid renders empty, which has
+;; happened twice. The expected numbers live in `geom-vectors` (cljc) and the
+;; CLJS suite reads the SAME ones — `clojure -T:build cljs-test`.
+
+(deftest client-and-server-agree-on-the-axis
+  (doseq [{:keys [label base ov offsets]} gv/axis-cases]
+    (testing label
+      (doseq [[i px] offsets]
+        (is (= px (#'geom/axis-off ov base i)) (str "start px of index " i)))))
+  (testing "and through a real sheet, not just the arithmetic in isolation"
+    (let [{:keys [base ov offsets]} (second gv/axis-cases)]
+      (sheet/set-default-col-w! *sh* base)
+      (doseq [[i w] ov] (sheet/set-col-width! *sh* i w))
+      (doseq [[i px] offsets]
+        (is (= px (geom/axis-x *sh* i)) (str "sheet says index " i " starts at " px))))))
+
+(deftest client-and-server-agree-on-span-count
+  ;; `(quot px base)` answers 16 for every one of these cases; that is the bug
+  (doseq [{:keys [label base ov i0 px cap n]} gv/span-cases]
+    (testing label
+      (is (= n (#'geom/span-count #(get ov % base) i0 px cap))))))
 
 (deftest pretty-err-translates-the-blank-cell-mistake
   ;; referencing a still-empty cell in arithmetic is the first mistake everyone

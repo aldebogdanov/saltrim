@@ -23,9 +23,91 @@ restricted **Clojure s-expressions** (not infix). Reference other cells with the
 | `$A1:C1` | a row range `[A1 B1 C1]` |
 | `$A1:B2` | a rectangle, row-major `[A1 B1 A2 B2]` |
 
+A range may cover up to 5 000 cells; a bigger one is refused when you enter it,
+rather than left to time out.
+
 References shift on paste (see below). The `$` forms are shorthand for the
 underlying reader tags — `$A1` for `#cell A1`, and `$A1:A3` for `#cells A1:A3` —
 which you can also write out in full if you prefer.
+
+**Rectangles with their shape.** `$A1:B2` is flat and row-major, which is what
+`sum`, `map` and friends want. A 2×2 and a 4×1 therefore look identical once
+read, and some functions need to tell them apart. Write `#area A1:B2` for those:
+it yields a vector of **rows**, `[[A1 B1] [A2 B2]]`.
+
+| form | value of a 2×2 block |
+|---|---|
+| `$A1:B2` | `[1 2 3 4]` |
+| `#area A1:B2` | `[[1 2] [3 4]]` |
+
+Excel's functions are defined over rectangles, so this is the difference between
+a right and a wrong answer for the shape-sensitive ones:
+
+```clojure
+=(xl/TRANSPOSE #area A1:B2)   ; [[1 3] [2 4]]  — correct
+=(xl/TRANSPOSE $A1:B2)        ; [1 2 3 4]      — transposed a single column
+```
+
+The .xlsx importer emits `#area` automatically wherever a workbook passes a true
+rectangle to an Excel function. Both forms cost the same and share the 5 000-cell
+cap; `#area` shifts on paste and follows row/column inserts exactly like `$A1:B2`.
+
+**The built-in aggregates don't care which one you use.** `sum`, `mean`,
+`median`, `xmin`, `xmax`, `product`, `stdev` and `variance` all work over the
+cells, so `(sum $A1:B2)` and `(sum #area A1:B2)` are the same number. Plain
+Clojure functions, on the other hand, see exactly what you wrote — which is the
+point of having the shape:
+
+```clojure
+=(count $A1:B2)        ; 4  — cells
+=(count #area A1:B2)   ; 2  — rows
+=(map sum #area A1:B2) ; (3 7) — a total per row
+```
+
+**Matrix functions** take and return areas, so they compose:
+
+```clojure
+=(transpose #area A1:C2)                    ; [[1 4] [2 5] [3 6]]
+=(matmul #area A1:C2 #area E1:F3)           ; [[58 64] [139 154]]
+=(det #area H1:I2)                          ; 10
+=(matmul #area H1:I2 (inverse #area H1:I2)) ; the identity
+```
+
+`transpose`, `matmul`, `det`, `inverse`, `linest` and `trend` are all ordinary
+names — no `xl/` prefix needed. Hand one a flat `$A1:B2` and it tells you so
+rather than quietly computing something else.
+
+### Naming cells
+
+Give a cell a **label** (format row **🎨** → `label`) and the name becomes a
+reference. `$rate` reads the cell labelled `rate`, wherever it is:
+
+```clojure
+=(* $A1 $rate)                ; instead of =(* $A1 $B7)
+```
+
+Put the **same** label on several cells and the name means all of them, in
+row-major order — a named range:
+
+```clojure
+=(sum $sales)                 ; every cell labelled `sales`
+=(transpose #area grid)       ; and as rows, if they form a full rectangle
+```
+
+A name costs nothing to use: it is resolved when the formula is written, so what
+the engine sees is an ordinary reference. Two consequences worth knowing:
+
+- **A name follows its cell.** Insert a row above the labelled cell and every
+  `$rate` still finds it — no reference rewriting, because the label moved with
+  the cell. Move the label to a different cell and the formulas re-point there.
+- **An address always wins.** A cell labelled `q1` is not reachable as `$q1`;
+  that spelling is already column Q, row 1. Names with digits at the end are
+  worth avoiding.
+
+A name nothing carries reads `#NAME?`, so you can write the formula first and
+label the cell afterwards. Labels that are themselves formulas (`=(str "Q" $A1)`)
+still title the graph node but do not name the cell — a name that recomputes
+would mean any edit anywhere could restructure formulas elsewhere.
 
 **Relative references** point to a cell by *offset from the cell itself*, written
 `$<col><row>` where each of col/row is `_` (same index), `+N`, or `-N`. They are
@@ -80,16 +162,125 @@ literal all work.
 `(quote x)`. Nested `#()` is rejected, same as in Clojure.)
 
 Formulas that depend on other cells recompute automatically when those cells
-change. Circular references are rejected. Errors show as `#ERR` in the cell and
-a toast message describing what went wrong.
+change. Circular references are rejected. A cell that fails shows which failure
+it was (`#DIV/0!`, `#N/A`, …) plus a toast describing it — see
+[When a cell fails](#when-a-cell-fails).
 
-A **stdlib** is available bare in every formula: math (`sum`, `product`, `round`,
-`sqrt`, `pow`, `sign`, …), stats (`mean`/`avg`, `median`, `variance`, `stdev`),
-text (`upper`, `lower`, `trim`, `join`, `split`, `str-replace`, `includes?`, …),
-date over ISO `yyyy-MM-dd` strings (`today`, `year`, `month`, `day`,
-`days-between`), and excel-compat helpers with Excel semantics (`if-error`,
-`excel-truthy`, `xmin`, `xmax`, `xround`, `xdate`, `xvlookup`) that the .xlsx
-importer targets.
+A **stdlib** is available bare in every formula. The core of it is
+hand-written: math (`sum`, `product`, `round`, `sqrt`, `pow`, `sign`, …), stats
+(`mean`/`avg`, `median`, `variance`, `stdev`), text (`upper`, `lower`, `trim`,
+`join`, `split`, `str-replace`, `includes?`, …), dates over ISO `yyyy-MM-dd`
+strings (`today`, `year`, `month`, `day`, `days-between`), and excel-compat
+helpers (`if-error`, `excel-truthy`, `xmin`, `xmax`, `xround`, `xdate`,
+`xvlookup`) that the .xlsx importer targets.
+
+On top of that sit **~230 functions borrowed from Excel's library** and given
+Clojure names — the numerics a spreadsheet is expected to have, without the
+spreadsheet:
+
+```clojure
+=(pmt 0.08 10 -1000)              ; 149.03 — a loan payment
+=(irr $B1:B9)                     ; and the rest of the financial pack
+=(norm-dist $A1 40 1.5 true)      ; distributions, regression, rank
+=(percentile $A1:A99 0.9)
+=(eomonth $A1 1)                  ; "2026-08-31" — dates in, dates out
+=(vlookup $A1 (as-rows 2 $B1:C9) 2 false)
+=(convert 1 "lbm" "kg")
+```
+
+Names are the terms of art, kebab-cased: Excel's dots become dashes
+(`STDEV.P` → `stdev-p`, `T.DIST.2T` → `t-dist-2t`), and the two whose Excel
+name clojure.core already owns get a prefix (`FIND` → `str-find`,
+`SEARCH` → `str-search`). The full list is in the **ƒ** panel, where hovering a
+name shows what it does and **⧉** copies its *source* — the real implementation
+with the helpers it needs, ready to paste into a Clojure project, for when a
+flattened or imported formula has to run outside SaltRim.
+
+Three things worth knowing:
+
+- **Dates are ISO strings**, not Excel serial numbers — in *and* out.
+  `=(eomonth "2026-07-29" 1)` gives `"2026-08-31"`, and a whole column of dates
+  works too: `=(xirr $B1:B9 $C1:C9)`.
+- **A range is a flat vector.** Functions wanting a table take a reshape:
+  `(as-rows 2 $B1:C9)`.
+- **Nothing that already worked changed.** `round` is still 1-arg (Excel's
+  2-arg rounding is `xround`), `ceil`/`floor` are still 1-arg (round-to-a-multiple
+  is `ceiling-math` / `floor-math` / `mround`), and `min`/`max` are still
+  Clojure's (`xmin`/`xmax` skip blanks).
+
+What's deliberately *not* borrowed: anything Clojure already does better
+(`SORT`, `UNIQUE`, `FILTER`, `IF` → `sort`, `distinct`, `filter`, `if`), the
+`AVERAGEA`-style text-coercion variants, the database `D*` family, and Excel's
+legacy duplicate spellings. Those remain reachable as `xl/…`.
+
+### When a cell fails
+
+A broken cell shows **which** failure it is, not a blanket `#ERR`:
+
+| | |
+|---|---|
+| `#DIV/0!` | divided by zero |
+| `#VALUE!` | wrong type — text where a number was needed |
+| `#N/A` | a lookup found nothing |
+| `#REF!` | the referenced cell was deleted |
+| `#NAME?` | no such function or name |
+| `#NUM!` | a number outside the function's domain |
+| `#TIMEOUT!` | the formula never finished |
+| `#ERR` | anything else |
+
+Hover the cell for the detail behind the label. Errors travel: a cell reading a
+broken one breaks the same way, keeping the original code.
+
+Formulas can handle a failure instead of displaying it:
+
+```clojure
+=(if-error (/ $A1 $B1) 0)                              ; fall back
+=(if-na (vlookup $A1 (as-rows 2 $B1:C9) 2 false) "—")  ; ONLY a lookup miss
+=(if (= :na (error-type (vlookup …))) "none" "ok")     ; branch on the code
+=(error? (/ $A1 $B1))                                  ; predicate
+```
+
+`if-na` is the careful one: it catches a miss and lets a genuine bug through,
+where `if-error` swallows everything.
+
+These guard **the expression you wrap**. They can't catch an error arriving from
+another cell — references are resolved before the formula body runs, so the
+error reaches the cell first. (Excel can, because there an error is a value that
+flows through operators; doing the same here is a bigger change, tracked in
+`TECHDEBT.md`.)
+
+### Excel interop (`xl/`)
+
+Formulas are Clojure — that doesn't change. But a spreadsheet you **import**
+may call functions SaltRim has no native equivalent for, and rather than freeze
+those cells into dead numbers, they stay live as `xl/` calls:
+
+```clojure
+=(xl/PMT 0.08 10 -1000)      ; 149.03 — as imported from Excel
+```
+
+Around 410 of Excel's functions are reachable that way. Most of them — 267 —
+already carry a Clojure name, listed above, and an import translates to *that*:
+`PMT(…)` arrives as `(pmt …)`, not as `xl/PMT`. The **ƒ** panel's *Excel
+interop* section lists only the remaining **144**, the tail we chose not to
+translate (database, the text-coercion variants, the legacy spellings). The
+prefix is deliberate: seeing `xl/` in a cell tells you it came from a
+spreadsheet, and it maps straight back on export.
+**When writing your own formulas, use the Clojure name.**
+
+Two conventions differ inside `xl/`, and both fail loudly rather than guessing:
+
+- **A range arrives as a column.** Functions wanting a *table* need a reshape:
+  `=(xl/VLOOKUP $A1 (xl/as-rows 2 $B1:C9) 2 false)`.
+- **Dates are Excel serial numbers**, not ISO strings:
+  `=(xl/YEAR (xl/date->serial $A1))`, and `xl/serial->date` back.
+- **Errors keep their spreadsheet names** — dividing by zero reports `#DIV/0!`,
+  not a stack trace.
+
+Functions that only make sense inside Excel's own engine are absent: `IF`,
+`IFERROR`, `MAP`, `REDUCE` and friends (use Clojure's `if`, `if-error`, `map`,
+`reduce`), the volatile `NOW`/`TODAY`/`RAND`, and the handful Excel itself
+leaves unimplemented.
 
 **Empty cells** read as `nil`. The aggregate stdlib functions (`sum`, `mean`,
 `median`, `product`, `variance`, `stdev`) **ignore blanks**, so a roomy range over
@@ -174,7 +365,7 @@ Two properties in the same dropdown describe a cell instead of painting it:
 
 | Property | Purpose |
 |----------|---------|
-| `label` | **names** the cell — a short identifier shown instead of its address in the 🕸 dependency graph |
+| `label` | **names** the cell — say `$label` in any formula instead of its address, and see the name in the 🕸 dependency graph |
 | `comment` | a **note about** the cell — free prose for whoever reads the sheet next |
 
 A commented cell is marked with a small flag in its top-right corner and shows
@@ -318,8 +509,8 @@ dependency depth. Click a node to select that cell.
 
 To make nodes readable, give a cell a **label**: open the format row (**🎨**),
 pick `label` in the property dropdown, and type a name (e.g. `revenue`). The
-graph then shows the name instead of the address (`A1`). Labels are display-only
-for now (you still reference cells by address / `$A1` in formulas).
+graph then shows the name instead of the address (`A1`) — and formulas can use
+it too, see [Naming cells](#naming-cells).
 
 > On large real-world tables the graph gets dense — it's intentionally a simple
 > first version (capped, basic layout); zoom/filtering are future polish.
@@ -379,14 +570,23 @@ Tools: `saltrim_list_sheets` · `saltrim_describe_sheet` · `saltrim_read_range`
 
 ### Export to Excel
 
-The **⬇ xlsx** button (top bar) downloads the sheet as an `.xlsx` file. It is a
-**static snapshot**: every cell exports its current **computed value**, carrying
-its styling (fill, font colour, bold/italic, alignment) and number format — but
-**not** its borders, and **not** its formula. SaltRim formulas are Clojure expressions, not Excel syntax,
-so the exported file has **no live formulas and no reactivity**: changing a value
-in Excel won't recompute anything. Each formula's original source is attached as
-a **cell comment** so the logic isn't lost. The export respects what you're
-viewing — the current branch, or a read-only history snapshot.
+The **⬇ xlsx** button (top bar) downloads the sheet as an `.xlsx` file, **live
+where it can be**. A formula built from functions Excel also has is written as a
+real Excel formula, so the workbook **recalculates in Excel**: change an input
+there and the results follow. SaltRim's own answer is written alongside as the
+cached value, so the file opens showing the right numbers before Excel
+recalculates anything.
+
+A formula with **no Excel spelling** — one calling your own ƒ definitions, a
+dynamic `$(…)` reference, or any Clojure that Excel simply has no function for —
+falls back to its **computed value**, for that cell only. A mostly-translatable
+sheet therefore exports mostly live.
+
+Either way the original Clojure source is attached as a **cell comment** (which
+says so when the formula didn't cross), and the cell carries its styling (fill,
+font colour, bold/italic, alignment) and number format — but **not** its borders.
+The export respects what you're viewing — the current branch, or a read-only
+history snapshot.
 
 ### Import from Excel
 
@@ -414,9 +614,22 @@ Values, styling, number-format masks and column/row sizes carry over; dates
 become ISO strings (`2024-03-15`); text that looks like a number or a formula
 is protected with a leading apostrophe (`'123` — works when typing, too).
 
-**Anything untranslatable** (cross-sheet references, named ranges,
-whole-column ranges, other functions) is imported as its last **computed
-value**, with the original Excel formula kept as the cell's `comment`. Every
+**Defined names become labels.** `=A1*Tax_Rate` arrives as `=(* $A1 $Tax_Rate)`,
+live, with `Tax_Rate` as the label of the cell it named — and a named *range*
+becomes the same label on every cell of it. A name may also be an expression or
+another name, and a sheet-scoped one shadows a global of the same name (Excel's
+own rules); those without a cell to sit on are resolved inline instead.
+
+**Structured table references** resolve to the cells they cover:
+`SUM(Sales[Qty])` becomes `=(sum $B2:B4)`. Column ranges (`Sales[[Qty]:[Price]]`),
+band specifiers (`[#Headers]`, `[#Data]`, `[#Totals]`, `[#All]`), the bare table
+name, and the this-row form (`Sales[@Qty]`, resolved against the row the formula
+sits on) all work. SaltRim gains no table *object* — sorting, filtering, banded
+styling and auto-extension stay behind in Excel; only the reference crosses.
+
+**Anything untranslatable** (cross-sheet references, whole-column ranges,
+other functions) is imported as its last **computed value**, with the original
+Excel formula kept as the cell's `comment`. Every
 translated formula is then **verified against Excel's own cached value** —
 mismatches (e.g. Excel's blank-as-zero arithmetic) are demoted to values the
 same way. An imported sheet is always *correct-or-commented*; the import report
@@ -426,8 +639,9 @@ lists every fallback and demotion.
 
 ```bash
 clojure -M:web        # dev server on http://localhost:8080  (open ?s=<sheet>)
-clojure -X:test       # engine / format / store / auth test suites
-clojure -T:build cljs # compile the ClojureScript client -> resources/public/app.js
+clojure -X:test            # engine / format / store / auth test suites
+clojure -T:build cljs-test # the browser half, compiled and run under node
+clojure -T:build cljs      # compile the ClojureScript client -> resources/public/app.js
 clojure -T:build uber # standalone uberjar (compiles the client first)
 ```
 
@@ -468,5 +682,6 @@ SaltRim stands on the work of many open-source authors and communities. Thank yo
 
 **Interop & tooling**
 
+- [rechentafel](https://github.com/replikativ/rechentafel) — by [replikativ](https://github.com/replikativ). SaltRim's Excel interop rests on it in both directions: its POI-cross-validated function pack is what `xl/` exposes and what most of the stdlib delegates to, and its formula parser/unparser is what reads an imported formula and writes one back out. Apache-2.0.
 - [Apache POI](https://poi.apache.org) and [Apache Log4j](https://logging.apache.org/log4j/) — the Apache Software Foundation
 - [tools.build](https://github.com/clojure/tools.build), [test-runner](https://github.com/cognitect-labs/test-runner), [nREPL](https://github.com/nrepl/nrepl), and [tools.namespace](https://github.com/clojure/tools.namespace) — build, test, and REPL tooling

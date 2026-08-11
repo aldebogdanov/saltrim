@@ -19,7 +19,7 @@
 ;; here. The patch number is the git commit count — monotonic, never reset when
 ;; the minor/major bumps — so the full version is e.g. "0.4.57". Cutting a new
 ;; line is a one-string edit.
-(def base-version "0.9")
+(def base-version "0.10")
 
 (defn- compute-version []
   (format "%s.%s" base-version (b/git-count-revs nil)))
@@ -54,6 +54,41 @@
     :main          'uno.michelada.saltrim.app
     :optimizations :advanced
     :pretty-print  false}))
+
+(defn cljs-test
+  "Compile the ClojureScript suite to a node bundle and run it.
+
+   Same compiler as `cljs` above — no npm, no shadow-cljs, no karma; the only
+   thing beyond the JVM is the `node` binary the quality gate already uses for
+   `node --check`. `test_runner.cljs` sets a nonzero process exit code on a red
+   suite, so this is a gate and not a report.
+
+   `:simple`, not `:advanced`, and that is a deliberate limit: :advanced renames
+   properties, which is the very class of bug the `aget`/`getAttribute` rule
+   exists for, and the fake DOM the suite loads against would need externs to
+   survive it. The :advanced bundle stays covered by `cljs` + `node --check`.
+
+   `:private-var-access` is off because `app.cljs` is private by design: nothing
+   outside it may call in, and the production build keeps it that way. The TEST
+   build opts into seeing the privates rather than the source giving up its
+   privacy in order to be testable."
+  [_]
+  (let [out "target/cljs-test/tests.js"]
+    (println "Compiling ClojureScript tests (:simple, node) ->" out)
+    ((requiring-resolve 'cljs.build.api/build)
+     ((requiring-resolve 'cljs.build.api/inputs) "src" "test")
+     {:output-to     out
+      :output-dir    "target/cljs-test"
+      :main          'uno.michelada.saltrim.test-runner
+      :target        :nodejs
+      :optimizations :simple
+      :pretty-print  true
+      :warnings      {:private-var-access false}})
+    (let [p (.start (.inheritIO (ProcessBuilder. ["node" out])))
+          code (.waitFor p)]
+      (when-not (zero? code)
+        (throw (ex-info "ClojureScript suite failed" {:exit code})))
+      code)))
 
 (defn uber
   "Compile /app.js, AOT-compile the gen-class main ns, package a standalone jar."

@@ -570,6 +570,58 @@
                            (when-let [a (.getAttribute t "data-addr")]
                              (jump! a))))
                        #js {:capture true})
+    ;; ƒ-panel reference: copy a function's example to the clipboard. Same
+    ;; delegated shape as the jump above — one listener covers every chip,
+    ;; including the ~280 the panel renders, with nothing to bind or re-bind.
+    ;; The clipboard is imperative work, so it lives here rather than in an
+    ;; attribute; the markup only carries the string.
+    ;;
+    ;; CAPTURE phase, and NOT optional: every modal's inner box carries
+    ;; `data-on:click="evt.stopPropagation()"` so a click inside does not close
+    ;; it, which means a bubble-phase listener on `document` never sees a click
+    ;; in a panel at all. Verified in the browser — the bubble version fired
+    ;; zero times. Stopping propagation here then keeps the copy from reaching
+    ;; the backdrop and closing the panel out from under the user.
+    ;;
+    ;; A BORROWED function carries only its name (`data-src`): its source is the
+    ;; real upstream implementation and 1.2MB across the panel, so `/fnsrc`
+    ;; serves it one at a time. It is fetched on HOVER — the tooltip already
+    ;; makes hover the way you look at a chip, and by the time the pointer
+    ;; reaches the button the text is in `data-copy`, so the click stays
+    ;; synchronous and the clipboard keeps its user gesture. Clicking a chip that
+    ;; was never hovered (touch, keyboard) still works: `copy!` waits for the
+    ;; fetch, which browsers allow inside the gesture's activation window.
+    (letfn [(fetched [t]
+              (or (some-> (.getAttribute t "data-copy") js/Promise.resolve)
+                  (let [f (js/fetch (str "/fnsrc?f="
+                                         (js/encodeURIComponent (.getAttribute t "data-src"))))]
+                    (-> f
+                        (.then (fn [r] (if (.-ok r) (.text r) (js/Promise.reject (.-status r)))))
+                        (.then (fn [txt] (.setAttribute t "data-copy" txt) txt))))))
+            (copy! [t]
+              (-> (fetched t)
+                  (.then #(.writeText (.-clipboard js/navigator) %))
+                  (.then (fn []
+                           ;; the panel has no toast of its own, so the button IS
+                           ;; the acknowledgement
+                           (let [was (.-textContent t)]
+                             (set! (.-textContent t) "✓")
+                             (js/setTimeout #(set! (.-textContent t) was) 900))))
+                  (.catch (fn [err]
+                            (.error js/console "saltrim: clipboard copy refused" err)))))]
+      (.addEventListener js/document "click"
+                         (fn [e]
+                           (when-let [t (some-> (.-target e) (.closest "[data-copy],[data-src]"))]
+                             (.stopPropagation e)
+                             (copy! t)))
+                         #js {:capture true})
+      ;; warm the attribute before the click. `pointerenter` does not bubble, so
+      ;; the delegated listener uses `pointerover`; `focusin` covers the keyboard.
+      (let [warm (fn [e]
+                   (when-let [t (some-> (.-target e) (.closest "[data-src]"))]
+                     (when-not (.getAttribute t "data-copy") (fetched t))))]
+        (.addEventListener js/document "pointerover" warm #js {:capture true})
+        (.addEventListener js/document "focusin" warm #js {:capture true})))
     (drag-thumb! "vbar" "vthumb" true)
     (drag-thumb! "hbar" "hthumb" false)
     ;; a resized window needs a different NUMBER of cells, not just a re-transform

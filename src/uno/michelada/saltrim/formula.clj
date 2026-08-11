@@ -49,17 +49,44 @@
             [org.replikativ.spindel.effects.track :refer [track]]
             [org.replikativ.spindel.effects.await :refer [await]]
             [uno.michelada.saltrim.addr :as addr]
-            [uno.michelada.saltrim.runtime :as rt]))
+            [uno.michelada.saltrim.excel :as excel]
+            [uno.michelada.saltrim.runtime :as rt]
+            [uno.michelada.saltrim.stdlib :as lib]))
 
 ;; --- parse --------------------------------------------------------------
 
 (defn ref-marker
-  "The parsed representation of a cell reference: (::ref \"A1\")."
-  [addr] (list ::ref addr))
+  "The parsed representation of a cell reference: (::ref \"A1\").
+
+   The address is CANONICALISED. Addresses are keys — in `:meta`, in `:readers`,
+   in the datom key — and the renderer only ever asks for the canonical form, so
+   a formula written `$a1` used to depend on a cell nobody could ever write."
+  [a] (list ::ref (cond-> a (addr/valid? a) addr/canon)))
 
 (defn ref?
   "Is `x` a parsed cell-ref marker?"
   [x] (and (seq? x) (= ::ref (first x))))
+
+(defn name-marker
+  "The parsed representation of a reference BY NAME — `$sales`, or `#area sales`
+   when `shape` is `:area`: (::name \"sales\" :flat|:area).
+
+   A name is a cell's `:label`, which until now only titled its node in the
+   graph view. The same label on several cells names all of them, so a name
+   denotes one cell or a group of them.
+
+   The marker never survives `parse`: given a resolver (which is to say, given a
+   sheet), it is replaced by the ordinary ref markers the label currently points
+   at, so DEPS, the cycle check, compilation and reactivity all see exactly what
+   an address-written formula produces. Resolving at parse rather than at
+   runtime is the whole point — a runtime indirection is `$(…)`, and that costs
+   a structural rebuild of every dynamic dependent on any edit."
+  ([nm] (name-marker nm :flat))
+  ([nm shape] (list ::name nm shape)))
+
+(defn name-ref?
+  "Is `x` a parsed name marker?"
+  [x] (and (seq? x) (= ::name (first x))))
 
 (defn dynref-marker
   "The parsed representation of a DYNAMIC cell/range reference `$(expr)`:
@@ -82,10 +109,20 @@
 (def MAX-RANGE-CELLS
   "Cap on how many cells a STATIC range (`$A1:D9`, `#cells A1:D9`) may expand to
    at read time. Ranges expand eagerly into one ref marker per cell, so a typo'd
-   `$A1:ZZ99999` would build millions of markers (and that many `await`s in one
-   body) before anything could reject it. Mirrors `rt/MAX-DYN-RANGE`, which caps
-   the dynamic `$(…)` path the same way."
-  10000)
+   `$A1:ZZ99999` would build millions of markers before anything could reject
+   it. Mirrors `rt/MAX-DYN-RANGE`, which caps the dynamic `$(…)` path the same
+   way.
+
+   MEASURED, not guessed. It used to be 10 000 while the engine could not
+   compile past ~250 (see the await note below) — the cap promised forty times
+   what worked. With the awaits looped, size is bounded by TIME instead: first
+   evaluation of `=(sum $A1:AN)` takes ~0.2 s at 1000, ~1.2 s at 6000 and ~2.0 s
+   at 8000, against `sheet/EVAL-TIMEOUT-MS` of 2 s. Past that the sheet WEDGES,
+   which is a far worse outcome than a rejection — a wedge is sticky and needs
+   the sheet reopened. 5000 leaves roughly a 2x margin on the machine this was
+   measured on; a range bigger than that is refused at read time with a message
+   naming the limit."
+  5000)
 
 (defn- expand-range
   "`(vector <ref> …)` for the inclusive rectangle `a`..`b`, refusing anything
@@ -103,6 +140,32 @@
                       {:range [a b] :cells n})))
     (cons 'vector (map ref-marker (addr/range-cells a b)))))
 
+(defn- expand-area
+  "`(vector (vector <ref> …) …)` for the inclusive rectangle `a`..`b` — the same
+   cells as `expand-range`, but grouped into ROWS so the shape survives.
+
+   Excel functions are defined over rectangles, and a flat row-major vector
+   cannot say whether `[1 2 3 4]` was 2x2, 1x4 or 4x1. `excel/->rv` already
+   turns a collection of collections into a 2D area (and a flat one into a
+   COLUMN), so this is the only piece that was missing: without it
+   `(xl/TRANSPOSE $A1:B2)` transposes a 4x1 column and silently answers
+   `[1 2 3 4]` instead of `[1 3 2 4]`. Shares `MAX-RANGE-CELLS` with
+   `expand-range` — same cells, same cost."
+  [a b]
+  (let [{ca :ci ra :ri} (addr/parse a)
+        {cb :ci rb :ri} (addr/parse b)
+        c0 (min ca cb) c1 (max ca cb)
+        r0 (min ra rb) r1 (max ra rb)
+        n  (* (inc (- c1 c0)) (inc (- r1 r0)))]
+    (when (> n MAX-RANGE-CELLS)
+      (throw (ex-info (str "area " a ":" b " covers " n " cells (max "
+                           MAX-RANGE-CELLS ") — reference a smaller rectangle")
+                      {:range [a b] :cells n})))
+    (cons 'vector
+          (for [r (range r0 (inc r1))]
+            (cons 'vector
+                  (for [c (range c0 (inc c1))] (ref-marker (addr/make c r))))))))
+
 (def ^:private readers
   {;; #cell A1 -> (::ref "A1")
    'cell  (fn [sym] (ref-marker (str sym)))
@@ -110,7 +173,14 @@
    ;; #cells A1:C1 -> (vector (::ref "A1") (::ref "B1") (::ref "C1"))  (rectangle)
    'cells (fn [sym]
             (let [[a b] (str/split (str sym) #":")]
-              (expand-range a b)))})
+              (expand-range a b)))
+   ;; #area A1:B2 -> (vector (vector (::ref "A1") (::ref "B1"))
+   ;;                        (vector (::ref "A2") (::ref "B2")))
+   ;; #area sales -> the same, from the cells LABELLED `sales`, which must form
+   ;;                a full rectangle (resolved against the sheet, see `parse`)
+   'area  (fn [sym]
+            (let [[a b] (str/split (str sym) #":")]
+              (if b (expand-area a b) (name-marker (str sym) :area))))})
 
 (defn deps
   "Cell addresses referenced by a marker form."
@@ -137,6 +207,20 @@
       (if b
         (expand-range a b)
         (ref-marker a)))))
+
+;; `$sales` — a `$`-ref to a NAME rather than an address, where the name is a
+;; cell's `:label`. Tried only after the address and relative forms, so an
+;; ADDRESS ALWAYS WINS: a cell labelled `q1` is not reachable as `$q1`, because
+;; that spelling is already column Q row 1. (`shift-refs` matches the same
+;; address shape, which is what keeps a real name from being shifted on paste.)
+(def ^:private name-ref-re #"\$([\p{L}_][\p{L}\p{N}_.?!*+<>=-]*)")
+
+(defn- name-ref
+  "Marker for a `$name` symbol, or nil if `x` isn't one."
+  [x]
+  (when (symbol? x)
+    (when-let [[_ nm] (re-matches name-ref-re (name x))]
+      (name-marker nm))))
 
 ;; A RELATIVE `$`-ref names a cell by OFFSET from the owner cell, so it survives
 ;; copy/paste unchanged (re-resolved per destination) — the inverse of the
@@ -287,12 +371,18 @@
   (list 'fn (pct-params body) (pct-alias body (apply list body))))
 
 (defn parse
-  "Formula string (without leading =) -> {:form :deps}.
+  "Formula string (without leading =) -> {:form :deps :names}.
 
    Bare `$A1` / `$A3:D8` symbols are terse sugar for `#cell A1` / `#cells A3:D8`
    (see `dollar-ref`) — usable in any formula. `$(expr)` is a DYNAMIC ref
    (see `dynref-marker`); refs inside its expression are ordinary static deps
    (they drive re-resolution), the computed target is not.
+
+   `$sales` is a reference BY NAME — a cell's `:label` (see `name-marker`), and
+   `#area sales` the 2D form. `resolve` turns a name into the addresses it
+   currently stands for; without one the markers survive, which is what
+   `unparse` needs to write the name back out. `:names` reports the names the
+   formula used, so the sheet can rebuild it when a label moves.
 
    The source is read wrapped in parens (so a top-level `$(…)` — two reader
    forms — survives), fused, and must then be EXACTLY ONE form. That also
@@ -304,8 +394,9 @@
    `await` edge) without retyping the address. `$val` is only meaningful where
    an owner exists; in a plain value formula it stays an unknown symbol and SCI
    rejects it at compile."
-  ([s] (parse s nil))
-  ([s self]
+  ([s] (parse s nil nil))
+  ([s self] (parse s self nil))
+  ([s self resolve]
    (let [forms (fuse-dynrefs (edn/read-string {:readers readers}
                                               (str "(" (desugar-fn-literals s) "\n)")))
          _     (walk/postwalk
@@ -320,9 +411,21 @@
                 (fn [x]
                   (cond
                     (and self (= '$val x)) (ref-marker self)
-                    :else                  (or (rel-ref x self) (dollar-ref x) x)))
-                (first forms))]
-     {:form form :deps (deps form)})))
+                    :else (or (rel-ref x self) (dollar-ref x) (name-ref x) x)))
+                (first forms))
+         names (let [acc (volatile! #{})]
+                 (walk/postwalk (fn [x] (when (name-ref? x) (vswap! acc conj (second x))) x)
+                                form)
+                 @acc)
+         ;; resolve names LAST, so `deps` sees ordinary refs and nothing
+         ;; downstream — cycle check, compile, reactivity — knows the
+         ;; difference between a formula written by name and one by address
+         form  (cond-> form
+                 (and resolve (seq names))
+                 (->> (walk/postwalk
+                       (fn [x] (if (name-ref? x) (resolve (second x) (nth x 2)) x)))))]
+     (cond-> {:form form :deps (deps form)}
+       (seq names) (assoc :names names)))))
 
 ;; --- unparse (inverse of parse) ------------------------------------------
 
@@ -333,6 +436,16 @@
    marker and re-parsing yields the EXPANDED vector form (asymmetric by
    design)."
   [a b] (list ::range a b))
+
+(defn area-marker
+  "The 2D counterpart of `range-marker`: renders as `#area A1:B2`, which parses
+   into a (vector …) of ROW vectors so the rectangle's SHAPE survives to the
+   Excel adapter. Same asymmetry as `range-marker` — `parse` never emits it."
+  [a b] (list ::area a b))
+
+(defn area-ref?
+  "Is `x` an area marker (see `area-marker`)?"
+  [x] (and (seq? x) (= ::area (first x))))
 
 (defn range-ref?
   "Is `x` an unparse-side range marker?"
@@ -353,18 +466,41 @@
           (when (= as (addr/range-cells tl br))
             [tl br]))))))
 
+(defn- vector-area
+  "If `x` is a (vector …) of ROW vectors that together tile a full rectangle —
+   exactly what `#area A1:B2` parses to — the [top-left bottom-right] corner
+   pair, else nil. The inverse of `expand-area`, for `unparse`."
+  [x]
+  (when (and (seq? x) (= 'vector (first x)))
+    (let [rows (rest x)]
+      (when (and (seq rows)
+                 (every? #(and (seq? %) (= 'vector (first %))
+                               (seq (rest %)) (every? ref? (rest %)))
+                         rows))
+        (let [grid (mapv #(mapv second (rest %)) rows)
+              tl   (ffirst grid)
+              br   (peek (peek grid))]
+          (when (= (apply concat grid)
+                   (addr/range-cells tl br))
+            [tl br]))))))
+
 (defn unparse
   "Marker form -> formula source WITHOUT the leading `=` — the inverse of
    `parse`. Cell refs render as the terse `$` sugar: (::ref \"A1\") -> $A1; a
-   (vector …) of refs forming a full rectangle re-collapses to $A1:B2; a range
-   marker (see `range-marker`) renders as $A1:B2 directly. Everything else
+   (vector …) of refs forming a full rectangle re-collapses to $A1:B2; a
+   (vector …) of ROW vectors tiling a rectangle re-collapses to #area A1:B2; a
+   range marker (see `range-marker`) renders as $A1:B2 directly. Everything else
    prints as EDN, so for any form in the image of `parse`:
      (= form (:form (parse (unparse form))))."
   [form]
   (cond
     (ref? form)       (str "$" (second form))
+    (name-ref? form)  (if (= :area (nth form 2))
+                        (str "#area " (second form))
+                        (str "$" (second form)))
     (dynref? form)    (str "$" (unparse (second form)))
     (range-ref? form) (str "$" (nth form 1) ":" (nth form 2))
+    (area-ref? form)  (str "#area " (nth form 1) ":" (nth form 2))
     (seq? form)       (cond
                         ;; a fn literal prints as one again, so flattened source
                         ;; reads the way it was written
@@ -373,7 +509,9 @@
                         :else
                         (if-let [[tl br] (vector-range form)]
                           (str "$" tl ":" br)
-                          (str "(" (str/join " " (map unparse form)) ")")))
+                          (if-let [[tl br] (vector-area form)]
+                            (str "#area " tl ":" br)
+                            (str "(" (str/join " " (map unparse form)) ")"))))
     (vector? form)    (str "[" (str/join " " (map unparse form)) "]")
     (map? form)       (str "{" (str/join ", " (map (fn [[k v]]
                                                      (str (unparse k) " " (unparse v)))
@@ -511,8 +649,9 @@
   (if (or (nil? src) (and (zero? dc) (zero? dr)))
     src
     (-> src
-        (str/replace #"#cells\s+([A-Za-z]+[0-9]+):([A-Za-z]+[0-9]+)"
-                     (fn [[_ a b]] (str "#cells " (shift-addr a dc dr) ":" (shift-addr b dc dr))))
+        (str/replace #"#(cells|area)\s+([A-Za-z]+[0-9]+):([A-Za-z]+[0-9]+)"
+                     (fn [[_ tag a b]]
+                       (str "#" tag " " (shift-addr a dc dr) ":" (shift-addr b dc dr))))
         (str/replace #"#cell\s+([A-Za-z]+[0-9]+)"
                      (fn [[_ a]] (str "#cell " (shift-addr a dc dr))))
         ;; $-sugar: range first, then a lone $A1 (the (?!:) keeps the single
@@ -547,8 +686,8 @@
     src
     (let [b (fn [a] (bump-addr a axis at delta))]
       (-> src
-          (str/replace #"#cells\s+([A-Za-z]+[0-9]+):([A-Za-z]+[0-9]+)"
-                       (fn [[_ a c]] (str "#cells " (b a) ":" (b c))))
+          (str/replace #"#(cells|area)\s+([A-Za-z]+[0-9]+):([A-Za-z]+[0-9]+)"
+                       (fn [[_ tag a c]] (str "#" tag " " (b a) ":" (b c))))
           (str/replace #"#cell\s+([A-Za-z]+[0-9]+)"
                        (fn [[_ a]] (str "#cell " (b a))))
           (str/replace #"\$([A-Za-z]+[0-9]+):([A-Za-z]+[0-9]+)"
@@ -628,8 +767,8 @@
                 (> c at) (str tag (with-coord a axis (dec c)))
                 :else    (str tag a))))]
       (-> src
-          (str/replace #"#cells\s+([A-Za-z]+[0-9]+):([A-Za-z]+[0-9]+)"
-                       (fn [[_ a b]] (range-rw "#cells " a b)))
+          (str/replace #"#(cells|area)\s+([A-Za-z]+[0-9]+):([A-Za-z]+[0-9]+)"
+                       (fn [[_ tag a b]] (range-rw (str "#" tag " ") a b)))
           (str/replace #"#cell\s+([A-Za-z]+[0-9]+)"
                        (fn [[_ a]] (cell-rw "#cell " a)))
           (str/replace #"\$([A-Za-z]+[0-9]+):([A-Za-z]+[0-9]+)"
@@ -637,118 +776,31 @@
           (str/replace #"\$([A-Za-z]+[0-9]+)(?!:)"
                        (fn [[_ a]] (cell-rw "$" a)))))))
 
-;; --- SCI sandbox + stdlib ----------------------------------------------
+
+;; --- SCI sandbox ----------------------------------------------------------
 ;; SCI runs the user expression in a curated, side-effect-free subset of
 ;; clojure.core (real lexical scope, NO host interop the user can reach). On top
-;; we merge a spreadsheet stdlib (math / stats / text / date): plain host fns
-;; exposed by name, callable bare from any formula. Names are chosen NOT to
-;; shadow clojure.core (so map/reduce/str/… keep their meaning). Each sheet gets
-;; its OWN context (isolation) built from this base plus the sheet's user `defs`
-;; — see `new-ctx` (ROADMAP item 2: per-sheet namespace + functions).
-
-(defn- ld ^java.time.LocalDate [s] (java.time.LocalDate/parse (str s)))
-
-;; SCI's core exposes the print/read family, but its *out*/*in* are unbound, so
-;; calling them crashes with an opaque cast (SciUnbound -> Writer). They're also
-;; meaningless here: a formula is PURE and recomputes reactively (no console, and
-;; it would re-fire on every dependency change). Override them to fail clearly.
-(defn- no-io [& _]
-  (throw (ex-info "I/O isn't available in formulas — the sandbox is pure (no console)" {})))
-
-(defn- nums
-  "Keep only the numbers in a cell collection, so aggregates IGNORE blank cells
-   (which resolve to nil) — matching a spreadsheet's SUM/AVERAGE-skip-blanks."
-  [c] (filter number? c))
-
-(defn- mean* [c] (let [c (nums c)] (if (seq c) (/ (double (reduce + 0 c)) (count c)) 0)))
-(defn- var* [c]
-  (let [c (nums c) n (count c)]
-    (if (zero? n) 0
-        (let [m (/ (double (reduce + 0 c)) n)]
-          (/ (reduce + (map #(let [d (- % m)] (* d d)) c)) n)))))
+;; we merge the spreadsheet stdlib (`lib/stdlib` — see the `stdlib` ns), plus
+;; the one entry that has to live here because `formula` owns the desugaring:
+;; `#(…)` fn literals. Each sheet gets its OWN context (isolation) built from
+;; this base plus the sheet's user `defs` — see `new-ctx`.
 
 (def stdlib
-  "Predefined functions merged into clojure.core for every formula sandbox.
-   Grouped by category; all pure, none shadowing a clojure.core name."
-  {;; math
-   'abs abs
-   'ceil    (fn [x] (long (Math/ceil (double x))))
-   'floor   (fn [x] (long (Math/floor (double x))))
-   'round   (fn [x] (Math/round (double x)))
-   'sqrt    (fn [x] (Math/sqrt (double x)))
-   'pow     (fn [b e] (Math/pow (double b) (double e)))
-   'exp     (fn [x] (Math/exp (double x)))
-   'ln      (fn [x] (Math/log (double x)))
-   'log10   (fn [x] (Math/log10 (double x)))
-   'sign    (fn [x] (long (Math/signum (double x))))
-   'sum     (fn [c] (reduce + 0 (nums c)))
-   'product (fn [c] (reduce * 1 (nums c)))
-   ;; stats — all skip blank (nil) cells, like a spreadsheet
-   'mean   mean*
-   'avg    mean*
-   'median (fn [c] (let [s (vec (sort (nums c))) n (count s)]
-                     (cond (zero? n) 0
-                           (odd? n)  (nth s (quot n 2))
-                           :else (/ (+ (nth s (dec (quot n 2))) (nth s (quot n 2))) 2.0))))
-   'variance var*
-   'stdev    (fn [c] (Math/sqrt (double (var* c))))
-   ;; text
-   'upper        str/upper-case
-   'lower        str/lower-case
-   'trim         str/trim
-   'join         (fn ([c] (str/join c)) ([sep c] (str/join sep c)))
-   'split        (fn [s sep] (vec (str/split (str s) (re-pattern (java.util.regex.Pattern/quote (str sep))))))
-   'str-replace  (fn [s a b] (str/replace (str s) (str a) (str b)))
-   'starts-with? (fn [s p] (str/starts-with? (str s) (str p)))
-   'ends-with?   (fn [s p] (str/ends-with? (str s) (str p)))
-   'includes?    (fn [s p] (str/includes? (str s) (str p)))
-   'blank?       (fn [s] (str/blank? (str s)))
-   ;; date (ISO yyyy-MM-dd strings)
-   'today        (fn [] (str (java.time.LocalDate/now)))
-   'year         (fn [s] (.getYear (ld s)))
-   'month        (fn [s] (.getMonthValue (ld s)))
-   'day          (fn [s] (.getDayOfMonth (ld s)))
-   'days-between (fn [a b] (.between java.time.temporal.ChronoUnit/DAYS (ld a) (ld b)))
-   ;; excel-compat — Excel-semantics helpers the .xlsx importer targets, and
-   ;; useful on their own. `xmin`/`xmax` skip blank (nil) cells like the other
-   ;; aggregates (core min/max would throw); `excel-truthy` is Excel's 0=false;
-   ;; `xround` rounds half AWAY FROM ZERO like Excel's ROUND (Math/round would
-   ;; give -2.5 -> -2, Excel says -3); `xvlookup` is an exact-match VLOOKUP
-   ;; over one of our row-major flat ranges (`w` = the table width in columns).
-   'if-error     (fn [thunk fallback] (try (thunk) (catch Throwable _ fallback)))
-   'excel-truthy (fn [x] (cond (nil? x)     false
-                               (number? x)  (not (zero? x))
-                               (boolean? x) x
-                               :else        true))
-   'xmin  (fn [c] (let [n (nums c)] (when (seq n) (apply min n))))
-   'xmax  (fn [c] (let [n (nums c)] (when (seq n) (apply max n))))
-   'xround (fn [x n]
-             (let [r (.setScale (java.math.BigDecimal. (str (double x))) (int n)
-                                java.math.RoundingMode/HALF_UP)]
-               (if (pos? (int n)) (double r) (long (.longValueExact (.setScale r 0))))))
-   'xdate (fn [y m d] (format "%04d-%02d-%02d" (long y) (long m) (long d)))
-   'xvlookup (fn [k table w col]
-               (some (fn [row] (when (= k (first row)) (nth row (dec (long col)))))
-                     (partition (long w) table)))
-   ;; `#(...)` — see `desugar-fn-literals`. A macro, so `%` is resolved on the
-   ;; FORM and a `%` inside a string literal stays data.
-   FN-LITERAL (with-meta fn-literal-macro {:sci/macro true})
-   ;; what a reference is rewritten to when the row/column it pointed at is
-   ;; deleted (see `delete-shift`) — always throws, naming what was lost
-   'deleted-ref (fn [what]
-                  (throw (ex-info (str "#REF! — " what " was deleted") {:ref what})))
-   ;; I/O (see no-io): clear "not available" instead of an opaque cast crash
-   'println no-io 'print no-io 'prn no-io 'pr no-io 'printf no-io
-   'newline no-io 'flush no-io 'read no-io 'read-line no-io})
+  "Everything callable bare in a formula: the standard library, plus the
+   `#(…)` fn-literal macro (a macro so `%` is resolved on the FORM, leaving a
+   `%` inside a string literal as data — see `desugar-fn-literals`)."
+  (assoc lib/stdlib FN-LITERAL (with-meta fn-literal-macro {:sci/macro true})))
 
 (defn new-ctx
-  "A fresh per-sheet SCI context: the stdlib merged into clojure.core, then the
+  "A fresh per-sheet SCI context: the stdlib merged into clojure.core, Excel's
+   library under the `xl` alias (interop only — see the `excel` ns), then the
    sheet's user `defs` (a string of top-level forms, e.g. (defn …)) evaluated
    into its namespace, so cells in that sheet can call them. Throws if `defs`
    doesn't evaluate — the caller surfaces it and leaves the sheet unchanged.
    `defs` may be nil/blank (just the stdlib)."
   [defs]
-  (let [ctx (sci/init {:namespaces {'clojure.core stdlib}})]
+  (let [ctx (sci/init {:namespaces {'clojure.core stdlib
+                                    'xl excel/sci-ns}})]
     (when-not (str/blank? defs)
       (sci/eval-string* ctx defs))
     ctx))
@@ -761,6 +813,48 @@
 
 ;; --- compile ------------------------------------------------------------
 
+;; --- awaiting the referenced cells ---------------------------------------
+;; Every distinct referenced cell is awaited exactly once, IN A LOOP with a
+;; single await site — not one `await` per cell.
+;;
+;; That is not a style choice. Spindel's CPS transform turns each await into a
+;; nested continuation whose method signature carries every previously-bound
+;; local, so N awaits written out flat generate a method with ~N arguments —
+;; and the JVM caps a method signature at 255. `=(sum $A1:A250)` compiled;
+;; `=(sum $A1:A260)` died with `ClassFormatError: Too many arguments in method
+;; signature`, forty times below the `MAX-RANGE-CELLS` we advertised. Found by
+;; `clojure -M:bench`; see `spikes/10-await-fanout-chunking.clj` for the
+;; alternatives (a tree of chunk spins also works, and is strictly more
+;; machinery for the same result).
+;;
+;; A loop reuses ONE continuation frame via `recur`, so the depth is constant
+;; and the whole 10 000-cell cap is reachable. The addresses arrive as a runtime
+;; ARGUMENT rather than a literal in the emitted code, because a 5 000-element
+;; literal vector hits the other JVM limit — "Method code too large".
+;;
+;; The values come back as a vector in `addrs` order and reach the SCI body via
+;; `apply`, so no per-cell local is ever bound: a call with 1000 arguments is
+;; fine (Clojure compiles anything past 20 to `.applyTo`); it is only the
+;; continuation SIGNATURE that is capped.
+
+(def ^:private FLAT-AWAIT-LIMIT
+  "Above this many referenced cells, a formula's awaits are looped instead of
+   written out flat. Set well below the JVM's 255-argument cap that forces the
+   issue, since a formula has other locals too."
+  200)
+
+(defn- static-spin
+  "Spin awaiting each address in `addrs` once, in order, then calling `uf` with
+   the values. A plain fn, not an `eval`ed factory — the shape no longer depends
+   on the formula, so the CPS transform happens once when this namespace is
+   compiled instead of on every `set-cell!`."
+  [uf addrs]
+  (spin (loop [as addrs, acc []]
+          (if (seq as)
+            (let [v (await (rt/lookup (first as)))]
+              (recur (rest as) (conj acc v)))
+            (apply uf acc)))))
+
 (defn- dyn-bindings
   "Emitted let-binding pairs for ONE dynamic ref site: compute the address
    string (SCI), resolve/validate it, then a loop awaiting each resolved cell —
@@ -769,12 +863,16 @@
    second await of a shared node. `d` unwraps to a scalar when the string named
    a single cell (\"A5\"), stays a row-major vector for a range (\"A1:B3\") —
    mirroring `$A5` vs `$A5:A5`. Returns [binding-pairs d-sym]; `vmap` (the
-   running addr->value map) is read and re-shadowed by each site in turn."
-  [self k afn-args {:keys [sym]}]
+   running addr->value map) is read and re-shadowed by each site in turn.
+
+   `afn-call` is the finished form that computes this site's address string —
+   the caller decides whether that is a direct call over per-cell locals or an
+   `apply` over the value vector (see FLAT-AWAIT-LIMIT)."
+  [self k afn-call {:keys [sym]}]
   (let [vm  (gensym "vm_") a (gensym "a_") res (gensym "res_")
         raw (gensym "raw_") as (gensym "as_") acc (gensym "acc_")
         v   (gensym "v_")]
-    [[a    (list* (list 'nth 'afns k) afn-args)
+    [[a    afn-call
       res  (list 'uno.michelada.saltrim.runtime/resolve-dyn a)
       raw  (list 'loop [as (list :addrs res) vm 'vmap acc []]
                  (list 'if (list 'seq as)
@@ -822,19 +920,25 @@
                     :else x))
                 form)
          dyns  @dyns*
+         ;; the static awaits written out flat, one local per cell — what the
+         ;; dynamic path uses below FLAT-AWAIT-LIMIT
          bnds  (vec (mapcat (fn [a s]
                               [s (list 'await (list 'uno.michelada.saltrim.runtime/lookup a))])
-                            addrs syms))]
+                            addrs syms))
+         ;; …and the same awaits as a loop over the addresses (see the note above
+         ;; `static-spin`): one await site, one continuation frame, no per-cell
+         ;; local. `vals` is the vector of values in `addrs` order.
+         vbnds ['vals (list 'loop ['as 'addrs 'acc []]
+                            (list 'if (list 'seq 'as)
+                                  (list 'let ['v (list 'await
+                                                       (list 'uno.michelada.saltrim.runtime/lookup
+                                                             (list 'first 'as)))]
+                                        (list 'recur (list 'rest 'as) (list 'conj 'acc 'v)))
+                                  'acc))]]
      (if (empty? dyns)
-       ;; static-only: exactly the pre-dynref shape
-       (let [user-fn (sci-fn ctx syms body)
-             ;; eval a factory (fn [uf] (spin (let [<awaits>] (uf <syms>)))) in
-             ;; this ns so spin/await resolve and CPS sees the effects; then
-             ;; close over uf.
-             factory (binding [*ns* (find-ns 'uno.michelada.saltrim.formula)]
-                       (eval (list 'fn ['uf]
-                                   (list 'spin (list 'let bnds (list* 'uf syms))))))]
-         (factory user-fn))
+       ;; static-only: no per-formula eval at all — the shape is fixed, so the
+       ;; CPS transform already happened when this namespace was compiled.
+       (static-spin (sci-fn ctx syms body) addrs)
        (let [_ (when-not self
                  (throw (ex-info "dynamic $(…) ref needs an owner cell" {})))
              ;; afn k computes site k's address string from the static values
@@ -844,16 +948,38 @@
                          (range) dyns)
              all   (into syms (map :sym dyns))
              user-fn (sci-fn ctx all body)
-             dbnds (loop [k 0, args (vec syms), out ['vmap (zipmap addrs syms)]]
+             ;; Site k's address fn takes the static values plus the results of
+             ;; earlier sites — as ONE seq, applied, so the emitted body binds
+             ;; `vals` and one local per dynamic site rather than one per cell.
+             ;;
+             ;; Only above FLAT-AWAIT-LIMIT, though. A dynamic formula re-runs
+             ;; its address fns on every recompute AND is structurally rebuilt on
+             ;; ANY edit, so the `apply`+`concat` this shape needs is paid a lot
+             ;; of times: measured on the bench `dyn` shape at 1000 cells, making
+             ;; it unconditional cost 10.5 s against 6.3 s for the spliced form.
+             ;; Below the limit the flat shape is both faster and exactly what
+             ;; shipped before, so it stays.
+             big?  (> (count addrs) FLAT-AWAIT-LIMIT)
+             args-of (if big?
+                       (fn [k dsyms] (list 'apply (list 'nth 'afns k)
+                                           (list* 'concat 'vals [(vec dsyms)])))
+                       (fn [k dsyms] (list* (list 'nth 'afns k) (into (vec syms) dsyms))))
+             call-uf (fn [dsyms] (if big?
+                                   (list 'apply 'uf (list* 'concat 'vals [(vec dsyms)]))
+                                   (list* 'uf (into (vec syms) dsyms))))
+             head  (if big?
+                     (into vbnds ['vmap (list 'zipmap 'addrs 'vals)])
+                     (into bnds ['vmap (zipmap addrs syms)]))
+             dbnds (loop [k 0, dsyms [], out head]
                      (if-let [d (nth dyns k nil)]
-                       (let [[pairs dsym] (dyn-bindings self k args d)]
-                         (recur (inc k) (conj args dsym) (into out pairs)))
+                       (let [[pairs dsym] (dyn-bindings self k (args-of k dsyms) d)]
+                         (recur (inc k) (conj dsyms dsym) (into out pairs)))
                        out))
              factory (binding [*ns* (find-ns 'uno.michelada.saltrim.formula)]
-                       (eval (list 'fn ['uf 'afns]
-                                   (list 'spin (list 'let (into bnds dbnds)
-                                                     (list* 'uf all))))))]
-         (factory user-fn afns))))))
+                       (eval (list 'fn ['uf 'afns 'addrs]
+                                   (list 'spin (list 'let dbnds
+                                                     (call-uf (mapv :sym dyns)))))))]
+         (factory user-fn afns addrs))))))
 
 (defn compile-literal-wrapper
   "Spin exposing a literal cell's editable signal as a public awaitable node:

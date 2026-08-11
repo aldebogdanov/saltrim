@@ -60,10 +60,24 @@ If the user types `/caveman`, invoke the `caveman` Skill.
 - **Spike risky unknowns first** — as REPL walkthroughs under `spikes/` (eval the
   forms at a dev REPL; see `spikes/README.md`), not cold-run mains. Don't build
   UI on unproven engine assumptions.
-- **Test after engine changes**: `clojure -X:test` (must stay green; `db`/`auth`
-  suites use the `:memory` Datahike backend). Add tests for new engine behavior.
-  The count moves every PR, so don't pin it here — run the suite and read the
-  tail. (It has been ~190 tests / ~930 assertions since the 1.0 audit.)
+- **Quality gate — BOTH halves, every PR that touches engine or client code.**
+  Green tests are half the bar; the other half is that the sheet did not get
+  slower. Run them before opening the PR and put the numbers in it:
+  1. `clojure -X:test` — must stay green. Add tests for new behavior. The count
+     moves every PR, so don't pin it here — run the suite and read the tail.
+     (~250 tests / ~1250 assertions as of the load-order PR.)
+  2. `clojure -T:build cljs-test` after any `.cljs`/`.cljc` edit — the browser
+     half is a separate compile AND a separate runtime, so a green JVM suite
+     says nothing about it. Plus `node --check resources/public/app.js`, which
+     is the only thing that exercises the `:advanced` bundle the suite doesn't.
+  3. `clojure -M:bench` — compare against the recorded table in `doc/bench.md`.
+     **A regression is a FAILING gate, not a footnote.** Find the cause and fix
+     it, or state plainly in the PR what feature bought the time and why it is
+     worth it — a real capability can cost milliseconds, tidier code cannot.
+     If the numbers improve, re-record the table (same machine, note the date).
+  Benchmarks are in the gate because they have already caught three defects
+  nobody knew about (`doc/bench.md`), each invisible to the test suite: tests
+  prove the answer, only the bench proves the sheet still opens.
 - **The client is ClojureScript** (`src/.../app.cljs`, compiled to
   `resources/public/app.js`). The dev REPL `(start)` watch-compiles it on save
   (plain CLJS compiler, no node/npm); for a one-shot use `clojure -T:build cljs`.
@@ -71,6 +85,23 @@ If the user types `/caveman`, invoke the `caveman` Skill.
   resources/public/app.js`. `app.legacy.js` is the pre-CLJS source, kept for
   reference only (not served). `addr`/`constants` are `.cljc` — shared verbatim
   by server and client (one source of truth for addressing + grid geometry).
+- **The CLJS suite runs in node, against a fake DOM** (`clojure -T:build
+  cljs-test`; `test/…/dom_stub.cljs`). Same plain compiler, `:simple` + `:target
+  :nodejs`, no npm and no browser. Three things make it worth having:
+  `addr_test` is `.cljc` so the SHARED code is asserted on both platforms (a
+  CLJS-only divergence there mis-addresses every cell without throwing);
+  `geom-vectors.cljc` holds the axis/`span-count` answers that `web.geom` and
+  `app.cljs` must BOTH give, so a change to one side fails on the other; and
+  `app_test` asserts which `sr-*` bridge event a gesture produces, which is the
+  entire client→server contract. The stub exists because `app.cljs` calls
+  `addEventListener` at the TOP LEVEL — the namespace cannot even load without a
+  `document` — so **it must be `:require`d before `app` in every test ns**
+  (`:preloads` would say it explicitly but the compiler honours it only under
+  `:optimizations :none`). The test build sets `:warnings {:private-var-access
+  false}`: `app.cljs` stays private, and the TEST opts into seeing it rather
+  than the source giving up its privacy to be testable. `:simple` is the limit —
+  `:advanced` renames properties (the reason for the `aget`/`getAttribute`
+  rule), and only `node --check` on the real bundle covers that.
 - Keep `TECHDEBT.md` current — append when you defer something, mark items DONE.
 
 ## Running / testing the app
@@ -82,6 +113,9 @@ clojure -T:build cljs         # one-shot :advanced /app.js (needed before -M:web
                               # on a fresh checkout — app.js is gitignored)
 clojure -M:web                # one-shot server on :8080 (open ?s=<sheet-id>)
 clojure -X:test               # engine + addr + store + fmt suites
+clojure -T:build cljs-test    # the CLJS suite: compile src+test -> node bundle,
+                              # run it (exit 1 on red). No npm, no browser.
+clojure -M:bench [sizes…]     # engine benchmarks (in-memory sheets, no db/ports)
 node --check resources/public/app.js
 
 clojure -T:build uber             # compiles /app.js then builds a runnable uberjar
@@ -182,7 +216,22 @@ Gotchas learned the hard way:
 - `await`/`track` must appear **literally** in the spin body (CPS breakpoints) —
   not inside a nested `fn`. Ranges expand statically at read time.
 - A cyclic formula **StackOverflows** — `sheet/would-cycle?` rejects before
-  install.
+  install. It skips the graph walk entirely when NOTHING references the cell
+  (no in-edge ⇒ no way back ⇒ no cycle), which is the common case; a
+  self-reference is checked directly, since its in-edge comes from the install
+  itself. That answer comes from **`:readers`** — `:meta`'s `:deps` INVERTED,
+  maintained by `reindex-readers!` on every write. Any new path that writes
+  `:deps` into `:meta` must call it FIRST (it reads the old deps from `:meta`);
+  a missed edge is not a slow answer but a wrong one — a dependent that never
+  rebuilds, or a cycle that isn't refused. Pinned by
+  `engine-test/reverse-index-tracks-every-write`. Never rescan `@meta` to find
+  who reads a cell — that scan was 60x of edit latency (see TECHDEBT).
+- **A Spin body that has never run has captured nothing.** `await` grabs the
+  registry node when the body RUNS, not when it compiles, so a cell installed
+  before its dependencies is fine as long as nothing derefs in between. That is
+  why `load-document!` is a BULK path (install everything, rebuild once at the
+  end) and not a loop over `set-cell!` — as a loop it cascaded on nearly every
+  cell and a 1000-cell chain took 2.75s to open instead of 33ms.
 
 ## Datastar / http-kit gotchas — already solved
 
@@ -375,6 +424,282 @@ nil editor-sid = every session sees it live) and return COMPUTED values so the
 agent gets the reactive feedback loop. Tool descriptions push FORMULAS over
 pasted numbers. Caps: `MAX-READ-CELLS` 2000 (truncates, not errors),
 `MAX-WRITE-CELLS` 1000. Spike: `spikes/08-mcp-transport.clj`.
+**Excel interop** is IN (`excel` ns): ~410 Excel functions behind an **`xl/`
+namespace** — `(xl/PMT 0.08 10 -1000)`, never bare. **The formula language is
+Clojure; Excel is a BOUNDARY, not a second language** (the user rejected merging
+them into the bare namespace — no `=(AVERAGE $A1:A5)`). `xl/` exists so an
+IMPORTED formula whose function we lack stays LIVE instead of demoting to a dead
+cached number, and so EXPORT can map it back exactly; the prefix also makes
+"this came from a spreadsheet" visible in the cell. What Excel has and we WANT
+gets a proper Clojure name in the native stdlib instead — that is the `stdlib`
+ns (below), NOT this one. They
+come from **rechentafel** (`org.replikativ/rechentafel`, Apache-2.0, PINNED) — its
+function pack AND its formula PARSER (`rechentafel.parser/parse`, which the .xlsx
+importer walks). Its EVALUATOR is never called: pull-based dirty/topo recalc, the
+opposite of Spindel. `excel/call` is the whole seam:
+`->rv`/`<-rv` translate plain SaltRim values (nil = Excel's BLANK, not 0;
+integral doubles narrow to Long) to/from Excel's tagged maps, and an Excel error
+VALUE becomes an `ex-info` named the way a user knows it (`#DIV/0!`) → the cell's
+`{:error …}`. Inside `xl/` the names stay Excel's own (uppercase, dotted), so a
+translated formula reads like its source. NOT exposed, each for a reason: evaluator-bound fns
+(`IF`/`IFERROR`/`MAP`/… — Clojure has them), VOLATILE fns (no recalc sweep, so
+they would freeze), and upstream's `#N/A` stubs for what POI leaves unimplemented
+(detected by the `na-stub` closure's class; pinned by a test so upstream drift
+FAILS instead of leaking silent `#N/A`s). A flat range is handed over as a
+COLUMN (shape is lost at read time) — rectangles take `(xl/as-rows w …)`, and
+Excel serial dates take `xl/date->serial`/`xl/serial->date` (the native stdlib
+takes ISO strings; only `xl/` speaks serials). Spike: `spikes/09-excel-function-pack.clj`;
+evaluation of what else to take from rechentafel: `doc/rechentafel-evaluation.md`.
+**The .xlsx importer translates from that AST**, not from POI's RPN `Ptg` stream
+(`xlsx/ast->form`, a plain recursive walk; `translate-formula` takes only the
+formula string, no workbook context). The stack machine it replaced had three
+token-order hazards baked in — a single-range `SUM` arriving as `AttrPtg(isSum)`,
+`IF`/`CHOOSE` as a TRAILING `FuncVarPtg`, `IFERROR` as `NameXPxg` + `#external#`
+— and none of them exist for a node that knows its own name and arguments.
+Every refusal NAMES the construct (`cross-sheet reference to Other`,
+`whole-col reference`) because that string becomes the cell's
+audit `:comment`.
+**STRUCTURED TABLE REFS resolve** (`xlsx/workbook-tables` + `table-form`):
+`Sales[Qty]` → `$B2:B4`. POI already knows the geometry (`getStartColIndex` …,
+`getHeaderRowCount`, `findColumnIndex`), so a reference is column span ×
+row band — `table-bands` maps `[#Headers]`/`[#Data]`/`[#Totals]`/`[#All]`, the
+default band is DATA, and `[@col]` takes the row from `ctx :addr`, which is why
+`read-cell` stamps the cell being translated into the context. A bare table name
+is its data body (`resolve-name` falls through to the tables map). Tables are
+collected WORKBOOK-wide because a table name is global, so one on another tab
+refuses by saying where it is. No table OBJECT is created: Excel's tables carry
+sorting/filtering/banding/auto-extension and a formula needs none of it.
+Fixtures must write these formulas through the XML (`.addNewF`) and supply the
+cached value by hand — POI can neither parse nor evaluate a structured
+reference, so `setCellFormula` throws and `demote-verify!` would otherwise
+demote every translated cell for want of an answer to compare against.
+**A `:label` IS a NAME you can reference** — `$rate` reads the cell labelled
+`rate`, and the SAME label on several cells is a named range (`$sales`
+row-major; `#area sales` as rows, when they form a full rectangle). Resolution
+happens at **parse**, against the sheet's `:labels` index, so `deps` / the cycle
+check / the compiler see the ordinary ref markers an address-written formula
+produces — a name therefore costs NOTHING at recompute time, unlike `$(…)`,
+whose target is only known while the body runs and which rebuilds its dependents
+on every edit. The price is paid where it belongs: `:nreaders` (name →
+formulas using it) drives a structural rebuild when a label MOVES, arrives or
+goes. `$name` is tried after the address and relative forms, so **an address
+always wins** (a cell labelled `q1` is unreachable as `$q1` — that is column Q
+row 1), and `shift-refs` matching the same address shape is what keeps a real
+name from shifting on paste. Only a LITERAL label names a cell (`sheet/name-of`):
+a computed one would let any edit restructure formulas elsewhere. An unresolved
+name is `#NAME?` at COMPUTE time, not a refused write (`sheet/unresolved` emits a
+call on a host fn object, the `if-error` trick) — you must be able to write the
+formula before labelling the cell, and a formula must survive its label being
+removed, since `:nreaders` is what re-installs it. `load-document!` indexes
+labels in a step 0 BEFORE values, because labels are style props and styles load
+last. `errors/classify` now honours an explicit `:code` in ex-data. Also fixed
+in passing: `formula/ref-marker` CANONICALISES, so `$a1` no longer depends on a
+cell nobody can write.
+**DEFINED NAMES become labels** (`xlsx/name-labels`): a name pointing straight at
+cells on the tab is set as their `:label`, and the formula keeps it —
+`=A1*Tax_Rate` imports as `=(* $A1 $Tax_Rate)`, a named RANGE as the same label
+on every cell of it. `coll-arg` flattens a name argument whatever it is, because
+the importer cannot know whether `Sales` labels one cell or nine (a scalar must
+be wrapped to be summable, a range must not be or `COUNT` answers 1). Names with
+no cell to sit on — an expression like `=Data!$B$1*2` — are still resolved
+inline: (`xlsx/defined-names` + `resolve-name`): Excel stores a
+name's target as a formula string of its own (`Tax_Rate` → `Data!$B$1`), so
+resolution is the translator CALLING ITSELF on that string — which gets ranges,
+expressions (`=Data!$B$1*2`) and a name-over-a-name for free, and keeps every
+refusal (cross-sheet, whole-column, range cap) unchanged. A `:seen` set refuses a
+self-referential name instead of overflowing the stack. That needed a
+translation CONTEXT — `{:tab :names :seen}` threaded through `ast->form` — whose
+other job is that a reference qualified with the tab being imported (`Data!$B$1`)
+is LOCAL, not cross-sheet: a defined name is always sheet-qualified, so without
+that every resolved name refused itself. `translate-formula` still takes a bare
+string (ctx optional). The name does NOT survive into the formula: Excel resolves
+it to an address at parse time too, and keeping it would mean a `$(…)` runtime
+indirection, which costs a structural rebuild of every dynamic dependent on ANY
+edit. The native idiom for a named range is `(def sales "B2:B10")` + `$(sales)`,
+opted into per formula.
+Spike: `spikes/11-excel-ast-import.clj`.
+**THE LOOP IS A FIXED POINT** (`roundtrip-test`): .xlsx -> SaltRim -> edits ->
+.xlsx -> SaltRim, over one POI-built workbook running from a bare number up to
+`Sales[@Qty]`. A SECOND lap changes nothing — no value, no formula source, no
+label — which is the assertion that catches drift a single clean lap hides.
+Proving it found three real bugs: (1) `.setCellFormula` sat OUTSIDE
+`try-excel`'s guard, so one `LET` cell (which translates fine and POI then
+refuses to parse) took down the WHOLE export — the attempt now lives inside the
+per-cell fallback; (2) a formula written `$rate` exported as a DEAD VALUE,
+because `source->excel` parsed without a resolver and `form->ast` refused the
+surviving name marker; (3) labels did not survive at all. Fixed by writing the
+sheet's labels back as the workbook's DEFINED NAMES (`export/write-names!`) —
+the exact inverse of import — which must happen BEFORE the cell loop, since POI
+resolves a name while PARSING and a formula mentioning an unknown one is
+refused. With the names in the file the formulas keep saying `Rate`, so
+`=(* $A1 $Rate)` -> `A1*Rate` -> `=(* $A1 $Rate)` is identity. Only two things
+deliberately cross as values: `LET` (POI cannot write it) and the date-shaped
+functions (`year` takes ISO strings; only `xl/` speaks serials). POI fixtures
+need `.addNewF` + a hand-set cached value for `LET`/structured refs, and
+per-cell evaluation, since `evaluateAllFormulaCells` aborts the sweep on the
+first formula it cannot read.
+**EXPORT goes back the same way** (`xlformula` ns): SaltRim marker form -> Excel
+AST -> `rechentafel.unparse`, so precedence, escaping and `$`-absolute refs are
+its problem. `/export.xlsx` is no longer a static snapshot — a formula Excel can
+spell is written as a REAL Excel formula (`.setCellFormula`) with our computed
+answer as the cached value and `setForceFormulaRecalculation`, so the workbook
+recalculates in Excel. The fallback is per CELL: no Excel spelling (a `def`-library
+call, a dynamic ref, arbitrary Clojure) -> the computed value plus a comment
+saying it didn't cross. **An ERRORING cell never exports live** even when it
+translates — Excel might compute a different answer from the same formula, and an
+export that quietly disagrees with the sheet is the one bug this must not have.
+Both directions share `stdlib/excel-name`, so the vocabularies cannot drift, and
+`xlformula-test` pins that by round-tripping 29 formulas OUT and back IN and
+requiring identity. `refs->range` folds `(vector ref…)` back into a range
+(`formula/parse` expands ranges and never puts them back) — needed for
+correctness, not looks: `SUM(A1,…,A500)` breaches Excel's 8192-char formula
+limit, and a formula Excel rejects loses the whole FILE, not the cell.
+**`#area A1:B2` is the 2D range** (`formula/expand-area`): a vector of ROW
+vectors, where `$A1:B2` stays FLAT row-major. Additive on purpose — no saved
+formula changes meaning. It exists because `excel/->rv` turns a flat collection
+into a COLUMN, so `(xl/TRANSPOSE $A1:B2)` transposed a 4x1 and answered
+`[1 2 3 4]` instead of `[1 3 2 4]` — silently, for every shape-sensitive
+function (`INDEX`, `MDETERM`, `MINVERSE`, `MMULT`, the `LINEST` family). `->rv`
+already understood a collection-of-collections; the LANGUAGE just had no way to
+write one. The importer emits `#area` for a true rectangle (both dims > 1) in
+the MECHANICAL tiers only — a hand-mapped aggregate like `sum` filters with
+`number?`, which a nested vector would defeat, and a 1xN/Nx1 has no shape to
+lose. `unparse`/`shift-refs`/`insert-shift`/`delete-shift` all know the tag, and
+`xlformula/area->range` folds it back to one Excel range on export (without it
+`TRANSPOSE(#area A1:B2)` would emit a two-argument call).
+**`stdlib/nums` FLATTENS**, so every blank-skipping aggregate (`sum` `mean`
+`median` `xmin` `xmax` `product` `stdev` `variance`) gives the SAME answer for
+`$A1:B2` and `#area A1:B2` — without that, `filter number?` over `[[1 2] [3 4]]`
+keeps nothing and they all silently returned 0. That is the line between the
+halves of the stdlib: OUR aggregates take cells and ignore shape;
+**clojure.core stays Clojure**, so `(count #area A1:B2)` is 2 rows (not 4 cells)
+and `(map sum #area A1:B2)` is the per-row totals — which is what an area is FOR
+on that side.
+**MATRICES are native now**: `transpose` `matmul` (hand-written — four lines of
+Clojure, and going through `excel/call` would tag-convert every element to
+answer what Clojure answers directly) plus `det` `inverse` `linest` `trend`
+(borrowed; pivoting and conditioning are the numerics worth inheriting).
+`stdlib` had excluded MMULT/TRANSPOSE/LINEST for want of 2D ranges — `#area`
+removed the reason, and nobody should reach for `xl/MMULT` to multiply two
+matrices. This also required `excel/<-rv` to STOP flattening: a genuine
+rectangle result (>1 row AND >1 col) now returns rows, so `MINVERSE`/`MMULT`
+compose — `(matmul m (inverse m))` is the identity, and used to be four loose
+numbers. A 1xN/Nx1 result still flattens (no shape to keep). The importer maps
+`MMULT`/`TRANSPOSE` in its HAND-WRITTEN tier (they are ours, not borrowed) and
+areafies them there itself, since only the mechanical tiers do that
+automatically.
+**The function vocabulary is THREE TIERS**, and only the first is a decision:
+`fname->form`'s hand-written cases (where we chose different semantics —
+`MIN`→`xmin` skips blanks, `VLOOKUP`→`xvlookup` is exact-match only; the set is
+`xlsx/hand-mapped`, pinned against the `case` by a test), then
+~238 borrowed names via **`stdlib/excel-name`**, then the rest verbatim as
+**`xl/NAME`**. Those first two cover 267 of the 411 `xl/` exposes, so the ƒ
+panel lists only the remaining **144** under Excel interop: listing all 411
+under a stdlib that already covers most of them reads as a duplicate and invites
+the fair question of why both exist. New function mappings go in tier one; the other two are one table
+lookup each and need no maintenance. This is what `xl/` was always documented
+FOR, and the importer went a long time without reaching for it — a workbook of
+`PMT`/`SUMIF`/`STDEV.P`/`GEOMEAN`/`TRANSPOSE` used to demote every cell to a
+dead number and now imports with zero demotions. `stdlib/excel-name` leaves out
+the DATE-shaped functions on purpose: `stdlib` speaks ISO strings and Excel
+speaks 1900 serials, so the same name is not the same signature — `xl/EOMONTH`
+is the honest spelling on that side. `demote-verify!` still checks every
+translated cell against Excel's own cached value, so a mechanical translation
+that computes something else degrades to the old behaviour rather than lying.
+**The stdlib is its own ns** (`uno.michelada.saltrim.stdlib`, moved out of
+`formula`) and has two halves. HAND-WRITTEN: the functions whose semantics we
+chose (blank-skipping aggregates, ISO date helpers, the `x*` excel-compat shims
+the importer targets, the I/O refusals). BORROWED: ~230 of Excel's, delegating
+to `excel/call` but TRANSLATED — kebab-cased terms of art (`pmt`, `irr`,
+`norm-dist`, `eomonth`, `percentile`, `stdev-p`; dots become dashes, and the two
+that collide with clojure.core get a prefix: `FIND`→`str-find`,
+`SEARCH`→`str-search`), and **ISO date strings in AND out** (`stdlib/date-shape`
+names which arg positions are dates — scalars, columns and optional holiday
+lists all convert — and whether the result is one; only `xl/` speaks serials).
+Curated, not dumped: left out are what Clojure does better (SORT/UNIQUE/FILTER/
+IF), what needs 2D ranges (MMULT/TRANSPOSE/LINEST), the `*A` text-coercion
+variants, the `D*` family and Excel's legacy duplicate spellings — all still
+reachable as `xl/NAME`. **Nothing already in a saved formula changed meaning**:
+`round`/`ceil`/`floor` stay 1-arg (Excel's are `xround`/`ceiling-math`/
+`floor-math`/`mround`), `min`/`max` stay clojure.core's (`xmin`/`xmax` skip
+blanks). A test pins that: no name shadows clojure.core beyond the documented
+allowlist, and every borrowed name still exists upstream. `formula/stdlib` =
+`lib/stdlib` + the `#(…)` fn-literal macro (which stays with the desugaring).
+The ƒ panel's reference is GENERATED from `stdlib/catalog-syms`, so it can't drift.
+**Each function is a CHIP** with a hover tooltip (description + runnable example)
+and a ⧉ button that copies its **SOURCE**, fed by `stdlib/docs-for`: hand-written
+descriptions are curated (nobody else documents OUR semantics), borrowed ones
+generate from the Excel name + upstream arity (`excel/arity`) — which is what a
+spreadsheet user actually wants to know, that `stdev-p` IS `STDEV.P`. Tooltips
+are pure CSS (`content:attr(data-tip)`), so 284 chips cost 284 spans and zero
+handlers.
+**`stdlib/source-for` is the point of the button**: you import a workbook or
+flatten a formula, get one big expression full of `sum`/`xround`/`xvlookup`, and
+need it to run in a plain Clojure app where those names don't exist. It emits
+the private helpers TOO, in dependency order (`stdev` needs `var*` needs `nums`;
+alphabetical put `mean*` before `nums` and the paste didn't compile), plus the
+`require`s the result uses. `def-hand-written` is a macro so the installed map
+and `hand-written-src` come from ONE literal — the copy button cannot lie.
+`defsrc` does the same for helpers. A name that is only clojure.core's emits a
+NOTE, never `(def abs abs)` (the RHS resolves to the var being defined → runtime
+`unbound fn`); macros → nil (their laziness only matters inside the sandbox).
+`stdlib-test/copied-source-actually-runs` evals every one
+in a FRESH ns and requires it to compute what the installed function does.
+**A BORROWED function hands over the REAL implementation** (`xlsource` ns), not
+a note saying the work happens upstream — `(defn erfc [& args] (excel/call
+"ERFC" args))` is unrunnable without the dependency you were leaving behind and
+says nothing about what ERFC computes. rechentafel ships its `.cljc` in its jar,
+so `tools.reader` in SOURCE-LOGGING mode reads it off the classpath and every
+form carries its own original text as `:source` meta (formatting, comments and
+all). From the `(f/register! "ERFC" <impl> …)` form: the impl expression
+(a `fn`, a `with-meta`, or a factory call like `(n1 #(Math/sin …))`), plus every
+top-level definition of that module it reaches transitively, in FILE order —
+which is dependency order already, since a Clojure file cannot call forward.
+`excel.clj`'s `->rv`/`<-rv` are read the SAME way rather than restated, so the
+button cannot hand over a bridge this build doesn't run. THREE things had to be
+pulled apart, each of which compiled and then failed at RUN time: our
+`date->serial`/`serial->date` collide with `datetime.cljc`'s own (ISO strings vs
+LocalDates) → ours get `-sr`; rechentafel already has a private `norm-dist-impl`
+of four args → our generated impl name gets `*`; `FACT` is implemented over a
+private `fact` and the wrapper redefined it out from under a primitive signature
+→ THEIRS gets `-rt`. `#?(…)` is resolved to its `:clj` branch (a paste goes into
+a `.clj`, where a reader conditional is a syntax error), and only the source
+files' OWN `declare`s are reproduced — a blanket declare ahead of a
+primitive-hinted `defn` breaks its recursive call. Not reproduced, and the
+header says so: upstream's `f/call` arity check, error short-circuit and
+element-wise broadcast of a scalar function over a range. The panel does NOT
+embed these: ~5KB each, 1.2MB over 238 chips, so a borrowed chip carries only
+`data-src` and `app.cljs` fetches `/fnsrc` on HOVER (the tooltip already makes
+hover the way you look at a chip), leaving the click synchronous so the
+clipboard keeps its gesture. `xlsource-test` compiles all 238 in a fresh ns and
+runs ~70 against the installed function.
+`stdlib-test/every-listed-function-documents-itself` pins that every listed name
+has both, and that every example PARSES. **The copy listener MUST be CAPTURE
+phase** — every modal's inner box carries `data-on:click="evt.stopPropagation()"`
+so a click inside doesn't close it, which means a bubble-phase listener on
+`document` never sees a click in a panel at all (verified: the bubble version
+fired zero times). `navigator.clipboard.writeText` also needs USER ACTIVATION,
+so a scripted `.click()` rejects with `NotAllowedError` and cannot test it.
+**Typed cell errors** are DONE (`errors` ns): a failing cell reports
+`{:error msg :code kw}`, not just a message. `errors/classify` places any
+Throwable on a small closed set of Excel's codes — `:excel-error` from
+`excel/call` first, then a `deleted-ref`'s `{:ref …}`, then exception class,
+then stable JDK/SCI message text — and NEVER fails (unknown ⇒ `:error`). The
+CELL now shows the code (`errors/label`: `#DIV/0!` `#VALUE!` `#N/A` `#REF!`
+`#NAME?` `#NUM!` `#TIMEOUT!`, `#ERR` as catch-all) instead of a blanket `#ERR`,
+and `errors/detail` puts the message behind it in the tooltip (blank when the
+message IS the label, so no "#N/A: #N/A"). `sheet/value`, `style-value` and the
+wedge/compile paths all go through it (`meta` gained `:errcode`). Formula-side:
+`if-error` / `if-na` / `error-type` / `error?` are **SCI macros** (lazy, so the
+guarded expression isn't evaluated first) that expand to a call on a host fn
+OBJECT — no helper vars in the sandbox, and a host `try`, because SCI's `catch`
+can't resolve a class name. `if-error` UNWRAPS a `(fn [] …)` first argument: the
+importer emitted that shape when it was a plain function and those formulas are
+saved in real sheets. **THE GAP** (pinned by a test so it can't silently
+change): these guard the expression they wrap, NOT an error arriving from a
+referenced cell — refs are hoisted and awaited before the body runs, so
+`(if-error $A1 0)` over a broken A1 still reports A1's error. Closing that needs
+errors as VALUES flowing through operators (Excel's model) — see TECHDEBT.
 **Cell assertions** are DONE: a cell carries a claim about its own value
 (`:assert` prop, `$val` bound like a style formula, `sheet/assert-violation` /
 `assert-violations`). Truthy holds; `false`/`nil`/throw fail; a literal (no `=`)

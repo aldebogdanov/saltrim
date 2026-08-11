@@ -1,5 +1,13 @@
 (ns uno.michelada.saltrim.addr-test
-  (:require [clojure.test :refer [deftest testing is are]]
+  "`addr` is shared VERBATIM by the server and the browser, so it is tested on
+   both. Everything here is deliberately platform-blind: the same assertions run
+   under `clojure -X:test` and under `clojure -M:cljs-test`, because the ways
+   this namespace can differ between them are silent ones — `(int char)` is a
+   bit-or in ClojureScript, `Long/parseLong` has no counterpart, and a column
+   letter that converts differently on the client points every cell at the wrong
+   address without anything throwing."
+  (:require #?(:clj  [clojure.test :refer [deftest testing is are]]
+               :cljs [cljs.test :refer-macros [deftest testing is are]])
             [uno.michelada.saltrim.addr :as a]))
 
 (deftest col-idx-roundtrip

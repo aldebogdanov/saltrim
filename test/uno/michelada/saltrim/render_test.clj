@@ -4,7 +4,7 @@
    bytecode limit (\"Method code too large\", which bit the giant `help-html`) —
    used to slip past `clojure -X:test` and only surface at uber/AOT time.
    Requiring `web` here forces compilation of render + handlers + the rest."
-  (:require [clojure.test :refer [deftest is]]
+  (:require [clojure.test :refer [deftest is testing]]
             [clojure.string :as str]
             [uno.michelada.saltrim.web]
             [uno.michelada.saltrim.web.render :as render]))
@@ -35,6 +35,23 @@
     (is (str/includes? h "Cells &amp; formulas") "first section half present")
     (is (str/includes? h "Export to Excel") "second section half present")
     (is (str/includes? h "AI agents (MCP)") "third section half present")))
+
+(deftest function-chips-say-whose-implementation-it-is
+  (let [chip (fn [sym] (str (#'render/fn-chip sym)))]
+    ;; per SYMBOL, not per group: `det` and `inverse` sit under `matrices` with
+    ;; `transpose` and `matmul` but are borrowed, and it is what the mark is FOR
+    (doseq [s '[sum transpose matmul xround median]]
+      (is (str/includes? (chip s) "◆") (str s " is ours")))
+    (doseq [s '[det inverse pmt erfc linest]]
+      (is (str/includes? (chip s) "◇") (str s " is borrowed")))
+    (testing "and the mark travels with the class that colours it"
+      (is (str/includes? (chip 'sum) "fnref own"))
+      (is (not (str/includes? (chip 'pmt) "fnref own"))))
+    (testing "ours carries its source inline; borrowed is fetched"
+      (is (str/includes? (chip 'sum) "data-copy"))
+      (is (str/includes? (chip 'pmt) "data-src"))
+      (is (not (str/includes? (chip 'pmt) "data-copy"))
+          "1.2MB of borrowed source must not ride the page"))))
 
 (deftest import-report-is-a-modal-fragment
   ;; The report lands in the import modal over SSE (#importreport), so it must be
