@@ -251,16 +251,28 @@ REMAINING:
   `clojure -M:web` (e.g. the preview launch config) 404s `app.js` until you run
   `clojure -T:build cljs` once (or start the nREPL). Documented in CLAUDE.md /
   README; revisit if it bites.
-- **No CLJS tests yet — and the quality gate now names them as owed.** The
-  shared `addr`/`constants`/`geom` cljc is covered on the CLJ side only, so the
-  half of it that runs in the browser is guarded by the `:advanced` compile and
-  manual verification. That is exactly where the CLJS-only bugs live: `(int
-  char)` is `bit-or` in CLJS, `.-foo` is renamed under `:advanced` (hence the
-  `aget`/`getAttribute` rule), and `geom/span-count` has to agree with the
-  server's answer cell for cell or the right of the grid goes empty. A cljc test
-  build — the existing `addr`/`geom` tests compiled and run under the plain CLJS
-  compiler, no node/npm beyond `node` itself, which the check step already
-  assumes — would lock that down and become step 2 of the gate in CLAUDE.md.
+- **CLJS tests — DONE** (`clojure -T:build cljs-test`, step 2 of the gate). The
+  browser half used to be guarded by the `:advanced` compile and manual
+  verification alone, which is exactly where the CLJS-only bugs live: `(int
+  char)` is `bit-or` in CLJS, and `geom/span-count` has to agree with the
+  server's answer cell for cell or the right of the grid goes empty. Now
+  `addr_test` is `.cljc` and runs on both platforms, `geom-vectors.cljc` holds
+  one set of axis/span answers that BOTH `web.geom` and `app.cljs` are asserted
+  against, and `app_test` pins the `sr-*` bridge events a gesture produces.
+  Remaining gaps, deliberate:
+  - **`:simple`, not `:advanced`.** Property renaming — the reason for the
+    `aget`/`getAttribute` rule — is still only covered by `node --check` on the
+    real bundle. Testing it would mean externs for the fake DOM.
+  - **No layout.** `dom_stub` reports whatever sizes a test sets; nothing is
+    measured, so a CSS-level break (a wrong `flex`, a mispositioned overlay) is
+    still browser-only. The client never asks the DOM for cell geometry either,
+    so this costs less than it sounds.
+  - **The stub must be required before `app`** in every test namespace, because
+    `app.cljs` calls `addEventListener` at the top level. `:preloads` is the
+    explicit hook for that and the compiler honours it only under
+    `:optimizations :none`; if the ordering ever bites, that is the fix.
+  - **`request-view!`'s 70ms debounce is not asserted** — the timer outlives the
+    test that started it. `win-need` (what it would post) is covered instead.
 - **Datastar (1.0.2) is vendored and self-served** at `resources/public/datastar.js`
   → `/datastar.js`. DONE — it used to load from jsdelivr with the local path as a
   reader comment beside it, which made a CDN outage a blank page and put a
