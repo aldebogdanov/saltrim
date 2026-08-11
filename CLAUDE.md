@@ -238,7 +238,11 @@ Gotchas learned the hard way:
 - Datastar is **1.0.2, vendored** at `resources/public/datastar.js` and served
   by us at `/datastar.js`. **No CDN** — the page used to load it from jsdelivr,
   which made an outage there a blank sheet and put a third-party origin in
-  `script-src`. To bump the version, replace that file. SSE
+  `script-src`. To bump the version, replace that file — and **re-apply the MIT
+  banner at the top of it**, which is not decoration: Datastar's license
+  requires the copyright and permission notice to travel with every copy, and
+  we are shipping a verbatim one (upstream's own build emits only a
+  `// Datastar v1.0.2` line). Bumping by overwriting the file drops it. SSE
   events: `datastar-patch-elements` / `datastar-patch-signals`. Attrs use colon
   syntax (`data-on:click`, `data-bind:x`); the event var in expressions is `evt`.
 - SSE/lifecycle now uses the official SDK (`dev.data-star.clojure/*`).

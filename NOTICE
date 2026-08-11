@@ -1,0 +1,73 @@
+SaltRim
+Copyright (c) 2026 Aleksandr Bogdanov
+
+This product is licensed under the MIT License. See LICENSE.
+
+================================================================================
+Third-party works
+================================================================================
+
+SaltRim is distributed as a standalone uberjar (see "Build & release" in
+SPEC.md), which bundles its dependencies. Those dependencies keep their own
+licenses; this file records what is included and under which terms. The
+dependencies' own NOTICE and LICENSE files are merged into META-INF/ of the
+built jar by tools.build, so they travel with the artifact as their licenses
+require — this file is the human-readable index of the same thing.
+
+Licenses are as declared in each project's POM. Where a project declares a
+license family without a version, that is what is written here.
+
+--- Apache License 2.0 --------------------------------------------------------
+
+  rechentafel            org.replikativ/rechentafel
+                         https://github.com/replikativ/rechentafel
+  Spindel                org.replikativ/spindel
+                         https://github.com/replikativ/spindel
+  http-kit               http-kit/http-kit
+                         https://github.com/http-kit/http-kit
+  Apache POI             org.apache.poi/poi-ooxml
+                         https://poi.apache.org
+  Apache Log4j           org.apache.logging.log4j/log4j-core
+                         https://logging.apache.org/log4j/
+
+--- Eclipse Public License ----------------------------------------------------
+
+  Clojure          (EPL-1.0)  org.clojure/clojure
+  ClojureScript    (EPL-1.0)  org.clojure/clojurescript
+  SCI              (EPL-1.0)  org.babashka/sci
+  next.jdbc        (EPL-2.0)  com.github.seancorfield/next.jdbc
+  Datahike         (EPL)      org.replikativ/datahike
+  konserve-jdbc    (EPL)      org.replikativ/konserve-jdbc
+  Hiccup           (EPL)      weavejester/hiccup
+  jsonista         (EPL)      metosin/jsonista
+  mount            (EPL)      tolitius/mount
+
+--- MIT License ---------------------------------------------------------------
+
+  Datastar (browser runtime)   vendored verbatim at resources/public/datastar.js
+                               and served at /datastar.js
+                               Copyright (c) Star Federation
+                               https://data-star.dev
+  Datastar Clojure SDK         dev.data-star.clojure/sdk + /http-kit
+  Ring                         ring/ring-core
+
+--- Mozilla Public License 2.0 ------------------------------------------------
+
+  H2 Database            com.h2database/h2
+                         (dual-licensed MPL-2.0 / EPL-1.0)
+
+--- BSD 2-Clause --------------------------------------------------------------
+
+  YugabyteDB JDBC driver com.yugabyte/jdbc-yugabytedb
+                         (a fork of the PostgreSQL JDBC driver)
+
+================================================================================
+Source handed over at runtime
+================================================================================
+
+SaltRim's function reference (the "f" panel) has a copy button that hands the
+user the real implementation of a borrowed Excel function, which for the
+borrowed half of the standard library is rechentafel's own source, read off the
+classpath (see src/uno/michelada/saltrim/xlsource.clj). Every emitted snippet
+carries a header naming rechentafel, its Apache-2.0 license and the exact
+dependency coordinate, so the attribution travels with the code.

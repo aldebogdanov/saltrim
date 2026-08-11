@@ -101,6 +101,14 @@
     ;; show it (see uno.michelada.saltrim.version). Only the jar carries this —
     ;; run from source it's absent and the app reports "dev".
     (spit (io/file class-dir "saltrim-version.txt") version)
+    ;; Ship our own attribution INSIDE the jar, at the path the dependencies use
+    ;; for theirs: tools.build's default conflict handler for META-INF/NOTICE is
+    ;; :append-dedupe, so the packaged file ends up as SaltRim's notice plus
+    ;; every bundled dependency's, in one place. That is what Apache-2.0 §4(d)
+    ;; asks travel with a distribution, and the uberjar IS the distribution (it
+    ;; is attached to every GitHub Release).
+    (io/make-parents (io/file class-dir "META-INF" "NOTICE"))
+    (b/copy-file {:src "NOTICE" :target (str class-dir "/META-INF/NOTICE")})
     (b/compile-clj {:basis basis :class-dir class-dir :ns-compile [main]})
     (b/uber {:class-dir class-dir
              :uber-file uber-file

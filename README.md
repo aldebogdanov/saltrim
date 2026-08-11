@@ -660,6 +660,9 @@ Architecture and engine internals are documented in
 
 SaltRim stands on the work of many open-source authors and communities. Thank you.
 
+Per-dependency licenses are listed in [`NOTICE`](NOTICE), which is packaged into
+the uberjar alongside the dependencies' own notices.
+
 **Language & runtime**
 
 - [Clojure](https://clojure.org) — Rich Hickey and the Clojure core team
