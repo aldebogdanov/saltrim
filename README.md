@@ -682,5 +682,6 @@ SaltRim stands on the work of many open-source authors and communities. Thank yo
 
 **Interop & tooling**
 
+- [rechentafel](https://github.com/replikativ/rechentafel) — by [replikativ](https://github.com/replikativ). SaltRim's Excel interop rests on it in both directions: its POI-cross-validated function pack is what `xl/` exposes and what most of the stdlib delegates to, and its formula parser/unparser is what reads an imported formula and writes one back out. Apache-2.0.
 - [Apache POI](https://poi.apache.org) and [Apache Log4j](https://logging.apache.org/log4j/) — the Apache Software Foundation
 - [tools.build](https://github.com/clojure/tools.build), [test-runner](https://github.com/cognitect-labs/test-runner), [nREPL](https://github.com/nrepl/nrepl), and [tools.namespace](https://github.com/clojure/tools.namespace) — build, test, and REPL tooling
