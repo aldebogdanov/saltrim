@@ -96,9 +96,11 @@
   ;; Build a runnable uberjar (java -jar target/saltrim-<v>.jar). Carries
   ;; clojurescript so `uber` compiles the :advanced /app.js before packaging;
   ;; `src` is on the path so the cljs compiler resolves the :main namespace.
+  ;; `test` is there for `cljs-test`, which compiles the CLJS suite the same way
+  ;; — it reaches the build JVM only, never the jar (`uber` names its own dirs).
   :build {:deps {io.github.clojure/tools.build {:mvn/version "0.10.14"}
                  org.clojure/clojurescript {:mvn/version "1.12.145"}}
-          :extra-paths ["src"]
+          :extra-paths ["src" "test"]
           :ns-default build}
 
   :test {:extra-paths ["test"]

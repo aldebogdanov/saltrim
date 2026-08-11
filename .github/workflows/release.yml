@@ -68,6 +68,12 @@ jobs:
       - name: Test
         run: clojure -X:test
 
+      # The browser half is a separate compile and a separate runtime, so a
+      # green JVM suite says nothing about it. Runs the CLJS suite under node
+      # (preinstalled on the runner — no npm, no browser).
+      - name: Test (ClojureScript)
+        run: clojure -T:build cljs-test
+
       - name: Build uberjar
         run: clojure -T:build uber
 

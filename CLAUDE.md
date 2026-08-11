@@ -66,8 +66,10 @@ If the user types `/caveman`, invoke the `caveman` Skill.
   1. `clojure -X:test` — must stay green. Add tests for new behavior. The count
      moves every PR, so don't pin it here — run the suite and read the tail.
      (~250 tests / ~1250 assertions as of the load-order PR.)
-  2. `node --check resources/public/app.js` after any `.cljs`/`.cljc` edit, and
-     the cljs suite once there is one (there isn't yet — adding it is owed).
+  2. `clojure -T:build cljs-test` after any `.cljs`/`.cljc` edit — the browser
+     half is a separate compile AND a separate runtime, so a green JVM suite
+     says nothing about it. Plus `node --check resources/public/app.js`, which
+     is the only thing that exercises the `:advanced` bundle the suite doesn't.
   3. `clojure -M:bench` — compare against the recorded table in `doc/bench.md`.
      **A regression is a FAILING gate, not a footnote.** Find the cause and fix
      it, or state plainly in the PR what feature bought the time and why it is
@@ -83,6 +85,23 @@ If the user types `/caveman`, invoke the `caveman` Skill.
   resources/public/app.js`. `app.legacy.js` is the pre-CLJS source, kept for
   reference only (not served). `addr`/`constants` are `.cljc` — shared verbatim
   by server and client (one source of truth for addressing + grid geometry).
+- **The CLJS suite runs in node, against a fake DOM** (`clojure -T:build
+  cljs-test`; `test/…/dom_stub.cljs`). Same plain compiler, `:simple` + `:target
+  :nodejs`, no npm and no browser. Three things make it worth having:
+  `addr_test` is `.cljc` so the SHARED code is asserted on both platforms (a
+  CLJS-only divergence there mis-addresses every cell without throwing);
+  `geom-vectors.cljc` holds the axis/`span-count` answers that `web.geom` and
+  `app.cljs` must BOTH give, so a change to one side fails on the other; and
+  `app_test` asserts which `sr-*` bridge event a gesture produces, which is the
+  entire client→server contract. The stub exists because `app.cljs` calls
+  `addEventListener` at the TOP LEVEL — the namespace cannot even load without a
+  `document` — so **it must be `:require`d before `app` in every test ns**
+  (`:preloads` would say it explicitly but the compiler honours it only under
+  `:optimizations :none`). The test build sets `:warnings {:private-var-access
+  false}`: `app.cljs` stays private, and the TEST opts into seeing it rather
+  than the source giving up its privacy to be testable. `:simple` is the limit —
+  `:advanced` renames properties (the reason for the `aget`/`getAttribute`
+  rule), and only `node --check` on the real bundle covers that.
 - Keep `TECHDEBT.md` current — append when you defer something, mark items DONE.
 
 ## Running / testing the app
@@ -94,6 +113,8 @@ clojure -T:build cljs         # one-shot :advanced /app.js (needed before -M:web
                               # on a fresh checkout — app.js is gitignored)
 clojure -M:web                # one-shot server on :8080 (open ?s=<sheet-id>)
 clojure -X:test               # engine + addr + store + fmt suites
+clojure -T:build cljs-test    # the CLJS suite: compile src+test -> node bundle,
+                              # run it (exit 1 on red). No npm, no browser.
 clojure -M:bench [sizes…]     # engine benchmarks (in-memory sheets, no db/ports)
 node --check resources/public/app.js
 

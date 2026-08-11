@@ -639,8 +639,9 @@ lists every fallback and demotion.
 
 ```bash
 clojure -M:web        # dev server on http://localhost:8080  (open ?s=<sheet>)
-clojure -X:test       # engine / format / store / auth test suites
-clojure -T:build cljs # compile the ClojureScript client -> resources/public/app.js
+clojure -X:test            # engine / format / store / auth test suites
+clojure -T:build cljs-test # the browser half, compiled and run under node
+clojure -T:build cljs      # compile the ClojureScript client -> resources/public/app.js
 clojure -T:build uber # standalone uberjar (compiles the client first)
 ```
 
