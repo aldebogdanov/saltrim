@@ -968,8 +968,10 @@
    the panel later can only say a key EXISTS, never what it is. `info` =
    {:created-at :last-used} or nil."
   [info]
-  (let [p    "margin:.2rem 0 .7rem;font:13px sans-serif;color:var(--muted);"
-        kbd  "font:12px monospace;background:var(--panel);border:1px solid var(--grid);border-radius:3px;padding:0 4px;"
+  (let [p     "margin:.2rem 0 .7rem;font:13px sans-serif;color:var(--muted);"
+        kbd   "font:12px monospace;background:var(--panel);border:1px solid var(--grid);border-radius:3px;padding:0 4px;"
+        field (str "font:13px sans-serif;padding:.35rem .5rem;border:1px solid var(--line);"
+                   "border-radius:var(--radius);background:var(--bg);color:var(--fg);")
         code (str "width:100%;box-sizing:border-box;font:12px monospace;padding:.5rem .6rem;"
                   "border:1px solid var(--accent);border-radius:var(--radius);"
                   "background:var(--accent-bg);color:var(--fg);word-break:break-all;")]
@@ -1037,7 +1039,43 @@
                            :data-on:click "$agentact='revoke', @post('/agentkey'), $agentrevoke=false"}
                   "Revoke for good"]]])
              [:button {:class "btn primary" :data-on:click "$agentact='mint', @post('/agentkey')"}
-              (if info "Rotate key" "Create key")]]]]))))
+              (if info "Rotate key" "Create key")]]
+
+            ;; --- erase this account ------------------------------------------
+            ;; Lives in the 🔑 panel because that IS the account panel; nothing
+            ;; else on the page is about the person rather than the sheet.
+            ;; Two steps on purpose: the first asks the server what would go (so
+            ;; the warning can NAME the sheets other people are using), the
+            ;; second needs the word DELETE typed. Nothing here is recoverable —
+            ;; it purges history too, so there is no as-of to fall back to.
+            [:div {:style (str "margin-top:1.2rem;padding-top:.9rem;"
+                               "border-top:1px solid var(--line);")}
+             [:div {:data-show "!$acctplan"}
+              [:button {:class "btn" :style "border-color:var(--danger);color:var(--danger);"
+                        :data-on:click "$acctact='plan', @post('/delete-account')"}
+               "Delete my account…"]]
+             [:div {:data-show "$acctplan"}
+              [:p {:style (str p "color:var(--danger);")}
+               [:b "This erases your account."] " Your "
+               [:span {:data-text "$acctsheets"}] " sheet(s) and everything in them "
+               "are removed for good — including their history, so there is no "
+               "time-travel back to them."]
+              [:p {:data-show "$acctshared != ''" :style (str p "color:var(--danger);")}
+               "Other people are working on: " [:b {:data-text "$acctshared"}]
+               ". They lose access immediately."]
+              [:p {:style p}
+               "We keep one thing: the opaque account id your login provider gave "
+               "us. It is what your name is attached to on cells in other people's "
+               "sheets, and it identifies nobody once your name, email and avatar "
+               "are gone."]
+              [:div {:style "display:flex;gap:.5rem;align-items:center;justify-content:flex-end;"}
+               [:input {:type "text" :placeholder "type DELETE" :data-bind:acctword true
+                        :style (str field "width:9rem;")}]
+               [:button {:class "btn" :data-on:click "$acctplan=false, $acctword=''"} "Cancel"]
+               [:button {:class "btn"
+                         :style "background:var(--danger);border-color:var(--danger);color:#fff;"
+                         :data-on:click "$acctact='confirm', @post('/delete-account')"}
+                "Erase everything"]]]]]]))))
 
 (defn- import-html
   "Import-.xlsx modal, toggled by $importpanel. The file can't ride Datastar's
@@ -1774,6 +1812,14 @@
              :data-signals:agentkey "''"
              :data-signals:agentkeyhas (str (boolean (auth/agent-key-info uid)))
              :data-signals:agentrevoke "false"   ; revoke confirmation armed?
+             ;; account erasure (same panel). $acctplan is armed by the server's
+             ;; answer to "plan", so the warning can name the sheets other
+             ;; people are on ($acctshared) before anything is typed.
+             :data-signals:acctact "''"
+             :data-signals:acctplan "false"
+             :data-signals:acctword "''"
+             :data-signals:acctsheets "0"
+             :data-signals:acctshared "''"
              ;; dependency-graph view (🕸 modal) — server renders #graphview on open
              :data-signals:graphpanel "false"
              ;; sheet properties (⚙ modal, owner-only) — seeded with current defaults

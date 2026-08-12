@@ -231,6 +231,43 @@
   (when-let [eid (d/q '[:find ?t . :in $ ?h :where [?t :token/hash ?h]] @conn token-hash)]
     (d/transact conn [[:db/retractEntity eid]])))
 
+;; A session credential should not outlive the person using it. `:token/last-seen`
+;; existed from the start but nothing ever moved it, so it was really a creation
+;; stamp and "idle" would have meant "issued". Touching it on use makes the word
+;; true — LAZILY, at most once a day per token, because the alternative is a db
+;; write on every authenticated request for a field read once every 90 days.
+
+(def TOKEN-IDLE-MS (* 90 24 60 60 1000))   ; how long an unused token stays valid
+(def ^:private TOUCH-EVERY-MS (* 24 60 60 1000))
+
+(defn touch-token!
+  "Refresh `:token/last-seen` if it is more than a day stale. Called on the
+   authenticated path, so it must stay cheap and must never throw a request."
+  [token-hash]
+  (try
+    (when-let [m (d/q '[:find (pull ?t [:db/id :token/last-seen]) .
+                        :in $ ?h :where [?t :token/hash ?h]]
+                      @conn token-hash)]
+      (when (< (long (:token/last-seen m 0)) (- (now) TOUCH-EVERY-MS))
+        (d/transact conn [{:db/id (:db/id m) :token/last-seen (now)}])))
+    (catch Throwable _ nil)))
+
+(defn sweep-tokens!
+  "PURGE every auth token idle longer than `TOKEN-IDLE-MS`. Purge, not retract:
+   a credential that has expired should leave no trace to correlate against, and
+   under `:keep-history?` a retraction keeps the hash and its owner forever.
+   Returns how many went. Runs on the same scheduled pool as the session sweep."
+  []
+  (let [cutoff (- (now) TOKEN-IDLE-MS)
+        eids   (d/q '[:find [?t ...] :in $ ?cut
+                      :where [?t :token/hash _]
+                             [(get-else $ ?t :token/last-seen 0) ?seen]
+                             [(< ?seen ?cut)]]
+                    @conn cutoff)]
+    (when (seq eids)
+      (d/transact conn (mapv (fn [e] [:db.purge/entity e]) eids)))
+    (count eids)))
+
 ;; --- agent keys (account-level MCP credential) ----------------------------
 ;; ONE active key per user: minting replaces any existing one, which is exactly
 ;; what "rotate" means — the previous key stops authenticating the moment the
@@ -656,22 +693,107 @@
    stops being registered (`sheet-registered?` → false), so a later visit to it
    404s / falls back like an unknown sheet. History retains the retracted datoms
    under `:keep-history?` (no hard scrub). Returns the count of cellprops removed.
-   Refuses (returns nil) when the sheet isn't registered."
-  [sheet-id]
-  (when-let [sheid (d/q '[:find ?e . :in $ ?id :where [?e :sheet/id ?id]] @conn sheet-id)]
-    (let [cell-eids  (d/q '[:find [?c ...] :in $ ?sid
-                            :where [?sh :sheet/id ?sid] [?c :cellprop/sheet ?sh]]
-                          @conn sheet-id)
-          branch-eids (d/q '[:find [?b ...] :in $ ?sid
-                             :where [?sh :sheet/id ?sid] [?b :branch/sheet ?sh]]
-                           @conn sheet-id)
-          share-eids  (d/q '[:find [?s ...] :in $ ?sid
-                             :where [?sh :sheet/id ?sid] [?s :share/sheet ?sh]]
-                           @conn sheet-id)
-          tx (mapv (fn [e] [:db/retractEntity e])
-                   (concat cell-eids branch-eids share-eids [sheid]))]
-      (d/transact conn tx)
-      (count cell-eids))))
+   Refuses (returns nil) when the sheet isn't registered.
+
+   `purge?` scrubs history too (`:db.purge/entity`), leaving nothing to recover
+   or time-travel to. That is erasure, not deletion, so it is reserved for
+   account deletion — the ordinary owner-deletes-a-sheet button keeps the
+   default, where history is what makes `as-of` and merge-base work."
+  ([sheet-id] (delete-sheet! sheet-id false))
+  ([sheet-id purge?]
+   (when-let [sheid (d/q '[:find ?e . :in $ ?id :where [?e :sheet/id ?id]] @conn sheet-id)]
+     (let [cell-eids   (d/q '[:find [?c ...] :in $ ?sid
+                              :where [?sh :sheet/id ?sid] [?c :cellprop/sheet ?sh]]
+                            @conn sheet-id)
+           branch-eids (d/q '[:find [?b ...] :in $ ?sid
+                              :where [?sh :sheet/id ?sid] [?b :branch/sheet ?sh]]
+                            @conn sheet-id)
+           share-eids  (d/q '[:find [?s ...] :in $ ?sid
+                              :where [?sh :sheet/id ?sid] [?s :share/sheet ?sh]]
+                            @conn sheet-id)
+           op (if purge? :db.purge/entity :db/retractEntity)
+           ;; the sheet entity goes LAST: cellprops/branches/shares all ref it
+           tx (mapv (fn [e] [op e])
+                    (concat cell-eids branch-eids share-eids [sheid]))]
+       (d/transact conn tx)
+       (count cell-eids)))))
+
+;; --- account erasure ------------------------------------------------------
+;; A "delete my account" that only RETRACTS is not deletion: `:keep-history?` is
+;; on (as-of, branching and merge-base all read history), so a retracted email
+;; is still queryable through `d/history`, including addresses the user replaced
+;; years ago. Erasure therefore has to PURGE. See spikes/12-purge-erasure.clj,
+;; which demonstrates exactly that difference.
+;;
+;; What is erased splits three ways, and only the first is unambiguous:
+;;
+;;  1. What identifies a person — name, email, avatar — plus every credential.
+;;     Purged outright. No judgement call.
+;;  2. Sheets they own. Purged with their content, because the content is theirs
+;;     too. Collaborators lose access, which is why the caller confirms first.
+;;  3. The uid itself (`github-1234`). KEPT. It is pseudonymous, it is baked into
+;;     `:sheet/id` (`<uid>__<name>`) and therefore into every `:cellprop/key`,
+;;     and `:cellprop/author` carries it on cells sitting in OTHER people's
+;;     sheets. Removing it means rewriting keys in data that is not the deleted
+;;     user's to rewrite. Once (1) is gone the uid maps to nobody through this
+;;     system, which is the ordinary answer for a derived-key store — and the
+;;     privacy notice says so rather than implying total erasure.
+;;
+;; The user ENTITY survives as an empty shell holding only that uid. Signing in
+;; again with the same provider account therefore starts a fresh, empty account
+;; under the same key rather than resurrecting anything.
+
+(def ^:private identifying-attrs [:user/name :user/email :user/avatar])
+
+(defn user-erasure-plan
+  "What `delete-user!` would remove, WITHOUT removing it: `{:sheets [...]
+   :shared [...] :tokens n :agent-keys n :grants n}`. `:shared` is the subset of
+   owned sheets that someone else can currently reach — the list the UI must put
+   in front of the user before it will do this, since deleting those takes a
+   working document away from somebody who is not the one asking."
+  [uid]
+  (let [sheets (sheets-of-owner uid)
+        shared (vec (for [sid sheets
+                          :when (seq (d/q '[:find [?s ...] :in $ ?sid
+                                            :where [?sh :sheet/id ?sid] [?s :share/sheet ?sh]]
+                                          @conn sid))]
+                      sid))]
+    {:sheets     sheets
+     :shared     shared
+     :tokens     (count (d/q '[:find [?t ...] :in $ ?uid
+                               :where [?u :user/uid ?uid] [?t :token/user ?u]] @conn uid))
+     :agent-keys (count (agentkey-eids-of uid))
+     :grants     (count (d/q '[:find [?s ...] :in $ ?uid
+                               :where [?s :share/grantee ?uid] [?s :share/grantee-kind :user]]
+                             @conn uid))}))
+
+(defn delete-user!
+  "Erase `uid`'s account. Returns the plan that was carried out (see
+   `user-erasure-plan`).
+
+   Order matters: sheets first (they are the bulk, and each is self-contained),
+   then credentials, then grants held ON other people's sheets, and only then
+   the identifying attributes — so a failure part-way leaves an account that is
+   still coherent rather than one that is nameless but still signed in."
+  [uid]
+  (let [plan (user-erasure-plan uid)]
+    (doseq [sid (:sheets plan)] (delete-sheet! sid true))
+    (let [cred-eids (concat (d/q '[:find [?t ...] :in $ ?uid
+                                   :where [?u :user/uid ?uid] [?t :token/user ?u]] @conn uid)
+                            (agentkey-eids-of uid))
+          grant-eids (d/q '[:find [?s ...] :in $ ?uid
+                            :where [?s :share/grantee ?uid] [?s :share/grantee-kind :user]]
+                          @conn uid)
+          ueid (d/q '[:find ?e . :in $ ?uid :where [?e :user/uid ?uid]] @conn uid)
+          held (when ueid (d/pull @conn identifying-attrs ueid))
+          tx   (concat (mapv (fn [e] [:db.purge/entity e]) (concat cred-eids grant-eids))
+                       ;; only attributes the user actually has: purging an
+                       ;; absent one is an error, and avatar is often absent
+                       (when ueid
+                         (for [a identifying-attrs :when (some? (get held a))]
+                           [:db.purge/attribute ueid a])))]
+      (when (seq tx) (d/transact conn (vec tx))))
+    plan))
 
 (defn fork-branch!
   "Copy every cellprop + the branch scalars of (sheet-id, from) under branch

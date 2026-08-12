@@ -11,13 +11,14 @@
             [ring.middleware.cookies :refer [wrap-cookies]]
             [jsonista.core :as json]
             [uno.michelada.saltrim.auth :as auth]
+            [uno.michelada.saltrim.db :as db]
             [uno.michelada.saltrim.util :as util :refer [timed]]
             [uno.michelada.saltrim.xlsx :as xlsx]
             [mount.core :refer [defstate]]
             [uno.michelada.saltrim.mcp :refer [handle-mcp]]
             [uno.michelada.saltrim.web.state :refer [SWEEP-MS sessions* sheets*]]
             [uno.michelada.saltrim.web.collab :refer [sweep!]]
-            [uno.michelada.saltrim.web.handlers :refer [auth-routes handle-branch handle-cell handle-celllayer handle-clear handle-copy handle-cut handle-defadd handle-defdel handle-deflock handle-defsave handle-defunlock handle-delete-sheet handle-deleteline handle-export handle-flatten handle-fnsrc handle-graph handle-agentkey handle-assert handle-import handle-insert handle-merge handle-mergecells handle-paste handle-presence handle-props handle-redo handle-root handle-session-end handle-share handle-size handle-stream handle-style handle-undo handle-unmergecells handle-view handle-viewat handle-violations]])
+            [uno.michelada.saltrim.web.handlers :refer [auth-routes handle-branch handle-cell handle-celllayer handle-clear handle-copy handle-cut handle-defadd handle-defdel handle-deflock handle-defsave handle-defunlock handle-delete-account handle-delete-sheet handle-deleteline handle-export handle-flatten handle-fnsrc handle-graph handle-agentkey handle-assert handle-import handle-insert handle-merge handle-mergecells handle-paste handle-presence handle-props handle-redo handle-root handle-session-end handle-share handle-size handle-stream handle-style handle-undo handle-unmergecells handle-view handle-viewat handle-violations]])
   (:gen-class))
 
 (defn- app [req]
@@ -107,6 +108,7 @@
     [:post "/unmergecells"] (handle-unmergecells req)
     [:post "/props"]      (handle-props req)
     [:post "/delete-sheet"] (handle-delete-sheet req)
+    [:post "/delete-account"] (handle-delete-account req)
     [:post "/deflock"]    (handle-deflock req)
     [:post "/defunlock"]  (handle-defunlock req)
     [:post "/defsave"]    (handle-defsave req)
@@ -185,12 +187,24 @@
   []
   (or (some-> (System/getenv "SALTRIM_PORT") parse-long) 8080))
 
+(def ^:private TOKEN-SWEEP-MS (* 60 60 1000))   ; hourly is plenty for a 90-day window
+
 (defn- start-sweeper-pool!
-  "A scheduled pool that reaps idle/orphan sessions on an interval."
+  "A scheduled pool that reaps idle/orphan sessions on an interval, and — far
+   more slowly — expires auth tokens nobody has used in `db/TOKEN-IDLE-MS`.
+   The two share a thread: both are short queries and neither is urgent."
   []
   (doto (java.util.concurrent.Executors/newScheduledThreadPool 1)
     (.scheduleAtFixedRate ^Runnable (fn [] (try (sweep!) (catch Throwable _)))
-                          SWEEP-MS SWEEP-MS java.util.concurrent.TimeUnit/MILLISECONDS)))
+                          SWEEP-MS SWEEP-MS java.util.concurrent.TimeUnit/MILLISECONDS)
+    (.scheduleAtFixedRate ^Runnable (fn []
+                                      (try
+                                        (let [n (db/sweep-tokens!)]
+                                          (when (pos? n)
+                                            (util/log "INFO" "expired" n "idle auth token(s)")))
+                                        (catch Throwable _)))
+                          TOKEN-SWEEP-MS TOKEN-SWEEP-MS
+                          java.util.concurrent.TimeUnit/MILLISECONDS)))
 
 ;; --- mount states ---------------------------------------------------------
 ;; Each state's VALUE is the live resource (no side atoms): `sweeper` is the

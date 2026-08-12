@@ -175,9 +175,17 @@
                second)))
 
 (defn req->uid
-  "The authenticated user id for a request, or nil."
+  "The authenticated user id for a request, or nil.
+
+   Also marks the token as used, which is what lets `db/sweep-tokens!` expire
+   the ones that are genuinely IDLE rather than merely old. The write is lazy
+   (at most once a day per token — see `db/touch-token!`), so the common path
+   stays a read."
   [req]
-  (some-> (req->token req) sha256 db/token-uid))
+  (when-let [h (some-> (req->token req) sha256)]
+    (when-let [uid (db/token-uid h)]
+      (db/touch-token! h)
+      uid)))
 
 ;; --- OAuth state (CSRF nonce) -------------------------------------------------
 
