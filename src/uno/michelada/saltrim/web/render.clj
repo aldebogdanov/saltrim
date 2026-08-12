@@ -731,6 +731,10 @@
            "SaltRim " (version/current) " · "
            [:a {:href "https://github.com/aldebogdanov/saltrim" :target "_blank" :rel "noopener"
                 :style "color:inherit;"} "GitHub"]
+           " · "
+           [:a {:href "/privacy" :target "_blank" :style "color:inherit;"} "Privacy"]
+           " · "
+           [:a {:href "/terms" :target "_blank" :style "color:inherit;"} "Terms"]
            " · © 2026 "
            [:a {:href "mailto:sasha_bogdanov_dev@yahoo.com"
                 :style "color:inherit;"} "Aleksandr Bogdanov"]
@@ -2504,8 +2508,234 @@
             [:input {:name "name" :placeholder "your name (dev login)"
                      :autofocus true :style (str field "flex:1;")}]
             [:button {:style field} "Sign in"]])]
+        ;; Before you sign in is exactly when the privacy notice is worth
+        ;; reading — signing in is the moment your provider hands us your name
+        ;; and address.
         [:p {:style "text-align:center;margin-top:1.4rem;font:11px sans-serif;color:#aab0b8;"}
-         "SaltRim " (version/current)]]]]))))
+         "SaltRim " (version/current) " · "
+         [:a {:href "/privacy" :style "color:inherit;"} "Privacy"] " · "
+         [:a {:href "/terms" :style "color:inherit;"} "Terms"]]]]]))))
+
+;; --- privacy notice + terms of use ------------------------------------------
+;; Standalone pages, PUBLIC by design: Google's OAuth consent screen wants a
+;; privacy policy URL that works without signing in, and a notice you can only
+;; read once you have already handed over your data is not a notice. They carry
+;; no Datastar and no /app.js — plain HTML, so they render if everything else is
+;; broken.
+;;
+;; The facts here are asserted by `legal_test`: what the pages claim SaltRim
+;; stores has to match the schema, and what they claim deletion does has to
+;; match `db/delete-user!`. A privacy notice that drifts from the code is worse
+;; than none, because people rely on it.
+
+(def ^:private LAST-UPDATED "12 August 2026")
+
+(defn- legal-page
+  "Shell for the public legal pages: same look as the login page, no scripts."
+  [title & body]
+  (let [muted "color:#6b737b;"]
+    (str
+     "<!doctype html>"
+     (h/html
+      [:html
+       [:head
+        [:meta {:charset "utf-8"}]
+        [:meta {:name "viewport" :content "width=device-width,initial-scale=1"}]
+        [:title (str "SaltRim — " title)]
+        [:link {:rel "icon" :type "image/x-icon" :href "/favicon.ico"}]
+        [:style (h/raw
+                 (str "body{font:15px/1.6 sans-serif;margin:0;background:#fefefe;color:#3a4149;}"
+                      ".wrap{max-width:44rem;margin:0 auto;padding:3rem 1.2rem 4rem;}"
+                      "h1{font-size:26px;font-weight:600;margin:0 0 .2rem;}"
+                      "h2{font-size:17px;font-weight:600;margin:2rem 0 .5rem;}"
+                      "ul{padding-left:1.2rem;}li{margin:.25rem 0;}"
+                      "a{color:#2f8fd8;}"
+                      "code{font:13px monospace;background:#f1f3f5;padding:0 4px;border-radius:3px;}"
+                      ".foot{margin-top:3rem;padding-top:1rem;border-top:1px solid #e3e6e9;"
+                      "font-size:12px;" muted "}"))]]
+       [:body
+        [:div {:class "wrap"}
+         [:h1 title]
+         [:p {:style (str "margin-top:0;font-size:13px;" muted)}
+          "Last updated " LAST-UPDATED "."]
+         body
+         [:p {:class "foot"}
+          [:a {:href "/"} "SaltRim"] " · "
+          [:a {:href "/privacy"} "Privacy"] " · "
+          [:a {:href "/terms"} "Terms"] " · "
+          [:a {:href "https://github.com/aldebogdanov/saltrim"
+               :target "_blank" :rel "noopener"} "Source"]]]]]))))
+
+(defn privacy-page []
+  (legal-page
+   "Privacy"
+   [:p "SaltRim is a free, non-commercial project. This page says what it keeps "
+    "about you, why, and how to get rid of it."]
+
+   [:h2 "Who is responsible"]
+   [:p "Aleksandr Bogdanov, an individual rather than a company. Write to "
+    [:a {:href "mailto:privacy@michelada.uno"} "privacy@michelada.uno"]
+    " about anything on this page."]
+   [:p "SaltRim is not established in the EU or EEA. It is offered to people "
+    "there, so the GDPR applies to it under Article 3(2). No representative "
+    "under Article 27 has been appointed: the processing is limited to account "
+    "details and documents you create yourself, involves no special-category "
+    "data, is not large scale, and is unlikely to result in a risk to your "
+    "rights and freedoms. If that stops being true, this page changes first."]
+
+   [:h2 "What is stored"]
+   [:p "From your login provider, when you sign in with GitHub or Google:"]
+   [:ul
+    [:li "your display name"]
+    [:li "your email address"]
+    [:li "your avatar image URL"]
+    [:li "which provider you used, and the opaque account id it gave us "
+     "(for example " [:code "github-12345"] ")"]]
+   [:p "Created by you, as you use the app:"]
+   [:ul
+    [:li "your sheets — cell values, formulas, styles, comments, labels, your "
+     "function library, branches, and the edit history that makes time-travel "
+     "and merging work"]
+    [:li "who you shared a sheet with, and sheets other people shared with you"]
+    [:li "which account last wrote each cell, which is what per-user undo uses"]]
+   [:p "Operational:"]
+   [:ul
+    [:li "a sign-in cookie holding a random token — only a SHA-256 hash of it "
+     "is stored, never the token itself"]
+    [:li "agent keys for MCP access, stored the same way, as a hash"]
+    [:li "timestamps: when the account was created, when a token was last used, "
+     "when each cell changed"]]
+   [:p [:b "There is no analytics, no tracking, no advertising and no "
+        "third-party script on any page."] " Nothing is sold, and nothing is "
+    "shared with anyone for marketing."]
+
+   [:h2 "Why"]
+   [:p "To run your account and the service you signed up for — Article 6(1)(b), "
+    "processing necessary to provide what you asked for. Your email address "
+    "additionally makes it possible for someone to share a sheet with you by "
+    "address."]
+
+   [:h2 "Where it is kept"]
+   [:ul
+    [:li "Application server: " [:b "vpsFree.cz"] ", Czech Republic."]
+    [:li "Database: " [:b "YugabyteDB Cloud"] " on AWS " [:code "eu-central-1"]
+     " (Frankfurt, Germany)."]]
+   [:p "Your data is stored in the EEA. YugabyteDB Cloud is run by a company "
+    "based in the United States; any access by its staff for support purposes "
+    "is governed by its data processing agreement."]
+
+   [:h2 "How long"]
+   [:ul
+    [:li [:b "Account details"] " — until you delete your account. Nothing "
+     "expires on its own; an unused account is not removed for you."]
+    [:li [:b "Sign-in tokens"] " — 90 days after they were last used, then "
+     "deleted automatically."]
+    [:li [:b "Sheets"] " — until you, or the owner of a shared sheet, delete "
+     "them."]
+    [:li [:b "Backups"] " — deleted data can survive in database backups for up "
+     "to 30 days. After that it is gone from those too."]]
+
+   [:h2 "Deleting your account"]
+   [:p "Open the " [:b "🔑"] " panel in the toolbar and choose "
+    [:i "Delete my account"] ". It removes:"]
+   [:ul
+    [:li "your name, email address and avatar"]
+    [:li "every sign-in token and agent key"]
+    [:li "every sheet you own, with all of its content and its history"]
+    [:li "every share granted to you on other people's sheets"]]
+   [:p "This happens immediately and cannot be undone. The history goes with it, "
+    "so there is no earlier version of a deleted sheet to recover — not for you "
+    "and not for anyone you had shared it with."]
+   [:p [:b "One thing is deliberately kept: the opaque account id"] " (for "
+    "example " [:code "github-12345"] "). It forms part of the identifier of "
+    "every sheet you ever made, and it is recorded as the author of cells you "
+    "wrote in other people's sheets — removing it would mean rewriting other "
+    "people's documents. Once your name, email address and avatar are gone, "
+    "that id is not connected to you anywhere in this system. We would rather "
+    "say this plainly than claim an erasure more complete than the one we do."]
+   [:p "Signing in again with the same provider account afterwards gives you a "
+    "new, empty account under that same id."]
+
+   [:h2 "Your rights"]
+   [:p "You can ask for access to your data, correction, deletion, restriction "
+    "of processing, portability, and you can object to processing. Most of it "
+    "is self-service:"]
+   [:ul
+    [:li [:b "Access and correction"] " — your name, email and avatar come from "
+     "your login provider and are refreshed from it each time you sign in."]
+    [:li [:b "Portability"] " — every sheet exports to " [:code ".xlsx"]
+     " from the toolbar, formulas included."]
+    [:li [:b "Deletion"] " — the 🔑 panel, as above."]]
+   [:p "For anything else, write to "
+    [:a {:href "mailto:privacy@michelada.uno"} "privacy@michelada.uno"] "."]
+   [:p "If you are in the EU or EEA and think this is being handled badly, you "
+    "can complain to the data protection authority of the country you live in. "
+    "The " [:a {:href "https://edpb.europa.eu/about-edpb/about-edpb/members_en"
+                :target "_blank" :rel "noopener"} "EDPB member list"]
+    " has the contact details."]
+
+   [:h2 "Cookies"]
+   [:p "One cookie, holding your sign-in token. The app cannot work without it "
+    "and it is used for nothing else — no analytics, no advertising, no "
+    "profiling. That is why there is no cookie banner to click through."]
+
+   [:h2 "Changes"]
+   [:p "If this page changes in a way that affects you, the date at the top "
+    "changes with it. The page is in "
+    [:a {:href "https://github.com/aldebogdanov/saltrim" :target "_blank"
+         :rel "noopener"} "the repository"]
+    ", so every past version of it is in the git history."]))
+
+(defn terms-page []
+  (legal-page
+   "Terms of use"
+   [:p "These terms cover the hosted service at this address. The SaltRim "
+    [:i "software"] " is separate: it is open source under the MIT licence, and "
+    "the licence text in "
+    [:a {:href "https://github.com/aldebogdanov/saltrim" :target "_blank"
+         :rel "noopener"} "the repository"] " governs it."]
+
+   [:h2 "What this is"]
+   [:p "A free, non-commercial spreadsheet, run by one person as a personal "
+    "project. There is no charge, no subscription and no commercial "
+    "relationship between us."]
+
+   [:h2 "No warranty, no guarantees"]
+   [:p "The service is provided " [:b "as is"] " and " [:b "as available"] ". "
+    "It may be slow, may be down, may lose data, and may stop existing. To the "
+    "fullest extent the law allows, there is no warranty of any kind and no "
+    "liability for any loss arising from using it — including lost data or lost "
+    "work."]
+   [:p [:b "Keep your own copies of anything you care about."] " Every sheet "
+    "exports to " [:code ".xlsx"] " from the toolbar; that is the backup."]
+   [:p "Nothing here takes away rights you have as a consumer under the law of "
+    "the country you live in, where those rights cannot be waived."]
+
+   [:h2 "Your account and your content"]
+   [:p "Your sheets are yours. Hosting them here grants no rights over them "
+    "beyond what is needed to store and show them to you and to the people you "
+    "share them with."]
+   [:p "You are responsible for what you put in them and for who you share them "
+    "with. A share link is a capability: anyone holding it can open the sheet, "
+    "so treat it as a secret and rotate it if it gets out."]
+
+   [:h2 "Acceptable use"]
+   [:p "Don't use the service to store or distribute unlawful material; don't "
+    "attempt to reach sheets that were not shared with you; don't attack, "
+    "overload or probe the service; don't use it to send unsolicited messages "
+    "to other people."]
+
+   [:h2 "Suspension and shutdown"]
+   [:p "Accounts or content that break these terms may be removed. Because this "
+    "is a personal project, the service itself may be discontinued — reasonable "
+    "notice will be given where that is possible, but it cannot be promised."]
+
+   [:h2 "Privacy"]
+   [:p "What is stored about you, and how to erase it, is on the "
+    [:a {:href "/privacy"} "privacy page"] "."]
+
+   [:h2 "Changes"]
+   [:p "These terms may change; the date at the top says when they last did."]))
 
 (defn denied-page [uid]
   (str

@@ -896,3 +896,32 @@ and adding one per function is not the answer — the timeout is.
   touches it lazily (at most once a day per token). The lazy window means a
   token can be swept up to a day after its true 90-day idle point — that is the
   price of not writing to the db on every authenticated request.
+
+## Privacy notice + terms (feat/privacy-terms)
+
+- **The pages assert against the code, not the other way round.** `legal_test`
+  derives its expectations from `db/identifying-attrs`, `db/TOKEN-IDLE-MS` and
+  the schema, so adding a personal-data field fails the suite until the notice
+  mentions it. That is the only defence against a notice quietly ceasing to be
+  true, which is the one document where being wrong is not merely untidy.
+- **`LAST-UPDATED` is a hand-maintained string.** Nothing forces it to move when
+  the prose does. A git-derived date would be wrong too (a typo fix is not a
+  change that affects anyone), so this stays a judgement call — but it is a
+  judgement call that is easy to forget.
+- **No EU representative (Art. 27).** We rely on the Art. 27(2) exemption and
+  the notice states the reasoning. The weak leg is "occasional": the EDPB reads
+  it narrowly and a live service with persistent accounts is arguably
+  continuous. Revisit if SaltRim stops being a small non-commercial project —
+  that is the trigger, not a date.
+- **The 30-day backup window is a claim we cannot enforce in code.** It is
+  YugabyteDB Cloud's rotation, and the console did not state it plainly; 30 days
+  is an outer bound chosen to stay true if the provider's default (understood to
+  be 8 days) changes. If the provider ever exceeds it, the notice is wrong and
+  nothing here will notice.
+- **Terms name no governing law and no jurisdiction.** Deliberate for a free
+  service run by one itinerant person: a choice-of-law clause cannot strip EU
+  consumers of mandatory local protections, so it buys little and invites a
+  claim we would not want to have to back.
+- **The pages are English only.** Art. 12 wants information in clear and plain
+  language; for an English-only UI that is consistent, but a translated UI would
+  need translated notices.

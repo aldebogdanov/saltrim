@@ -744,4 +744,22 @@ engines are dropped BEFORE the purge or an unload autosave rewrites the cells.
 Related: `:token/last-seen` is finally maintained (`db/touch-token!`, lazy —
 once a day per token) so `db/sweep-tokens!` can expire genuinely IDLE
 credentials at `TOKEN-IDLE-MS` (90 days) on the same scheduled pool as the
-session sweep. See `TECHDEBT.md` for deferred items.
+session sweep.
+**`/privacy` + `/terms`** are DONE (`render/privacy-page`, `render/terms-page`),
+and they are **PUBLIC routes** — no auth check, no Datastar, no `/app.js`:
+Google's consent screen needs a privacy URL that resolves signed-out, and a
+notice you can only read after handing over your data is not a notice. Linked
+from the login page footer (where it matters most — signing in is the moment
+the provider hands us a name and address) and the help modal. The facts they
+state are asserted by `legal_test` AGAINST THE CODE: the fields listed come from
+`db/identifying-attrs` + the schema, the 90-day retention from
+`db/TOKEN-IDLE-MS`. **A notice that has drifted from the code is worse than
+none**, so add a personal-data field and the suite fails until the page names
+it. Settled positions, all in the notice: controller is Aleksandr Bogdanov (an
+individual, NOT EU-established, so GDPR applies via Art. 3(2) and there is no
+supervisory authority of ours to name — users complain to their own);
+`privacy@michelada.uno`; processors are vpsFree.cz and YugabyteDB Cloud on AWS
+`eu-central-1`, so data at rest is in the EEA; no Art. 27 representative
+(Art. 27(2) exemption, reasoning written out); backups clear within 30 days; the
+opaque uid is kept and the page SAYS SO rather than implying total erasure.
+See `TECHDEBT.md` for deferred items.
