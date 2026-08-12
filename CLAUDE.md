@@ -719,4 +719,29 @@ summary; it carries `data-addr`, and a delegated CAPTURE-phase click listener in
 `app.cljs` scrolls there (`jump!`) — capture because the card's own
 `data-on:click` removes it first. `⚠ n` (`$nviol`) + the `/violations` panel are
 what survive a reload and what cover the ~99.9% of the sheet the window never
-renders. See `TECHDEBT.md` for deferred items.
+renders.
+**Account erasure** is DONE (`db/delete-user!`, `/delete-account`, in the 🔑
+panel). **Under `:keep-history?` a retraction is not a deletion** — it records
+that a datom stopped being true, so a "deleted" email stays queryable through
+`d/history` along with every address the user replaced earlier. Erasure
+therefore PURGES (`:db.purge/attribute` / `:db.purge/entity`; datahike 0.8
+supports it, proven in `spikes/12-purge-erasure.clj`), and `erasure-test`
+asserts against `d/history` — checking the current db passes on the broken
+version, which is the trap. Three tiers: what IDENTIFIES a person (name, email,
+avatar) plus every credential is purged; sheets they own are purged with their
+content (`delete-sheet!` gained a `purge?` arity — the ordinary delete-sheet
+button still retracts, because there history is the feature); the **uid is
+KEPT**, because `<uid>__<name>` is the sheet id and therefore sits inside every
+`:cellprop/key`, and `:cellprop/author` carries it on cells in OTHER people's
+sheets — erasing it means rewriting data the deleted user does not own. Once
+tier one is gone it maps to nobody, and the privacy notice says exactly that
+rather than implying total erasure. The user entity survives as a shell holding
+only that uid, so signing in again starts a FRESH account under the same key.
+Two-step in the UI (`$acctact` `plan` → names the shared sheets others would
+lose → `confirm` needs the word DELETE in `$acctword`); collaborators are
+evicted by the same `evict-deleted!` an ordinary sheet deletion uses. Loaded
+engines are dropped BEFORE the purge or an unload autosave rewrites the cells.
+Related: `:token/last-seen` is finally maintained (`db/touch-token!`, lazy —
+once a day per token) so `db/sweep-tokens!` can expire genuinely IDLE
+credentials at `TOKEN-IDLE-MS` (90 days) on the same scheduled pool as the
+session sweep. See `TECHDEBT.md` for deferred items.

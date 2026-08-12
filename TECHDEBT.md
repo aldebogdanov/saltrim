@@ -859,3 +859,40 @@ eval-timeout wedge rather than freezing the sheet, so this is not an outage
 here. It is the only borrowed function known to
 do it; there is no argument validation in front of the borrowed half generally,
 and adding one per function is not the answer — the timeout is.
+
+## Account erasure (feat/account-deletion)
+
+- **Purge is the only real delete under `:keep-history?` — DONE.** Every delete
+  path was `:db/retractEntity`, which under keep-history records that a datom
+  stopped being true rather than removing it: a "deleted" email stayed queryable
+  through `d/history`, along with every address the user had replaced earlier.
+  `db/delete-user!` purges instead (`:db.purge/attribute` /
+  `:db.purge/entity`), and `erasure-test` asserts against `d/history` rather
+  than the current db — the same assertions pass trivially on the broken version
+  if you check the current db, which is the whole trap.
+  Spike: `spikes/12-purge-erasure.clj`.
+- **The uid is kept, deliberately, and the notice must keep saying so.**
+  `<uid>__<name>` is the sheet id, so the uid is inside every `:cellprop/key`,
+  and `:cellprop/author` carries it on cells living in OTHER people's sheets.
+  Erasing it means rewriting keys in data the deleted user does not own. What
+  goes is everything that maps it to a person. If the storage layout ever stops
+  deriving keys from the uid, revisit — at that point full erasure becomes
+  cheap and the privacy notice should be tightened with it.
+- **Purge is the first non-append-only write in the system.** `as-of` on a
+  purged sheet has nothing to travel to. That is correct (the sheet is gone) but
+  it is a new shape: everything else in the store only ever grew.
+- **Backups are out of reach.** Purge cannot touch YugabyteDB Cloud's managed
+  backups, which is why the privacy notice states a 30-day window rather than
+  claiming immediacy. Nothing in the code can enforce that number — it is the
+  provider's rotation.
+- **Deletion is not offered per-sheet-for-a-collaborator.** Erasing an account
+  takes its shared sheets away from everyone they were shared with (they are
+  evicted with a toast + `$goto`, the same path an ordinary sheet deletion
+  uses). Transfer-ownership-instead was considered and skipped: it needs a
+  recipient to accept, which is a whole flow. The confirmation names the
+  affected sheets so the choice is at least informed.
+- **`:token/last-seen` is now actually maintained.** It existed from the start
+  but nothing ever wrote it, so "idle" would have meant "issued". `req->uid`
+  touches it lazily (at most once a day per token). The lazy window means a
+  token can be swept up to a day after its true 90-day idle point — that is the
+  price of not writing to the db on every authenticated request.

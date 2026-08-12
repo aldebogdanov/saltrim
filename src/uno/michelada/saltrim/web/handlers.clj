@@ -1210,6 +1210,64 @@
             goto      (if (seq remaining) (str "/?s=" (first remaining)) "/")]
         (signals! gen {:err "" :propspanel false :goto goto})))))
 
+;; --- account erasure --------------------------------------------------------
+
+(defn handle-delete-account
+  "Erase the signed-in user's account (`db/delete-user!`): every sheet they own
+   with its content, every credential, every grant held on someone else's sheet,
+   and the attributes that identify them. The opaque uid stays — see the comment
+   above `db/delete-user!` for why, and the privacy notice says so plainly.
+
+   Two-step, because it cannot be undone. `$acctact = \"plan\"` returns what would
+   go, INCLUDING the sheets other people can currently reach, so the confirmation
+   names them; `$acctact = \"confirm\"` requires the word DELETE typed into
+   `$acctword` and only then erases.
+
+   Collaborators are handled exactly as an ordinary sheet deletion handles them
+   (`evict-deleted!`): a toast plus `$goto` to their own root, pushed before the
+   stream closes, then reaped. Their next write would 403 against a sheet that no
+   longer exists, so leaving them sitting on it is the worse option.
+
+   Not `with-access` — this is account-level and belongs to no sheet."
+  [req]
+  (let [uid (auth/req->uid req)]
+    (if-not uid
+      (deny req "not signed in")
+      (sse req
+        (fn [gen]
+          (try
+            (case (str (:acctact (read-signals req)))
+              "plan"
+              (let [{:keys [sheets shared]} (db/user-erasure-plan uid)]
+                (signals! gen {:acctplan   true
+                               :acctsheets (count sheets)
+                               :acctshared (str/join ", " (map #(second (store/split-id %)) shared))
+                               :err ""}))
+
+              "confirm"
+              (if-not (= "DELETE" (str/trim (str (:acctword (read-signals req)))))
+                (signals! gen {:err "type DELETE to confirm"})
+                (let [plan (db/user-erasure-plan uid)]
+                  ;; drop every loaded engine for those sheets FIRST, or an
+                  ;; unload autosave would write the cells back after the purge
+                  ;; (the same trap sheet + branch deletion already avoid)
+                  (doseq [[room {:keys [sh]}] @sheets*
+                          :when (contains? (set (:sheets plan)) (first room))]
+                    (sheet/close! sh)
+                    (swap! sheets* dissoc room))
+                  (db/delete-user! uid)
+                  ;; nil = evict EVERY session on those sheets, the departing
+                  ;; owner's other tabs included. Their token is purged, so the
+                  ;; cookie stops authenticating on its own — no logout needed.
+                  (doseq [sid (:sheets plan)] (evict-deleted! sid nil))
+                  (u/log "INFO" "account erased:" uid
+                         (str "(" (count (:sheets plan)) " sheets)"))
+                  (signals! gen {:goto "/" :err ""}))))
+
+            (catch Throwable e
+              (log-err! "/delete-account" e)
+              (signals! gen {:err (pretty-err (.getMessage e))}))))))))
+
 ;; --- merge (PR B): 3-way against the recorded fork point -------------------
 
 (defn- split-keys [s] (remove str/blank? (str/split (str s) #"\s+")))
