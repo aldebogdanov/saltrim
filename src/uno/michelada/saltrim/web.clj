@@ -16,6 +16,7 @@
             [uno.michelada.saltrim.xlsx :as xlsx]
             [mount.core :refer [defstate]]
             [uno.michelada.saltrim.mcp :refer [handle-mcp]]
+            [uno.michelada.saltrim.web.render :as render]
             [uno.michelada.saltrim.web.state :refer [SWEEP-MS sessions* sheets*]]
             [uno.michelada.saltrim.web.collab :refer [sweep!]]
             [uno.michelada.saltrim.web.handlers :refer [auth-routes handle-branch handle-cell handle-celllayer handle-clear handle-copy handle-cut handle-defadd handle-defdel handle-deflock handle-defsave handle-defunlock handle-delete-account handle-delete-sheet handle-deleteline handle-export handle-flatten handle-fnsrc handle-graph handle-agentkey handle-assert handle-import handle-insert handle-merge handle-mergecells handle-paste handle-presence handle-props handle-redo handle-root handle-session-end handle-share handle-size handle-stream handle-style handle-undo handle-unmergecells handle-view handle-viewat handle-violations]])
@@ -65,6 +66,15 @@
                                                             "Cache-Control" "max-age=86400"}
                                       :body (io/input-stream r)}
                                      {:status 404 :body "no icon"})
+    ;; Public, deliberately: Google's consent screen needs a privacy URL that
+    ;; works signed-out, and a notice you can only read after handing over your
+    ;; data is not a notice. No auth check, no Datastar, no /app.js.
+    [:get "/privacy"]        {:status 200
+                              :headers {"Content-Type" "text/html; charset=utf-8"}
+                              :body (render/privacy-page)}
+    [:get "/terms"]          {:status 200
+                              :headers {"Content-Type" "text/html; charset=utf-8"}
+                              :body (render/terms-page)}
     [:get "/stream"]         (handle-stream req)
     ;; ƒ-panel reference: one function's source, plain text, on demand
     [:get "/fnsrc"]          (handle-fnsrc req)

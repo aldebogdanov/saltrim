@@ -656,6 +656,21 @@ Architecture and engine internals are documented in
 [`SPEC.md`](SPEC.md); contributor conventions and gotchas live in
 [`CLAUDE.md`](CLAUDE.md).
 
+## Privacy & terms
+
+The hosted instance serves a privacy notice at `/privacy` and terms of use at
+`/terms` — both public, both linked from the login page and the in-app help.
+They are rendered by `web.render` and, unusually for prose, they are **tested**:
+`legal_test` derives what the notice must disclose from the schema and from
+`db/delete-user!`'s own list of identifying fields, so adding a personal-data
+field fails the suite until the page mentions it.
+
+Account deletion is in the 🔑 panel. It **purges** rather than retracts —
+`:keep-history?` is on, so a retraction would leave the data queryable through
+`d/history` (see `spikes/12-purge-erasure.clj`). One thing is kept on purpose:
+the opaque account id, because it forms part of every sheet id and is recorded
+as the author of cells in other people's sheets. The notice says so plainly.
+
 ## Acknowledgments
 
 SaltRim stands on the work of many open-source authors and communities. Thank you.
