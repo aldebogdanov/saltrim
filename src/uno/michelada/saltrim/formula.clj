@@ -370,6 +370,60 @@
     (throw (ex-info "nested #() isn't allowed — name the inner one with (fn [x] …)" {})))
   (list 'fn (pct-params body) (pct-alias body (apply list body))))
 
+(defn- read-wrapped
+  "Read the formula source, wrapped in parens so a top-level `$(…)` — which is
+   two reader forms — survives. Returns the form list.
+
+   Everything here is about what happens when the user mistypes, because they
+   will, constantly, and the reader's own words are no help: `EOF while
+   reading` names nothing they can act on. Worse, an unclassified exception is
+   treated as a possible BUG by `log-err!`, so every unbalanced paren printed a
+   45-line stack trace into the server log. These are ex-infos, which makes
+   them known user errors: one WARN line, and a message that says what to fix.
+
+   The EOF check closes a real hole. `parse` wraps the source and then requires
+   exactly one form, which the docstring claimed rejected trailing junk — but a
+   stray closing bracket ends the WRAPPER early, so `(+ 1 2))` read as one
+   well-formed form and the leftover `)` was never looked at. The sheet
+   answered 3 and said nothing."
+  [s]
+  (let [src  (str "(" (desugar-fn-literals s) "\n)")
+        rdr  (java.io.PushbackReader. (java.io.StringReader. src))
+        opts {:readers readers :eof ::eof}
+        translate
+        (fn [^Exception e first-read?]
+          ;; a reader TAG can refuse for its own good reasons (`expand-range`
+          ;; rejects an oversized range while reading) — those messages are
+          ;; already the user's and must not be rewritten as syntax errors
+          (if (instance? clojure.lang.ExceptionInfo e)
+            (throw e)
+            (let [m (str (.getMessage e))]
+              (throw
+               (ex-info
+                (cond
+                  (re-find #"EOF while reading string" m)
+                  "unbalanced quotes — a text value is opened and never closed"
+                  (re-find #"EOF while reading" m)
+                  "unbalanced brackets — something is opened and never closed"
+                  ;; "unmatched delimiter" is ambiguous here, because the
+                  ;; WRAPPER contributes a `)` of its own. Which read threw
+                  ;; tells the two apart: on the first, the wrapper's `)`
+                  ;; arrived inside a `[` or `{` the user never closed; on the
+                  ;; second, the user's own extra `)` ended the wrapper early
+                  ;; and this is what came after it.
+                  (re-find #"(?i)unmatched delimiter" m)
+                  (if first-read?
+                    "unbalanced brackets — something is opened and never closed"
+                    "unbalanced brackets — one closing bracket too many")
+                  :else (str "this formula could not be read — " m))
+                {:reader m})))))
+        forms (try (edn/read opts rdr) (catch Exception e (translate e true)))
+        more  (try (edn/read opts rdr) (catch Exception e (translate e false)))]
+    (when-not (= ::eof more)
+      (throw (ex-info "malformed formula — there is something after the end of it"
+                      {:trailing (pr-str more)})))
+    forms))
+
 (defn parse
   "Formula string (without leading =) -> {:form :deps :names}.
 
@@ -385,8 +439,9 @@
    formula used, so the sheet can rebuild it when a label moves.
 
    The source is read wrapped in parens (so a top-level `$(…)` — two reader
-   forms — survives), fused, and must then be EXACTLY ONE form. That also
-   rejects trailing junk edn/read-string used to ignore silently.
+   forms — survives; see `read-wrapped`, which also turns the reader's own
+   words for a mistyped formula into something a user can act on), fused, and
+   must then be EXACTLY ONE form.
 
    With `self` (the owner address, e.g. for a STYLE/FORMAT property), the bare
    symbol `$val` rewrites to a ref on the owner's own value — sugar for
@@ -397,8 +452,7 @@
   ([s] (parse s nil nil))
   ([s self] (parse s self nil))
   ([s self resolve]
-   (let [forms (fuse-dynrefs (edn/read-string {:readers readers}
-                                              (str "(" (desugar-fn-literals s) "\n)")))
+   (let [forms (fuse-dynrefs (read-wrapped s))
          _     (walk/postwalk
                 (fn [x] (if (= '$ x)
                           (throw (ex-info "dangling $ — write $(expression)" {}))
