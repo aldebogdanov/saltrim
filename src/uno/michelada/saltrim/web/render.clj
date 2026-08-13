@@ -750,7 +750,7 @@
    come from `stdlib/catalog-syms`, so the panel cannot drift from what is
    actually installed."
   (concat
-   [["core math"    '[sum product abs ceil floor round sqrt pow exp ln log10 sign pi]]
+   [["core math"    '[sum product abs ceil floor round sqrt pow exp ln log10 sign pi ≈]]
     ["matrices"     '[transpose matmul det inverse]]
     ["core stats"   '[mean avg median variance stdev xmin xmax]]
     ["core text"    '[upper lower trim join split str-replace
