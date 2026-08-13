@@ -1,6 +1,6 @@
 (ns uno.michelada.saltrim.engine-test
   "Engine behavior, no UI. Values, chains, ranges, errors, structural rebuild."
-  (:require [clojure.test :refer [deftest testing is]]
+  (:require [clojure.test :refer [are deftest testing is]]
             [uno.michelada.saltrim.constants :as c]
             [uno.michelada.saltrim.formula :as formula]
             [uno.michelada.saltrim.sheet :as sh]))
@@ -579,6 +579,26 @@
     (is (thrown-with-msg? Exception #"dangling"  (formula/parse "(+ 1 $)")))
     (is (thrown-with-msg? Exception #"dangling"  (formula/parse "(+ $ 1)")))
     (is (thrown-with-msg? Exception #"one expression" (formula/parse "(+ 1 2) junk"))))
+  (testing "a mistyped formula is refused in the user's words, not the reader's"
+    ;; and, as ex-infos, they are KNOWN user errors — `log-err!` gives them one
+    ;; WARN line instead of the 45-line stack trace a bare RuntimeException got
+    (are [src pattern] (thrown-with-msg? clojure.lang.ExceptionInfo pattern
+                                         (formula/parse src))
+      "(+ 1 2"      #"unbalanced brackets.*never closed"
+      "[1 2"        #"unbalanced brackets.*never closed"
+      "(str \"oops)" #"unbalanced quotes"
+      "(+ 1 2))"    #"one closing bracket too many"
+      "1) (2"       #"something after the end of it")
+    (testing "and a reader tag's own refusal survives untranslated"
+      ;; `expand-range` rejects an oversized range WHILE READING; rewriting that
+      ;; as a syntax error would replace a precise message with a wrong one
+      (is (thrown-with-msg? clojure.lang.ExceptionInfo #"covers .* cells"
+                            (formula/parse "(sum $A1:ZZ9999)")))))
+  (testing "a stray closing bracket is REFUSED, not silently swallowed"
+    ;; `parse` wraps the source in parens, so a user's extra `)` used to close
+    ;; the WRAPPER early: `(+ 1 2))` read as one well-formed form, the leftover
+    ;; was never looked at, and the sheet answered 3 without complaint
+    (is (thrown? Exception (formula/parse "(+ 1 2))"))))
   (testing "unparse round-trips $()"
     (doseq [src ["$(str \"A\" $B1)"
                  "(+ $A1 $(str \"A\" (+ $B1 $B2)))"
