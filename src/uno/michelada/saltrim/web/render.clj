@@ -1737,6 +1737,16 @@
              ;; floating in-cell editor visibility (distinct from $edit: only the
              ;; cell dblclick/Enter path shows it, after start-edit! positions it)
              :data-signals:celledit "false"
+             ;; has the formula bar been TYPED IN since it last committed? The
+             ;; bar commits on Enter AND on blur, and without this both fire for
+             ;; one edit — you press Enter, then click away, and the same value
+             ;; is written twice. Harmless-looking until the value is a bad
+             ;; formula, at which point you get two identical error toasts.
+             ;; It also stops a focus-and-leave with no typing from rewriting
+             ;; the cell at all. `$edit` cannot serve: it means "this user is
+             ;; editing" for peer presence, and clearing it on Enter would drop
+             ;; the lock while the caret is still in the box.
+             :data-signals:vdirty "false"
              :data-signals:r0 "0"
              :data-signals:c0 "0"
              ;; how many columns/rows THIS client's viewport needs covered
@@ -1939,9 +1949,15 @@
        ;; synced: typing in either updates $v and the other reflects it.
        [:input (merge no-autofill
                 {:id "fbar" :class "tool mono" :data-bind:v "" :placeholder "value or =formula like =(+ $A1 $B2 42) or =(sum $A1:A10) - Enter to apply"
+                 ;; ONE commit per edit. Enter commits and clears the dirty
+                 ;; flag; blur commits only if something was typed since. The
+                 ;; floating #editor solves the same problem with `$celledit &&`
+                 ;; on its blur — this is that guard, for a box whose visibility
+                 ;; is not the thing that says whether it has pending input.
                  :data-on:focus "$edit=true, @post('/presence')"
-                 :data-on:keydown "evt.key==='Enter' && ($cell=$sel, @post('/cell'))"
-                 :data-on:blur "$cell=$sel, @post('/cell'), $edit=false, @post('/presence')"
+                 :data-on:input "$vdirty=true"
+                 :data-on:keydown "evt.key==='Enter' && ($cell=$sel, @post('/cell'), $vdirty=false)"
+                 :data-on:blur "$vdirty && ($cell=$sel, @post('/cell'), $vdirty=false), $edit=false, @post('/presence')"
                  :style "flex:1;"})]
        [:button {:class "btn" :title "big editor" :data-on:click "$big=$v, $bigwhat='v', $bigedit=true"} "⤢"]
        ;; ASSERTION lever: a claim about the selected cell's own value, checked

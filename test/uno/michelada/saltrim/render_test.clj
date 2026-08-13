@@ -13,6 +13,30 @@
   ;; reaching this point means every web.* namespace compiled
   (is (some? (resolve 'uno.michelada.saltrim.web/-main))))
 
+(deftest the-formula-bar-commits-once-per-edit
+  ;; It commits on Enter AND on blur. Unguarded, both fire for one edit: press
+  ;; Enter, click away, and the same value is written twice — which showed up as
+  ;; TWO identical error toasts for one bad formula, and as a silent redundant
+  ;; write for a good one. `$vdirty` is the guard; the floating #editor solves
+  ;; the same problem with `$celledit &&` on its blur.
+  ;;
+  ;; Asserted on the markup because the behaviour lives in Datastar attributes —
+  ;; there is no function to call. It is a weak test, but it is the difference
+  ;; between the guard being deleted quietly and being deleted deliberately.
+  (let [ns' (the-ns 'uno.michelada.saltrim.web.render)
+        src (slurp (clojure.java.io/resource "uno/michelada/saltrim/web/render.clj"))
+        fbar (re-find #"(?s):id \"fbar\".*?:style \"flex:1;\"" src)]
+    (is (some? ns'))
+    (is (some? fbar) "the formula bar input is still recognisable in the source")
+    (testing "typing arms the commit"
+      (is (str/includes? fbar ":data-on:input \"$vdirty=true\"")))
+    (testing "Enter commits and disarms, so a following blur does not repeat it"
+      (is (re-find #"Enter.*@post\('/cell'\).*\$vdirty=false" fbar)))
+    (testing "blur commits only when something was typed"
+      (is (re-find #":data-on:blur \"\$vdirty &&" fbar)))
+    (testing "but blur always releases the edit lock, dirty or not"
+      (is (re-find #":data-on:blur .*\$edit=false, @post\('/presence'\)" fbar)))))
+
 (deftest border-side-expansion
   ;; the style bar sends `border` + the side dropdown's comma-joined prop list;
   ;; every expansion must be a writable style prop
