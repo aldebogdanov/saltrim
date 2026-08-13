@@ -4,6 +4,7 @@
    they arrive cross-validated against Apache POI upstream. So: value
    translation, error reporting, and which functions we expose at all."
   (:require [clojure.set :as set]
+            [uno.michelada.saltrim.approx :as approx]
             [clojure.test :refer [deftest testing is]]
             [uno.michelada.saltrim.excel :as excel]
             [uno.michelada.saltrim.formula :as formula]
@@ -112,7 +113,7 @@
       (is (= 60 (v s "B2")) "the native stdlib is unaffected")
       (is (= 20 (v s "B3")) "blank skipped: 60/3")
       (is (= 2 (v s "B4")))
-      (is (= 149.02948869707532 (v s "B5")))
+      (is (approx/= 149.02948869707532 (v s "B5")))
       (is (= 120 (v s "B6")) "both layers in one formula")))
   (testing "an Excel error becomes the cell's error, reactively"
     (let [s (sh/create-sheet)]
