@@ -4,6 +4,7 @@
    what needs testing is the TRANSLATION: the names, the date boundary, and the
    promise that nothing already in a saved formula changed meaning."
   (:require [clojure.test :refer [deftest testing is]]
+            [uno.michelada.saltrim.approx :as approx]
             [uno.michelada.saltrim.excel :as excel]
             [uno.michelada.saltrim.formula :as formula]
             [uno.michelada.saltrim.stdlib :as lib]
@@ -68,9 +69,9 @@
                          ["A2" "=(fv 0.06 10 -200 -500)"]
                          ["A3" "=(npv 0.1 [-10000 3000 4200 6800])"]
                          ["A4" "=(sln 30000 7500 10)"]])]
-      (is (= 149.02948869707532 (v s "A1")))
-      (is (= 3531.5828367476092 (v s "A2")))
-      (is (= 1188.4434123352207 (v s "A3")))
+      (is (approx/= 149.02948869707532 (v s "A1")))
+      (is (approx/= 3531.5828367476092 (v s "A2")))
+      (is (approx/= 1188.4434123352207 (v s "A3")))
       (is (= 2250 (v s "A4")))))
   (testing "statistics"
     (let [s (sheet-with [["A1" "1"] ["A2" "2"] ["A3" "3"] ["A4" "4"] ["A5" "5"]
@@ -81,7 +82,7 @@
                          ["B5" "=(large $A1:A5 2)"]
                          ["B6" "=(countif $A1:A5 \">3\")"]
                          ["B7" "=(correl $A1:A5 [2 4 6 8 10])"]])]
-      (is (= 0.9087887181301249 (v s "B1")))
+      (is (approx/= 0.9087887181301249 (v s "B1")))
       (is (= 4.6 (v s "B2")))
       (is (= 1.5811388300841898 (v s "B3")))
       (is (= 1.4142135623730951 (v s "B4")) "the .P / .S split survives the rename")
@@ -178,9 +179,9 @@
       (is (= 5 (v s "B3")) "the blank is nothing, not a zero")))
   (testing "borrowed functions are reactive like any other"
     (let [s (sheet-with [["A1" "0.08"] ["B1" "=(pmt $A1 10 -1000)"]])]
-      (is (= 149.02948869707532 (v s "B1")))
+      (is (approx/= 149.02948869707532 (v s "B1")))
       (sh/set-cell! s "A1" "0.05")
-      (is (= 129.50457496545658 (v s "B1"))))))
+      (is (approx/= 129.50457496545658 (v s "B1"))))))
 
 (deftest matrices
   ;; MMULT/TRANSPOSE/LINEST were excluded from this namespace for want of 2D

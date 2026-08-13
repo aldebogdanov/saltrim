@@ -70,6 +70,16 @@ If the user types `/caveman`, invoke the `caveman` Skill.
      half is a separate compile AND a separate runtime, so a green JVM suite
      says nothing about it. Plus `node --check resources/public/app.js`, which
      is the only thing that exercises the `:advanced` bundle the suite doesn't.
+  2b. **Never assert `=` on a double that came through `Math/pow`, `exp`, `log`
+     or `erf`.** `java.lang.Math` is allowed 1 ulp of error and explicitly
+     permits hardware-specific intrinsics, so a borrowed financial function
+     answers differently on arm64 and x86_64 — CI caught `npv` and `pmt`
+     differing in the 15th digit after the suite had been green locally for
+     months. Use `approx/=` (`test/…/approx.clj`, which explains the rule and
+     pins the real observed values). `Math/sqrt` and `+ - * /` ARE exact, so
+     keep `=` there — loosening a test that cannot fail only hides the next bug.
+     Production already knew this: `xlsx/demote-verify!` compares with
+     `close-num?` and `roundtrip-test` with a 1e-9 tolerance.
   3. `clojure -M:bench` — compare against the recorded table in `doc/bench.md`.
      **A regression is a FAILING gate, not a footnote.** Find the cause and fix
      it, or state plainly in the PR what feature bought the time and why it is

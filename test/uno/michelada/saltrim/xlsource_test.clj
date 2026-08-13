@@ -9,6 +9,7 @@
    text COMPILES somewhere else and COMPUTES the same answer, so both are
    checked here for every borrowed name."
   (:require [clojure.test :refer [deftest is testing]]
+            [uno.michelada.saltrim.approx :as approx]
             [clojure.string :as str]
             [uno.michelada.saltrim.stdlib :as lib]))
 
@@ -98,7 +99,7 @@
     ;; and the wrapper ended up calling itself
     (let [src (lib/source-for 'norm-dist)]
       (is (str/includes? src "norm-dist-impl*"))
-      (is (= 0.8413447404368685 ((standalone 'norm-dist) 1 0 1 true)))))
+      (is (approx/= 0.8413447404368685 ((standalone 'norm-dist) 1 0 1 true)))))
   (testing "the date bridge is renamed where rechentafel has its own"
     ;; `datetime.cljc` has `date->serial` / `serial->date` too, in LocalDates
     ;; where SaltRim's work in ISO strings

@@ -1,5 +1,6 @@
 (ns uno.michelada.saltrim.export-test
   (:require [clojure.test :refer [deftest testing is]]
+            [uno.michelada.saltrim.approx :as approx]
             [uno.michelada.saltrim.addr :as addr]
             [uno.michelada.saltrim.sheet :as sheet]
             [uno.michelada.saltrim.export :as export])
@@ -77,9 +78,12 @@
     (is (every? #(= "FORMULA" (str (.getCellType (cel %)))) (range 5))
         "all five exported as formulas")
     (XSSFFormulaEvaluator/evaluateAllFormulaCells wb)
-    (is (= [20.0 20.0 4.0 6.0 149.02948869707532]
-           (mapv #(.getNumericCellValue (cel %)) (range 5)))
-        "Excel's own engine recomputes them to SaltRim's answers")))
+    (let [got (mapv #(.getNumericCellValue (cel %)) (range 5))]
+      (is (= [20.0 20.0 4.0 6.0] (subvec got 0 4))
+          "Excel's own engine recomputes them to SaltRim's answers")
+      ;; PMT goes through Math/pow in POI too, so it is platform-dependent in
+      ;; the last ulp — see the approx ns
+      (is (approx/= 149.02948869707532 (nth got 4))))))
 
 (deftest comment-label-and-formula-note-compose
   ;; three independent things want the ONE Excel comment a cell gets: the user's
