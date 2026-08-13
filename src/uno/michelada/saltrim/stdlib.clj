@@ -242,6 +242,43 @@
              (let [r (.setScale (java.math.BigDecimal. (str (double x))) (int n)
                                 java.math.RoundingMode/HALF_UP)]
                (if (pos? (int n)) (double r) (long (.longValueExact (.setScale r 0))))))
+   ;; `=` on two computed decimals is a trap, and it is not one the engine can
+   ;; fix: 0.1 + 0.2 is not 0.3 in binary floating point, and a borrowed
+   ;; financial function is entitled by `java.lang.Math`'s own contract to
+   ;; differ in the last ulp between one machine and another. So a sheet that
+   ;; branches `(if (= $A1 $B1) …)` over two computed columns eventually says
+   ;; "different" about numbers that are the same to fifteen digits.
+   ;;
+   ;; Excel has no answer to this — you write ABS(a-b)<0.001 and hope you
+   ;; picked the right epsilon. `≈` is the answer: two arguments asks "the
+   ;; same number, allowing for floating-point noise" (relative, so it holds
+   ;; at 1e-6 and at 1e9 alike); a third makes the tolerance yours and
+   ;; ABSOLUTE, which is what "within a cent" means.
+   ;;
+   ;; The default is 1e-12 RELATIVE, which is four orders of magnitude looser
+   ;; than the ~1e-16 that float noise actually costs and still tight enough
+   ;; that two distinct integers stay distinct until about 1e12. At 1e-9 it was
+   ;; not: `(≈ 1000000000 1000000001)` came out true, which is a lie about two
+   ;; numbers a user can see are different. Anyone who wants exactly-equal back
+   ;; can ask for it — `(≈ a b 0)` is `=`.
+   ;;
+   ;; Not variadic, deliberately: `(≈ a b c)` would be indistinguishable from
+   ;; a tolerance, and guessing which one a user meant is worse than not
+   ;; offering it. Non-numbers fall through to plain `=`, so comparing text or
+   ;; two blanks still does the obvious thing.
+   '≈ (fn
+        ([a b]
+         (if (and (number? a) (number? b))
+           (let [x (double a) y (double b)]
+             (or (= x y)
+                 (and (Double/isFinite x) (Double/isFinite y)
+                      (<= (Math/abs (- x y))
+                          (* 1e-12 (Math/max 1.0 (Math/max (Math/abs x) (Math/abs y))))))))
+           (= a b)))
+        ([a b tol]
+         (if (and (number? a) (number? b) (number? tol))
+           (<= (Math/abs (- (double a) (double b))) (Math/abs (double tol)))
+           (= a b))))
    'xdate (fn [y m d] (format "%04d-%02d-%02d" (long y) (long m) (long d)))
    'xvlookup (fn [k table w col]
                (some (fn [row] (when (= k (first row)) (nth row (dec (long col)))))
@@ -497,6 +534,8 @@
     ;; excel-compat — what the .xlsx importer targets
     xround   {:desc "Excel's ROUND: round to N decimal places, half away from zero."
               :eg "(xround $A1 2)"}
+    ≈        {:desc "Same number, allowing for floating-point noise? Use it instead of = whenever both sides are COMPUTED — 0.1+0.2 is not 0.3 in binary. A third argument is your own absolute tolerance; 0 means exactly equal."
+              :eg "(if (≈ $A1 $B1) \"match\" \"differ\")"}
     xdate    {:desc "Excel's DATE: build an ISO date string from year, month, day."
               :eg "(xdate 2026 3 15)"}
     xvlookup {:desc "Excel's VLOOKUP, EXACT match only. Table width is explicit; column is 1-based."

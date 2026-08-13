@@ -63,6 +63,41 @@
       (is (= 8.16496580927726 (v s "B7")) "stdev is still population")
       (is (= -3 (v s "B8")) "Excel's rounding stays where it was, under xround"))))
 
+(deftest approximate-equality
+  ;; `=` on two COMPUTED decimals is a trap the engine cannot fix for the user:
+  ;; 0.1+0.2 isn't 0.3 in binary, and a borrowed function may differ in the last
+  ;; ulp between machines. `≈` is the answer, and it has to work in a formula —
+  ;; a condition inside `if` is the whole reason it exists.
+  (let [s (sheet-with [["A1" "=(+ 0.1 0.2)"]
+                       ["A2" "0.3"]
+                       ["B1" "=(if (= $A1 $A2) \"same\" \"differ\")"]
+                       ["B2" "=(if (≈ $A1 $A2) \"same\" \"differ\")"]
+                       ["B3" "=(≈ 1.0 1.4 0.5)"]
+                       ["B4" "=(≈ 1.0 1.4)"]])]
+    (is (= "differ" (v s "B1")) "plain = is why this function exists")
+    (is (= "same" (v s "B2")))
+    (is (true? (v s "B3")) "a third argument is an ABSOLUTE tolerance")
+    (is (false? (v s "B4"))))
+  (testing "it absorbs the platform divergence that broke CI"
+    (let [f (get lib/hand-written '≈)]
+      (is (true? (f 1188.4434123352207 1188.4434123352216)))
+      (is (true? (f 129.50457496545658 129.50457496545664)))))
+  (testing "but it is not a licence to call different numbers equal"
+    (let [f (get lib/hand-written '≈)]
+      (is (false? (f 1e9 1000000001.0)) "two integers a user can see differ")
+      (is (false? (f 1.0 1.5)))
+      (is (false? (f 149.02948869707532 -149.02948869707532)) "sign error")))
+  (testing "an explicit 0 asks for exact equality back"
+    (let [f (get lib/hand-written '≈)]
+      (is (false? (f (+ 0.1 0.2) 0.3 0)))
+      (is (true? (f 0.3 0.3 0)))))
+  (testing "non-numbers fall through to plain ="
+    (let [f (get lib/hand-written '≈)]
+      (is (true? (f "abc" "abc")))
+      (is (false? (f "abc" "abd")))
+      (is (true? (f nil nil)) "two blanks")
+      (is (false? (f nil 0)) "a blank is not a zero, here as everywhere else"))))
+
 (deftest borrowed-functions-compute
   (testing "financial"
     (let [s (sheet-with [["A1" "=(pmt 0.08 10 -1000)"]
@@ -224,7 +259,14 @@
     (testing "every one has a description and an example"
       (is (empty? (remove lib/docs-for listed))
           "these have no docs-for entry")
+      ;; `string?`, not just `seq` — `hand-docs` is a QUOTED map, so a
+      ;; `(str "…" "…")` written across two lines stays a LIST. It is non-empty,
+      ;; so a `seq` check passes it happily and the panel then renders the
+      ;; tooltip as `(str "…" "…")`. Caught exactly that way.
+      (is (every? #(string? (:desc (lib/docs-for %))) listed)
+          "a description must be a plain string, not an unevaluated form")
       (is (every? #(seq (:desc (lib/docs-for %))) listed))
+      (is (every? #(string? (:eg (lib/docs-for %))) listed))
       (is (every? #(seq (:eg (lib/docs-for %))) listed)))
     (testing "and every example PARSES as a formula"
       ;; a copy button that hands you something the sheet rejects is worse than
