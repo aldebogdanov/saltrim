@@ -1073,7 +1073,12 @@
                "sheets, and it identifies nobody once your name, email and avatar "
                "are gone."]
               [:div {:style "display:flex;gap:.5rem;align-items:center;justify-content:flex-end;"}
-               [:input {:type "text" :placeholder "type DELETE" :data-bind:acctword true
+               ;; "" not true: hiccup renders a `true` attribute value as the
+               ;; attribute's own NAME, and Datastar then sees a key in
+               ;; `data-bind:acctword` AND a value, throws KeyAndValueProvided,
+               ;; and aborts init for the whole page. Every other data-bind
+               ;; here is "" for that reason.
+               [:input {:type "text" :placeholder "type DELETE" :data-bind:acctword ""
                         :style (str field "width:9rem;")}]
                [:button {:class "btn" :data-on:click "$acctplan=false, $acctword=''"} "Cancel"]
                [:button {:class "btn"
