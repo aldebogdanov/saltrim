@@ -828,7 +828,7 @@
     (do (set-style! sheet addr prop (or src ""))
         [addr])))
 
-(declare insert-line! delete-line! remove-line! restore-line!)
+(declare insert-line! delete-line! remove-line! restore-line! line-occupied?)
 
 (defn undo-step
   "Apply one undo (`dir` = :undo) or redo (:redo) over `stacks`. See section note.
@@ -852,14 +852,30 @@
             ;; the line, because undoing it again has to put the same content
             ;; back — restoring only the geometry would silently drop the row.
             (let [{:keys [op axis at cells]} entry
-                  entry (if (= dir :undo)
-                          (do (if (= op :insert)
-                                (delete-line! sheet axis at)
-                                (restore-line! sheet axis at cells))
-                              entry)
-                          (if (= op :insert)
-                            (do (insert-line! sheet axis at) entry)
-                            (assoc entry :cells (remove-line! sheet axis at))))]
+                  entry
+                  (if (= dir :undo)
+                    (if (= op :insert)
+                      ;; The line was blank WHEN IT WAS INSERTED. By the time
+                      ;; anyone undoes, a collaborator, a paste or another tab of
+                      ;; your own may have filled it — and then this is not a
+                      ;; geometry reversal any more, it is a delete of somebody
+                      ;; else's work. Capture it the way a real delete does, so
+                      ;; redo can put it back; a still-blank line keeps the exact
+                      ;; old path, because there `delete-line!` IS the inverse
+                      ;; (a formula may point at the blank cell, and `remove-line!`
+                      ;; would turn that into #REF! instead of restoring it).
+                      (if (line-occupied? sheet axis at)
+                        (assoc entry :cells (remove-line! sheet axis at))
+                        (do (delete-line! sheet axis at) entry))
+                      (do (restore-line! sheet axis at cells) entry))
+                    (if (= op :insert)
+                      ;; redo: re-open the gap, and put back whatever the undo
+                      ;; above took with it
+                      (do (if (seq cells)
+                            (restore-line! sheet axis at cells)
+                            (insert-line! sheet axis at))
+                          (dissoc entry :cells))
+                      (assoc entry :cells (remove-line! sheet axis at))))]
               {:stacks (assoc stacks from fs' to (conj ts entry)) :affected :all})
 
             (= (src-of sheet (:addr entry) (:prop entry)) (chk entry))
@@ -1073,10 +1089,15 @@
 
 (defn delete-line!
   "Remove the row/column at index `at` — the exact inverse of `insert-line!`, for
-   UNDOING an insert. The removed line is blank by construction there, so nothing
-   can reference it and references simply shift back. To delete a line a user has
-   filled, use `remove-line!`, which turns references to it into #REF! instead of
-   silently re-pointing them."
+   UNDOING an insert whose line is STILL BLANK. References simply shift back,
+   which is what makes it an inverse: a formula pointing at the blank inserted
+   cell goes back to pointing where it did before.
+
+   The caller must check that the line is still empty (`line-occupied?`). It is
+   blank when inserted, but not necessarily when undone — a collaborator can
+   have filled it — and this drops it with nothing to restore it from. To delete
+   a line that has content, use `remove-line!`, which captures a snapshot and
+   turns references to it into #REF! instead of silently re-pointing them."
   [sheet axis at] (reshape! sheet axis at -1 #(formula/insert-shift % axis at -1)))
 
 (defn- rewrites?
@@ -1084,6 +1105,18 @@
   [rw {:keys [value style]}]
   (or (and value (not= value (rw value)))
       (boolean (some (fn [[_ raw]] (not= raw (rw raw))) style))))
+
+(defn line-occupied?
+  "Does any cell currently sit on line `at` of `axis`? Asked before undoing an
+   INSERT: the line was blank when it was made, but an undo can arrive long
+   after somebody filled it, and the two cases need different treatment (see
+   `delete-line!` vs `remove-line!`)."
+  [sheet axis at]
+  (boolean
+   (some (fn [[a _]]
+           (= (long at) (let [{:keys [ci ri]} (addr/parse a)]
+                          (if (= axis :col) ci ri))))
+         (document sheet))))
 
 (defn delete-undo-snapshot
   "Everything a delete of line `at` on `axis` would destroy or rewrite, keyed by
