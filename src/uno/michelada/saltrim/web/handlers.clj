@@ -312,15 +312,20 @@
                 (signals! gen {:err (str (name prop) " style: "
                                          (pretty-err (.getMessage e)))})))))))))
 
-(defn- selected-cells
-  "All distinct cell addresses across the space-separated \"TL:BR\" ranges in
-   `selcells` (handles multi-range).
+(defn- selected-ranges
+  "The space-separated \"TL:BR\" ranges in `selcells` as validated `[tl br]`
+   pairs (handles multi-range).
 
    `$selcells` comes from the client, so both halves are guarded: a range whose
    endpoints aren't valid addresses is skipped (rather than throwing out of the
    handler), and the whole selection is capped at `MAX-SEL-CELLS` — expanding
    \"A1:XFD1048576\" one address per cell would exhaust the heap long before any
-   handler could object."
+   handler could object.
+
+   Separate from `selected-cells` because the RANGES are the honest unit for
+   anything that fills a rectangle. Flattening to a cell list and taking its
+   bounding box turns two ⌘-clicked corners into everything between them —
+   see `handle-paste`, where that was a data-loss bug."
   [selcells]
   (let [ranges (->> (str/split (str selcells) #"\s+")
                     (remove str/blank?)
@@ -329,7 +334,13 @@
                                   b (or b a)]
                               (when (and (addr/valid? a) (addr/valid? b)) [a b])))))]
     (when (<= (reduce + 0 (map (fn [[a b]] (addr/range-size a b)) ranges)) c/MAX-SEL-CELLS)
-      (distinct (mapcat (fn [[a b]] (addr/range-cells a b)) ranges)))))
+      ranges)))
+
+(defn- selected-cells
+  "All distinct cell addresses across `selcells`; see `selected-ranges` for the
+   validation and the cap."
+  [selcells]
+  (distinct (mapcat (fn [[a b]] (addr/range-cells a b)) (selected-ranges selcells))))
 
 (defn- sel-topleft
   "Top-left [c0 r0] of the bounding box of all selected cells, or nil when empty."
@@ -441,32 +452,53 @@
         tc (range tc0 (inc tc1) (max 1 cw))]
     [tc tr]))
 
+(defn- paste-ranges!
+  "Stamp `clip` across every selected RANGE; returns the affected addresses.
+
+   PER RANGE, not over the bounding box of the whole selection — the box was a
+   data-loss bug on an ordinary path. ⌘-clicking B2 and J20 is TWO selected
+   cells, which is all `MAX-SEL-CELLS` ever counted, and 171 write targets;
+   A1 plus XFD1048576 is two cells and seventeen billion. Filling each
+   selected rectangle instead makes the existing cap bound the work, because the
+   stamps can never outnumber the selected cells.
+
+   Named rather than inlined in the handler so the TESTS exercise this code:
+   `paste-test` used to re-implement the tiling in its own harness, which is why
+   a bounding-box bug was invisible to a green suite."
+  [sh sid clip ranges]
+  (let [cw (or (:w clip) 1)
+        ch (or (:h clip) 1)
+        affected (atom [])]
+    (doseq [[a b] ranges
+            :let [{ca :ci ra :ri} (addr/parse a)
+                  {cb :ci rb :ri} (addr/parse b)
+                  c0 (min ca cb) r0 (min ra rb)
+                  c1 (max ca cb) r1 (max ra rb)
+                  origins (tile-origins c0 r0 c1 r1 cw ch)
+                  ;; tiling is clipped to the RANGE so it can't spill past it; a
+                  ;; SINGLE stamp (a block pasted at one target cell) is left
+                  ;; unclipped so the whole block lands.
+                  bounds  (when (next origins) [c0 r0 c1 r1])]
+            [tc tr] origins]
+      (swap! affected into (paste-cells! sh sid clip tc tr bounds)))
+    (distinct @affected)))
+
 (defn handle-paste [req]
   (with-access req
     (fn [uid sheet-id rec {:keys [sid selcells]} gen]
       (ensure-session! sid sheet-id (:branch rec) uid (:token rec))
       (if (not= :read-write (:level rec))
         (signals! gen {:err "read-only access — you can't edit this sheet"})
-        (let [sh    (:sh rec)
-              clip  (get-in @sessions* [sid :clip])
-              cells (selected-cells selcells)]
-          (when (and clip (seq cells) (seq (:cells clip)))
+        (let [sh     (:sh rec)
+              clip   (get-in @sessions* [sid :clip])
+              ranges (selected-ranges selcells)]
+          (when (and clip (seq ranges) (seq (:cells clip)))
             (locking (edit-lock (:room rec))
               (try
-                (let [crs (map #(let [{:keys [ci ri]} (addr/parse %)] [ci ri]) cells)
-                      tc0 (apply min (map first crs))  tr0 (apply min (map second crs))
-                      tc1 (apply max (map first crs))  tr1 (apply max (map second crs))
-                      origins  (tile-origins tc0 tr0 tc1 tr1 (or (:w clip) 1) (or (:h clip) 1))
-                      ;; tiling is clipped to the selection so it can't spill past
-                      ;; it; a SINGLE stamp (block pasted at one target cell) is
-                      ;; left unclipped so the whole block lands.
-                      bounds   (when (next origins) [tc0 tr0 tc1 tr1])
-                      affected (atom [])]
-                  (doseq [[tc tr] origins]
-                    (swap! affected into (paste-cells! sh sid clip tc tr bounds)))
-                  (when (seq @affected)
+                (let [affected (paste-ranges! sh sid clip ranges)]
+                  (when (seq affected)
                     (sheet/settle! sh) (save-rec! (:room rec) uid)
-                    (push-changes! gen sid (:room rec) sh (distinct @affected))))
+                    (push-changes! gen sid (:room rec) sh affected)))
                 (catch Throwable e
                   (log-err! "/paste" e)
                   (signals! gen {:err (pretty-err (.getMessage e))}))))))))))
@@ -488,9 +520,9 @@
                     (swap! affected into (cons a (sheet/dependents* sh a)))
                     (sheet/set-cell! sh a "")
                     (record-edit! sid a :value value nil))
-                  (when (seq @affected)
+                  (when (seq affected)
                     (sheet/settle! sh) (save-rec! (:room rec) uid)
-                    (push-changes! gen sid (:room rec) sh (distinct @affected))))
+                    (push-changes! gen sid (:room rec) sh affected)))
                 (catch Throwable e
                   (log-err! "/cut" e)
                   (signals! gen {:err (pretty-err (.getMessage e))}))))))))))

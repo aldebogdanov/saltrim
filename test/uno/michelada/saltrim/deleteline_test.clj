@@ -152,3 +152,51 @@
   (sh/delete-line! *sh* :row 0)
   (is (= "=(+ $A1 1)" (sh/raw *sh* "B1")) "and back")
   (is (= 2 (v "B1"))))
+
+(deftest undoing-an-insert-does-not-destroy-what-was-put-in-it
+  ;; `{:op :insert}` used to be treated as its own inverse — "the line it adds
+  ;; is blank". True when it is MADE, not when it is UNDONE: a collaborator, a
+  ;; paste or another tab can have filled it, and `delete-line!`'s return was
+  ;; discarded, so the content was gone with nothing anywhere to restore it.
+  ;; Undo/redo has one contract, and it is that the step is reversible.
+  (sh/set-cell! *sh* "A5" "alice-five")
+  (sh/settle! *sh*)
+  (sh/insert-line! *sh* :row 4)                      ; alice inserts above A5
+  (sh/settle! *sh*)
+  (sh/set-cell! *sh* "A5" "BOBS-DATA")               ; bob fills the new row
+  (sh/settle! *sh*)
+  (let [s1 (sh/undo-step *sh* {:undo [{:op :insert :axis :row :at 4}] :redo []} :undo)]
+    (sh/settle! *sh*)
+    (testing "the undo still removes the line alice inserted"
+      (is (= "alice-five" (sh/value *sh* "A5")))
+      (is (nil? (sh/value *sh* "A6"))))
+    (testing "and bob's content is RECOVERABLE, not gone"
+      (sh/undo-step *sh* (:stacks s1) :redo)
+      (sh/settle! *sh*)
+      (is (= "BOBS-DATA" (sh/value *sh* "A5")) "redo puts it back")
+      (is (= "alice-five" (sh/value *sh* "A6"))))))
+
+(deftest undoing-an-insert-of-a-STILL-BLANK-line-is-unchanged
+  ;; the common case must keep the exact old path: `delete-line!` shifts
+  ;; references back, so a formula pointing at the blank inserted cell returns
+  ;; to what it pointed at before. `remove-line!` would make it #REF! instead,
+  ;; which would be a worse bug than the one being fixed.
+  (sh/set-cell! *sh* "A5" "5")
+  (sh/set-cell! *sh* "B1" "=(+ $A5 100)")
+  (sh/settle! *sh*)
+  (sh/insert-line! *sh* :row 4)
+  (sh/settle! *sh*)
+  (is (= "=(+ $A6 100)" (sh/raw *sh* "B1")) "the insert moved the reference")
+  (sh/undo-step *sh* {:undo [{:op :insert :axis :row :at 4}] :redo []} :undo)
+  (sh/settle! *sh*)
+  (is (= "=(+ $A5 100)" (sh/raw *sh* "B1")) "and the undo moved it back")
+  (is (= 105 (sh/value *sh* "B1")) "NOT #REF!"))
+
+(deftest line-occupied-sees-values-and-styles
+  (is (false? (sh/line-occupied? *sh* :row 3)))
+  (sh/set-cell! *sh* "C4" "x")
+  (sh/settle! *sh*)
+  (is (true? (sh/line-occupied? *sh* :row 3)) "row index 3 is row 4")
+  (is (false? (sh/line-occupied? *sh* :row 4)))
+  (is (true? (sh/line-occupied? *sh* :col 2)) "col index 2 is column C")
+  (is (false? (sh/line-occupied? *sh* :col 1))))

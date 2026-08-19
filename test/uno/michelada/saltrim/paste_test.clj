@@ -7,17 +7,14 @@
             [uno.michelada.saltrim.web.handlers :as h]))
 
 (defn- paste-into!
-  "Mimic handle-paste: tile `clip` across target `sel`, clipped to the selection
-   (unless it's a single stamp). Mutates `s`. (sid absent -> undo records no-op.)"
+  "Tile `clip` across target `sel` by calling the HANDLER'S OWN tiling, not a
+   copy of it. This harness used to re-implement it, and a bounding-box bug in
+   the real one was therefore invisible to a green suite — ⌘-clicking two
+   distant cells pasted over everything between them.
+   Mutates `s`. (sid absent -> undo records no-op.)"
   [s clip sel]
-  (let [cells (#'h/selected-cells sel)
-        crs   (map #(let [{:keys [ci ri]} (addr/parse %)] [ci ri]) cells)
-        tc0 (apply min (map first crs)) tr0 (apply min (map second crs))
-        tc1 (apply max (map first crs)) tr1 (apply max (map second crs))
-        origins (#'h/tile-origins tc0 tr0 tc1 tr1 (:w clip) (:h clip))
-        bounds  (when (next origins) [tc0 tr0 tc1 tr1])]
-    (doseq [[tc tr] origins] (#'h/paste-cells! s "no-session" clip tc tr bounds))
-    (sheet/settle! s)))
+  (#'h/paste-ranges! s "no-session" clip (#'h/selected-ranges sel))
+  (sheet/settle! s))
 
 (deftest tile-origins
   (let [t #'h/tile-origins]
@@ -29,6 +26,50 @@
       (is (= [[0 0] [2 0] [0 2] [2 2]] (t 0 0 3 3 2 2))))
     (testing "target smaller than the clip -> one paste (so a block pastes whole)"
       (is (= [[5 5]] (t 5 5 5 5 3 3))))))
+
+(deftest a-multi-range-selection-fills-only-what-is-selected
+  ;; THE BUG: the handler reduced the selection to its bounding box and tiled
+  ;; across that. ⌘-clicking two distant cells is TWO selected cells — all that
+  ;; MAX-SEL-CELLS ever counted — and an entire rectangle of write targets.
+  ;; B2 and J20 wrote 171 cells; A1 and XFD1048576 would have written 17 billion.
+  (let [s (sheet/create-sheet)]
+    (sheet/set-cell! s "A1" "X")
+    (sheet/settle! s)
+    (let [clip (#'h/capture-clip s "A1:A1")]
+      (paste-into! s clip "B2:B2 J20:J20")
+      (testing "both selected cells get the clip"
+        (is (= "X" (sheet/value s "B2")))
+        (is (= "X" (sheet/value s "J20"))))
+      (testing "and NOTHING between them is touched"
+        (is (nil? (sheet/value s "E10")))
+        (is (nil? (sheet/value s "C3")))
+        (is (nil? (sheet/value s "I19")))
+        (is (= #{"A1" "B2" "J20"} (set (sheet/cells s)))
+            "exactly the source and the two targets")))
+    (sheet/close! s)))
+
+(deftest each-selected-range-is-tiled-on-its-own
+  ;; two real rectangles, not two lone cells: each fills, the gap does not
+  (let [s (sheet/create-sheet)]
+    (sheet/set-cell! s "A1" "7")
+    (sheet/settle! s)
+    (let [clip (#'h/capture-clip s "A1:A1")]
+      (paste-into! s clip "C1:D2 G1:G2")
+      (is (every? #(= "7" (str (sheet/value s %))) ["C1" "D1" "C2" "D2" "G1" "G2"]))
+      (is (nil? (sheet/value s "E1")) "the gap between the ranges stays empty")
+      (is (nil? (sheet/value s "F2"))))
+    (sheet/close! s)))
+
+(deftest the-selection-cap-now-bounds-the-writes
+  ;; the cap counts CELLS; tiling per range means stamps can never outnumber
+  ;; them, which is what makes the cap meaningful for paste at all
+  ;; two lone cells at opposite corners are well UNDER the cap — which was the
+  ;; whole trap: the cap passed them, and the bounding box between them was
+  ;; seventeen billion write targets
+  (let [ranges (#'h/selected-ranges "A1:A1 XFD1048576:XFD1048576")]
+    (is (= [["A1" "A1"] ["XFD1048576" "XFD1048576"]] ranges))
+    (is (= 2 (count (mapcat (fn [[a b]] (addr/range-cells a b)) ranges)))
+        "two write targets, not the rectangle between them")))
 
 (deftest capture-records-footprint
   (let [s (sheet/create-sheet)]
