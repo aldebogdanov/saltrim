@@ -163,6 +163,37 @@
 (defn clear-cookie []
   (str cookie-name "=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0"))
 
+;; The OAuth state nonce also rides in a cookie, and that is the whole point of
+;; it. A nonce kept only in a server-side set proves that SOMEBODY started a
+;; login — not that THIS browser did. An attacker can start one themselves,
+;; hold the valid state and code, and then walk a victim through the callback:
+;; the check passes and the victim is silently signed in as the ATTACKER, with
+;; everything they go on to type landing in the attacker's account. Binding the
+;; nonce to the browser closes it, because the attacker cannot set a cookie on
+;; the victim's origin.
+;;
+;; SameSite=Lax deliberately, NOT Strict: the callback is a top-level GET
+;; navigation arriving from the provider, which Lax allows and Strict would
+;; strip — taking the cookie with it and breaking every login.
+
+(def ^:private state-cookie-name "saltrim_oauth_state")
+(def ^:private STATE-COOKIE-MAX-AGE 600)   ; 10 min, matching STATE-TTL-MS
+
+(defn state-cookie [s]
+  (str state-cookie-name "=" s "; Path=/; HttpOnly; SameSite=Lax; Max-Age="
+       STATE-COOKIE-MAX-AGE (when (secure?) "; Secure")))
+
+(defn clear-state-cookie []
+  (str state-cookie-name "=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0"))
+
+(defn req->state-cookie
+  "The OAuth state nonce this browser was given when it started the login."
+  [req]
+  (or (some-> req :cookies (get state-cookie-name) :value)
+      (some->> (get-in req [:headers "cookie"])
+               (re-find (re-pattern (str "(?:^|;\\s*)" state-cookie-name "=([a-f0-9]{32})")))
+               second)))
+
 (defn req->token
   "The auth token from the request cookie. Prefers the wrap-cookies-parsed
    :cookies map (every real request runs through that middleware); falls back to
@@ -216,16 +247,23 @@
 
 (defn- url-encode [s] (java.net.URLEncoder/encode (str s) "UTF-8"))
 
-(defn login-url
-  "Authorize-endpoint redirect for an active provider, or nil."
+(defn login-start!
+  "Begin a login: `{:url <authorize redirect> :state <nonce>}` for an active
+   provider, or nil. The caller MUST put `:state` in `state-cookie` on the
+   redirect — `callback!` refuses a state the browser cannot show it has.
+
+   Named for the side effect: it mints a nonce. The old name (`login-url`) hid
+   that behind a noun."
   [provider-key]
   (when-let [p (get (providers) provider-key)]
-    (str (:authorize p)
-         "?client_id=" (url-encode (:client-id p))
-         "&redirect_uri=" (url-encode (redirect-uri provider-key))
-         "&scope=" (url-encode (:scope p))
-         "&response_type=code"
-         "&state=" (mint-state! provider-key))))
+    (let [s (mint-state! provider-key)]
+      {:state s
+       :url (str (:authorize p)
+                 "?client_id=" (url-encode (:client-id p))
+                 "&redirect_uri=" (url-encode (redirect-uri provider-key))
+                 "&scope=" (url-encode (:scope p))
+                 "&response_type=code"
+                 "&state=" s)})))
 
 (defn- parse-json [s] (json/read-value s))
 
@@ -250,12 +288,24 @@
 
 (defn callback!
   "Complete the code flow: validate state, exchange the code, fetch the user,
-   upsert + mint an auth token. Returns {:token :uid} or {:error msg}."
-  [provider-key code state]
+   upsert + mint an auth token. Returns {:token :uid} or {:error msg}.
+
+   `cookie-state` is the nonce from this browser's `saltrim_oauth_state` cookie;
+   it must equal the `state` the provider echoed back, or the login is refused."
+  [provider-key code state cookie-state]
   (let [p (get (providers) provider-key)]
     (cond
       (nil? p)                          {:error "unknown provider"}
-      (not (take-state! provider-key state)) {:error "bad state (retry login)"}
+      ;; BOTH halves, and the order matters: consume the nonce first so a
+      ;; replay cannot re-use it even when the cookie check is what rejects.
+      ;; The server-side set proves the nonce is one WE minted and is unused;
+      ;; the cookie proves it was minted for THIS browser. Without the second,
+      ;; an attacker who starts their own login can complete it in a victim's
+      ;; browser and silently sign them into the attacker's account.
+      (not (and (take-state! provider-key state)
+                (not (str/blank? (str state)))
+                (= (str state) (str cookie-state))))
+      {:error "bad state (retry login)"}
       (str/blank? (str code))           {:error "missing code"}
       :else
       (try
