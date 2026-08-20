@@ -53,5 +53,63 @@
   (is (nil? (auth/resolve-grantee "!!!"))))
 
 (deftest unknown-provider-rejected
-  (is (:error (auth/callback! :nope "code" "state")))
-  (is (nil? (auth/login-url :github))))   ; not configured in test env
+  (is (:error (auth/callback! :nope "code" "state" "state")))
+  (is (nil? (auth/login-start! :github))))   ; not configured in test env
+
+;; --- OAuth state is bound to the BROWSER, not just to the server -------------
+
+(def ^:private fake-provider
+  {:github {:label "GitHub" :client-id "id" :client-secret "sec"
+            :authorize "https://example.test/authorize"
+            :token "https://example.test/token"
+            :userinfo "https://example.test/user"
+            :scope "read:user" :prefix "gh"
+            :extract (fn [u] {:ext-id (str (get u "id")) :name "Ann"})}})
+
+(defmacro ^:private with-provider
+  "Run `body` with a configured GitHub provider whose network calls are stubbed,
+   so the state check is the only thing that can refuse."
+  [& body]
+  `(with-redefs [auth/providers (constantly fake-provider)
+                 auth/exchange-code! (constantly "access-token")
+                 auth/fetch-userinfo! (constantly {"id" "7"})]
+     ~@body))
+
+(deftest login-start-mints-a-nonce-for-the-url-and-the-cookie
+  (with-provider
+    (let [{:keys [url state]} (auth/login-start! :github)]
+      (is (re-find #"[0-9a-f]{32}" state) "a SecureRandom hex nonce")
+      (is (clojure.string/includes? url (str "&state=" state))
+          "the same nonce the browser is about to be given")
+      (testing "and the cookie carries it, locked to this origin"
+        (let [c (auth/state-cookie state)]
+          (is (clojure.string/includes? c (str "saltrim_oauth_state=" state)))
+          (is (clojure.string/includes? c "HttpOnly"))
+          (is (clojure.string/includes? c "SameSite=Lax")
+              "Strict would be stripped on the provider's top-level redirect back"))))))
+
+(deftest a-login-completes-only-in-the-browser-that-started-it
+  ;; THE ATTACK: an attacker starts their own login, holds the valid state and
+  ;; code, and walks a victim through the callback. Server-side-only nonce
+  ;; validation passes, and the victim is silently signed in as the ATTACKER —
+  ;; everything they then type lands in the attacker's account.
+  (with-provider
+    (testing "the browser that was given the nonce gets in"
+      (let [{:keys [state]} (auth/login-start! :github)
+            r (auth/callback! :github "code" state state)]
+        (is (nil? (:error r)))
+        (is (:token r))))
+    (testing "a browser that was NOT given it does not"
+      (let [{:keys [state]} (auth/login-start! :github)]
+        (is (= "bad state (retry login)" (:error (auth/callback! :github "code" state nil)))
+            "no state cookie at all — the victim's browser")
+        (is (= "bad state (retry login)"
+               (:error (auth/callback! :github "code" state "someone-elses-nonce"))))))
+    (testing "and a spent nonce cannot be replayed, even by its own browser"
+      (let [{:keys [state]} (auth/login-start! :github)]
+        (is (nil? (:error (auth/callback! :github "code" state state))))
+        (is (= "bad state (retry login)" (:error (auth/callback! :github "code" state state)))
+            "consumed on first use")))
+    (testing "a blank state is never valid, cookie or no cookie"
+      (is (= "bad state (retry login)" (:error (auth/callback! :github "code" "" ""))))
+      (is (= "bad state (retry login)" (:error (auth/callback! :github "code" nil nil)))))))

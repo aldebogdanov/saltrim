@@ -37,10 +37,15 @@
   (testing "no stdlib name quietly replaces a clojure.core var"
     (let [core    (set (map str (keys (ns-publics 'clojure.core))))
           ;; The deliberate overrides, each with a reason in the stdlib ns:
-          ;; `abs` predates core's, and the I/O family is replaced by refusals
-          ;; because the sandbox has no console.
+          ;; `abs` predates core's; the I/O family is replaced by refusals
+          ;; because the sandbox has no console; and the random family because a
+          ;; cell RECOMPUTES — a value that changes with no edit behind it breaks
+          ;; assertions, .xlsx cached values and 3-way merge alike. They were
+          ;; reachable because SCI MERGES into its clojure.core rather than
+          ;; replacing it.
           allowed #{"abs" "println" "print" "prn" "pr" "printf"
-                    "newline" "flush" "read" "read-line"}]
+                    "newline" "flush" "read" "read-line"
+                    "rand" "rand-int" "rand-nth" "shuffle"}]
       (is (empty? (remove allowed (filter core (map str (keys formula/stdlib)))))))))
 
 (deftest existing-names-keep-their-meaning
@@ -62,6 +67,28 @@
       (is (= 20.0 (v s "B6")))
       (is (= 8.16496580927726 (v s "B7")) "stdev is still population")
       (is (= -3 (v s "B8")) "Excel's rounding stays where it was, under xround"))))
+
+(deftest formulas-cannot-be-non-deterministic
+  ;; SCI's :namespaces {'clojure.core stdlib} MERGES into its own clojure.core,
+  ;; so `rand` and friends were reachable from any formula. A cell stores SOURCE
+  ;; and recomputes: a value that changes with no edit behind it makes an
+  ;; assertion pass on one screen and fail on another, gives .xlsx a cached
+  ;; number that can never be reproduced, and hands 3-way merge two sides that
+  ;; differ for no reason. Excel's volatile functions were left out for exactly
+  ;; this; clojure.core's had to be too.
+  (doseq [src ["=(rand)" "=(rand-int 10)" "=(rand-nth [1 2 3])" "=(shuffle [1 2 3])"]]
+    (let [s (sheet-with [["A1" src]])
+          v (v s "A1")]
+      (is (and (map? v) (:error v)) (str src " must be refused"))
+      (is (re-find #"random numbers aren't available" (str (:error v)))
+          "and say why, not just fail")))
+  (testing "the deterministic neighbours are untouched"
+    (let [s (sheet-with [["A1" "=(sort [3 1 2])"]
+                         ["A2" "=(reverse [1 2 3])"]
+                         ["A3" "=(count [1 2 3])"]])]
+      (is (= [1 2 3] (v s "A1")))
+      (is (= [3 2 1] (v s "A2")))
+      (is (= 3 (v s "A3"))))))
 
 (deftest approximate-equality
   ;; `=` on two COMPUTED decimals is a trap the engine cannot fix for the user:
@@ -251,7 +278,9 @@
   ;; example from `docs-for`. A name with no entry would render a chip with an
   ;; empty tooltip and no copy button — so this is what keeps the panel honest
   ;; as the stdlib grows, the same way `catalog-syms` keeps the LIST honest.
-  (let [io-refusals '#{flush newline pr print printf println prn read read-line}
+  (let [io-refusals '#{flush newline pr print printf println prn read read-line
+                       ;; same shape: installed to REFUSE, not to be called
+                       rand rand-int rand-nth shuffle}
         internal    '#{deleted-ref}
         listed      (concat (remove (into io-refusals internal) (keys lib/hand-written))
                             lib/borrowed-syms

@@ -69,6 +69,28 @@
 (defn- no-io [& _]
   (throw (ex-info "I/O isn't available in formulas — the sandbox is pure (no console)" {})))
 
+;; SCI's `:namespaces {'clojure.core stdlib}` MERGES into its own clojure.core
+;; rather than replacing it, so `rand`, `rand-int`, `rand-nth` and `shuffle` were
+;; reachable from any formula. Nothing dangerous — the sandbox still has no host
+;; interop, no slurp, no threads — but a spreadsheet is the wrong place for a
+;; value that changes when nobody edited anything.
+;;
+;; A cell stores its SOURCE and recomputes; there is no recalc sweep, so a
+;; `(rand)` cell answers something new whenever a structural rebuild happens to
+;; touch it and holds a stale number the rest of the time. It also breaks things
+;; that assume a formula means one value: an assertion that passes on your screen
+;; and fails on your collaborator's, an .xlsx export whose cached value can never
+;; be reproduced, and a 3-way merge whose two sides disagree for no reason. This
+;; is why Excel's VOLATILE functions were left out of the borrowed set (see the
+;; ns docstring); the same reasoning has to reach clojure.core's.
+;;
+;; The fix is a SEEDABLE generator as a per-sheet property, which is a feature
+;; and not this refusal — see doc/rechentafel-evaluation.md item F.
+(defn- no-random [& _]
+  (throw (ex-info (str "random numbers aren't available in formulas — a cell recomputes, "
+                       "so the value would change with no edit behind it")
+                  {})))
+
 (defsrc nums
   "Keep only the numbers in a cell collection, so aggregates IGNORE blank cells
    (which resolve to nil) — matching a spreadsheet's SUM/AVERAGE-skip-blanks.
@@ -290,7 +312,9 @@
                   (throw (ex-info (str "#REF! — " what " was deleted") {:ref what})))
    ;; I/O (see no-io): clear "not available" instead of an opaque cast crash
    'println no-io 'print no-io 'prn no-io 'pr no-io 'printf no-io
-   'newline no-io 'flush no-io 'read no-io 'read-line no-io})
+   'newline no-io 'flush no-io 'read no-io 'read-line no-io
+   ;; non-determinism (see no-random): reachable through SCI's clojure.core
+   'rand no-random 'rand-int no-random 'rand-nth no-random 'shuffle no-random})
 
 ;; --- borrowed from Excel ---------------------------------------------------
 

@@ -1404,7 +1404,11 @@
                     :else (graph-svg sh g dyn-edges))]
         (patch-inner! gen "#graphview" inner)))))
 
-(defn- redirect [loc & [set-cookie]]
+(defn- redirect
+  "303 to `loc`. `set-cookie` may be one cookie string or several — the OAuth
+   callback sets the auth cookie AND clears the state nonce in one response, and
+   http-kit emits a Set-Cookie header per element of a sequential value."
+  [loc & [set-cookie]]
   (cond-> {:status 303 :headers {"Location" loc}}
     set-cookie (assoc-in [:headers "Set-Cookie"] set-cookie)))
 
@@ -1436,18 +1440,24 @@
 
       (and (= :get request-method) (re-matches #"/auth/(github|google)" uri))
       (let [[_ p] (re-matches #"/auth/(github|google)" uri)]
-        (if-let [u (auth/login-url (keyword p))]
-          (redirect u)
+        (if-let [{:keys [url state]} (auth/login-start! (keyword p))]
+          ;; the nonce goes to the browser as well as to the provider; the
+          ;; callback requires both to agree (see auth/callback!)
+          (redirect url (auth/state-cookie state))
           (redirect (str "/login?err=" (url-encode (str p " login is not configured"))))))
 
       (and (= :get request-method) (re-matches #"/auth/(github|google)/callback" uri))
       (let [[_ p] (re-matches #"/auth/(github|google)/callback" uri)
             {:keys [token error]} (auth/callback! (keyword p)
                                                   (some-> (qparam req "code") url-decode)
-                                                  (qparam req "state"))]
+                                                  (qparam req "state")
+                                                  (auth/req->state-cookie req))]
+        ;; the nonce is spent either way — clear it so a stale cookie cannot be
+        ;; replayed against a later login attempt
         (if token
-          (redirect "/" (auth/auth-cookie token))
-          (redirect (str "/login?err=" (url-encode (or error "login failed")))))))))
+          (redirect "/" [(auth/auth-cookie token) (auth/clear-state-cookie)])
+          (redirect (str "/login?err=" (url-encode (or error "login failed")))
+                    (auth/clear-state-cookie)))))))
 
 (defn handle-root [req]
   (let [uid (auth/req->uid req)]
