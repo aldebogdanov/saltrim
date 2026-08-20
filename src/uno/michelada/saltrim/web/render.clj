@@ -1364,12 +1364,19 @@
        "Open this branch as it was at an earlier point (read-only)."]
       (if (empty? revisions)
         [:p {:style "color:var(--muted);"} "No history yet — make some edits first."]
-        [:div {:style "max-height:40vh;overflow:auto;"}
-         (for [{:keys [tx inst]} revisions]
-           [:a {:href (str href "&at=" tx)
-                :style (str "display:block;padding:.4rem .2rem;border-top:1px solid var(--grid);"
-                            "text-decoration:none;color:var(--fg);font:12px monospace;")}
-            (str "🕘 " (fmt-ts inst))])])]]))
+        [:div
+         [:div {:style "max-height:40vh;overflow:auto;"}
+          (for [{:keys [tx inst]} revisions]
+            [:a {:href (str href "&at=" tx)
+                 :style (str "display:block;padding:.4rem .2rem;border-top:1px solid var(--grid);"
+                             "text-decoration:none;color:var(--fg);font:12px monospace;")}
+             (str "🕘 " (fmt-ts inst))])]
+         ;; a list that just stops looks like the whole history. Say when it is
+         ;; not — the older revisions are still in the db, nothing offers them yet.
+         (when (:truncated? (meta revisions))
+           [:p {:style "color:var(--muted);margin:.6rem 0 0;font-size:12px;"}
+            (str "Showing the " db/MAX-REVISIONS " most recent changes; "
+                 "this branch has more.")])])]]))
 
 (defn- branch-gone-html
   "Shown when the owner deletes the branch you are on ($branchgone = its name).
@@ -1467,7 +1474,10 @@
   (let [sid    (str (random-uuid))
         owner? (= uid (first (store/split-id storage-id)))
         asof?  (boolean at)                       ; read-only historical view?
-        revisions (db/branch-revisions storage-id branch)]
+        ;; a non-owner sees only the points from when they were let in (the URL
+        ;; is refused separately — see db/as-of-allowed?)
+        revisions (db/branch-revisions storage-id branch
+                                       {:since (db/history-floor uid storage-id link-token)})]
    (str
     "<!doctype html>"
    (h/html

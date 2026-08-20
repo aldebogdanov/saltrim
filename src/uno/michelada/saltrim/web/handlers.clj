@@ -555,7 +555,10 @@
         at       (sig-at sig)
         token    (not-empty (str (:link sig)))
         view     (clamp-view (select-keys sig [:r0 :c0 :wc :wr]))]
-    (if-not (and at (can-read? uid sheet-id branch token))
+    ;; scrolling an as-of view re-loads the snapshot, so it needs the same bound
+    ;; as opening one — otherwise the refusal above is one /viewat away
+    (if-not (and at (can-read? uid sheet-id branch token)
+                 (db/as-of-allowed? uid sheet-id token at))
       (deny req "no access")
       (if-let [{:keys [sh]} (store/load-record-asof sheet-id branch at)]
         (sse req (fn [gen]
@@ -1484,7 +1487,11 @@
             at          (some-> (qparam req "at") parse-long)]
         (cond
           ;; as-of view: render a transient historical sheet (no live room).
-          (and id at (can-read? uid id branch token))
+          ;; `as-of-allowed?` is what actually refuses a point from before the
+          ;; asker was granted access — the revision picker only stops OFFERING
+          ;; those, and &at= is a URL anyone can type.
+          (and id at (can-read? uid id branch token)
+               (db/as-of-allowed? uid id token at))
           (if-let [{:keys [sh]} (store/load-record-asof id branch at)]
             (try {:status 200 :headers {"Content-Type" "text/html"}
                   :body (page sh id sname branch at uid token)}
@@ -1533,7 +1540,10 @@
         (cond
           (nil? id) {:status 403 :body "no access"}
 
-          (and at (can-read? uid id branch token))
+          ;; the same bound as the browser view: a historical snapshot you may
+          ;; not look at is not one you may DOWNLOAD either
+          (and at (can-read? uid id branch token)
+               (db/as-of-allowed? uid id token at))
           (if-let [{:keys [sh]} (store/load-record-asof id branch at)]
             (try (xlsx-response (export/workbook-bytes sh sname) sname)
                  (finally (sheet/close! sh)))

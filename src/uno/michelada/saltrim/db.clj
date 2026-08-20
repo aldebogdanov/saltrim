@@ -343,17 +343,69 @@
       true)))
 
 (defn sheet-grants
-  "All share rows on `sheet-id` as maps {:grantee :kind :level}. Drives both the
-   access check and (later) the share panel."
+  "All share rows on `sheet-id` as maps {:grantee :kind :level :created-at}.
+   Drives the access check, the share panel, and — via `:created-at` — the
+   history floor in `history-floor`."
   [sheet-id]
-  (->> (d/q '[:find ?grantee ?kind ?level
+  (->> (d/q '[:find ?grantee ?kind ?level ?at
               :in $ ?sid
               :where [?sh :sheet/id ?sid] [?s :share/sheet ?sh]
                      [?s :share/grantee ?grantee]
                      [?s :share/grantee-kind ?kind]
-                     [?s :share/level ?level]]
+                     [?s :share/level ?level]
+                     [(get-else $ ?s :share/created-at 0) ?at]]
             @conn sheet-id)
-       (map (fn [[grantee kind level]] {:grantee grantee :kind kind :level level}))))
+       (map (fn [[grantee kind level at]]
+              {:grantee grantee :kind kind :level level :created-at at}))))
+
+(defn sheet-owner
+  "The uid that owns `sheet-id`, or nil. Ownership is also derivable from the
+   `<owner>__<name>` storage id, but `db` cannot reach `store` (store is the
+   seam over db), and the owner entity is right here."
+  [sheet-id]
+  (d/q '[:find ?u . :in $ ?sid
+         :where [?sh :sheet/id ?sid] [?sh :sheet/owner ?o] [?o :user/uid ?u]]
+       @conn sheet-id))
+
+(defn history-floor
+  "The earliest instant (ms) `uid` may view `sheet-id` as-of, or nil for no
+   bound. The owner has none; anyone else is bounded by the moment they were
+   GRANTED access — the earliest of their grants, since that is when they could
+   first have seen anything.
+
+   Shared history is not shared past. A sheet handed to you today should not
+   also hand you every version of it from before you were let in, including the
+   rows its owner deleted precisely so that nobody would read them. The picker
+   never offered those points, but `&at=<tx>` is a URL and the URL was not
+   checked — hiding a control is not access control.
+
+   nil for someone with no grant at all: they cannot read the sheet either way,
+   and the caller has already refused them."
+  [uid sheet-id token]
+  (when-not (= uid (sheet-owner sheet-id))
+    (let [ats (for [{:keys [grantee kind created-at]} (sheet-grants sheet-id)
+                    :when (or (and (= kind :user) (= grantee uid))
+                              (and (= kind :link) token (= grantee token)))]
+                (long (or created-at 0)))]
+      (when (seq ats) (apply min ats)))))
+
+(defn tx-instant
+  "The `:db/txInstant` of transaction `tx` as epoch ms, or nil if there is no
+   such transaction."
+  [tx]
+  (some-> (d/q '[:find ?inst . :in $ ?tx :where [?tx :db/txInstant ?inst]]
+               (d/history @conn) tx)
+          .getTime))
+
+(defn as-of-allowed?
+  "May `uid` (with optional link `token`) view `sheet-id` as of transaction
+   `tx`? True for the owner and for any point at or after the asker was granted
+   access. Gate the `&at=` URL with this — the revision PICKER being bounded
+   only hides the older points, it does not refuse them."
+  [uid sheet-id token tx]
+  (if-let [floor (history-floor uid sheet-id token)]
+    (if-let [inst (tx-instant tx)] (>= inst floor) false)
+    true))
 
 (defn access-level
   "Highest level `uid` (carrying optional capability `token`) holds on
@@ -851,13 +903,30 @@
       (sheet-doc-asof sheet-id (:parent ls) (min (:base-tx ls) (:base-tx lt)))
       :else nil)))
 
+(def MAX-REVISIONS
+  "How many as-of points the history picker lists. Not a storage limit — every
+   revision is still in history and still reachable by `&at=`; this is only how
+   long a list the UI will draw. Public so the UI can name the number it is
+   showing rather than hard-coding a second copy of it."
+  50)
+
 (defn branch-revisions
-  "Up to `limit` (default 50) most-recent REVISIONS of (sheet-id, branch): the
-   distinct transactions that changed any cellprop on this branch (assertions or
-   retractions), as {:tx :inst}, newest first. Each is a point you can view the
-   sheet `as-of`. Reads history (`:keep-history?`)."
-  ([sheet-id branch] (branch-revisions sheet-id branch 50))
-  ([sheet-id branch limit]
+  "The most-recent REVISIONS of (sheet-id, branch): the distinct transactions
+   that changed any cellprop on this branch (assertions or retractions), as
+   {:tx :inst}, newest first. Each is a point you can view the sheet `as-of`.
+   Reads history (`:keep-history?`).
+
+   Options: `:limit` (default `MAX-REVISIONS`) and `:since` (epoch ms — the
+   caller's history floor, see `history-floor`). An options MAP rather than
+   positional arguments so a caller that only wants to bound the WINDOW does not
+   have to restate the limit; restating it is how one constant becomes two that
+   drift apart.
+
+   The result carries `{:truncated? true}` in its METADATA when there were more
+   revisions than `limit`, so the UI can say the list is partial instead of
+   silently ending. Nothing offers the older ones yet — see TECHDEBT."
+  ([sheet-id branch] (branch-revisions sheet-id branch nil))
+  ([sheet-id branch {:keys [limit since] :or {limit MAX-REVISIONS}}]
    (->> (d/q '[:find ?tx ?inst
                :in $ ?sid ?br
                :where [?sh :sheet/id ?sid]
@@ -866,6 +935,15 @@
                       [?tx :db/txInstant ?inst]]
              (d/history @conn) sheet-id branch)
         ;; the query result is already a set (unique per [tx inst], i.e. per tx)
+        ;; `since` (epoch ms, or nil) bounds the list for a non-owner: you may
+        ;; travel back to when you were let in, and no further. See
+        ;; `history-floor` — and note the URL is gated separately, because a
+        ;; picker that omits a point does not refuse it.
+        (filter (fn [[_ inst]] (or (nil? since) (>= (.getTime ^java.util.Date inst) (long since)))))
         (sort-by first >)
-        (take limit)
-        (mapv (fn [[tx inst]] {:tx tx :inst inst})))))
+        ;; one more than asked for, purely to learn whether there ARE more
+        (take (inc (long limit)))
+        (mapv (fn [[tx inst]] {:tx tx :inst inst}))
+        ((fn [revs]
+           (with-meta (vec (take limit revs))
+             {:truncated? (> (count revs) (long limit))}))))))
