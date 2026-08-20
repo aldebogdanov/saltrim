@@ -638,6 +638,54 @@
                     (log-err! "/insert" e)
                     (signals! gen {:err (pretty-err (.getMessage e))})))))))))))
 
+(defn handle-recompute
+  "Force every cell on this sheet to evaluate again, and push the result to
+   everyone on the branch.
+
+   A cell holds its SOURCE and recomputes when something it depends on changes.
+   Anything that depends on the world OUTSIDE the sheet has nothing to trigger
+   it: `(today)` is the standing example — it is evaluated when a structural
+   rebuild happens to touch its cell, so a sheet left open across midnight goes
+   on showing yesterday, and so does one reopened months later until something
+   else disturbs it. There is no recalc sweep to hook, by design (the engine is
+   push-based), so the honest answer is a deliberate control rather than a timer
+   nobody asked for.
+
+   `load-document!` over the sheet's own document is the whole mechanism: the
+   bulk path reinstalls every cell and rebuilds once, which is exactly a full
+   re-evaluation. Sources are untouched, so the diff-save writes nothing unless
+   a value genuinely moved.
+
+   Not free, and the UI says so: a full rebuild is the `load` column in
+   doc/bench.md — of the order of a second for a thousand interdependent cells —
+   and it holds the room's edit lock throughout, so collaborators' writes queue
+   behind it. That is the price of the guarantee, and it is why this is a button
+   and not something that fires on a schedule.
+
+   Read-write, like every other path that takes the lock and broadcasts."
+  [req]
+  (with-access req
+    (fn [uid sheet-id rec {:keys [sid]} gen]
+      (ensure-session! sid sheet-id (:branch rec) uid (:token rec))
+      (if (not= :read-write (:level rec))
+        (signals! gen {:err "read-only access — you can't recompute this sheet"})
+        (locking (edit-lock (:room rec))
+          (try
+            (let [sh (:sh rec)
+                  n  (count (sheet/cells sh))]
+              (sheet/load-document! sh (sheet/document sh))
+              (sheet/settle! sh)
+              (save-rec! (:room rec) uid)
+              ;; every value may have moved, so re-render the window rather than
+              ;; guessing at a changed set — same reasoning as /insert
+              (render-window! gen sid (:room rec) sh (session-view sid))
+              (broadcast-window! sid (:room rec) sh)
+              (u/log "INFO" "/recompute" sheet-id (str "(" n " cells)"))
+              (signals! gen {:info (str "recomputed " n " cell" (when (not= 1 n) "s"))}))
+            (catch Throwable e
+              (log-err! "/recompute" e)
+              (signals! gen {:err (pretty-err (.getMessage e))}))))))))
+
 (defn handle-deleteline
   "Delete the row/column the active cell ($sel) is on. `$deletedir` ∈ row|col.
 

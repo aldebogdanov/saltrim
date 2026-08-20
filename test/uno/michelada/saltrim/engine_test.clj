@@ -1118,3 +1118,29 @@
     (let [s (sh/create-sheet)]
       (is (thrown-with-msg? clojure.lang.ExceptionInfo #"covers 6000 cells \(max 5000\)"
                             (sh/set-cell! s "B1" "=(sum $A1:A6000)"))))))
+
+(deftest a-full-reload-re-evaluates-every-cell
+  ;; What the ↻ button does (web.handlers/handle-recompute): a cell recomputes
+  ;; when a DEPENDENCY changes, so anything reading the world outside the sheet
+  ;; — `(today)` above all — has nothing to trigger it. `load-document!` over the
+  ;; sheet's own document is the whole mechanism, and this pins that it really
+  ;; re-runs rather than reusing what is cached.
+  (let [s (sh/create-sheet)]
+    (try
+      ;; a def that counts its own calls, so re-evaluation is observable
+      (sh/set-defs! s "(def calls (atom 0))\n(defn tick [] (swap! calls inc))")
+      (sh/set-cell! s "A1" "=(tick)")
+      (sh/set-cell! s "A2" "=(+ $A1 0)")
+      (sh/settle! s)
+      (is (= 1 (sh/value s "A1")) "evaluated once on write")
+      (let [doc (sh/document s)]
+        (sh/load-document! s doc)
+        (sh/settle! s)
+        (is (= 2 (sh/value s "A1")) "and again on a full reload")
+        (sh/load-document! s doc)
+        (sh/settle! s)
+        (is (= 3 (sh/value s "A1")) "each one is a fresh evaluation"))
+      (is (= 3 (sh/value s "A2")) "dependents follow, they are not left stale")
+      (testing "and the SOURCE is untouched, so the diff-save writes nothing"
+        (is (= "=(tick)" (sh/raw s "A1"))))
+      (finally (sh/close! s)))))

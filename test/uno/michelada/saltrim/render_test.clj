@@ -114,3 +114,14 @@
     ;; demotions come out of the translated count; the parts still sum to the total
     (is (str/includes? (render-one {:formulas 2 :fallbacks (fb 1) :demoted (dm 2)})
                        "3 formulas (0 translated live, 1 untranslated, 2 demoted to values)"))))
+
+(deftest the-recompute-control-is-present-and-says-it-is-working
+  ;; `(today)` and anything else depending on the world outside the sheet has
+  ;; nothing to trigger it — a cell recomputes when a DEPENDENCY changes. There
+  ;; is no recalc sweep to hook, so the answer is a deliberate button.
+  (let [b (str (#'render/recompute-button))]
+    (is (str/includes? b "@post('/recompute')"))
+    (testing "and it shows that it is busy, because it is not instant"
+      (is (str/includes? b "data-indicator:recomputing"))
+      (is (str/includes? b "$recomputing")
+          "a control that looks instant and is not teaches people to press twice"))))

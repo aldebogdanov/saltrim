@@ -1468,6 +1468,166 @@
      "Set a claim with the " [:span {:style "font-family:monospace;"} "⊨"] " button on the formula row."]
     [:div {:id "violview" :style "overflow:auto;max-height:64vh;"} (h/raw (violations-html sh))]]])
 
+(defn- page-signals
+  "Every Datastar signal the page starts with, as one map.
+
+   Its own fn rather than inline in `page` for a mechanical reason: this is a
+   hundred-odd attribute pairs, and with them in place `page` compiled to a
+   method over the JVM's 64KB bytecode limit — \"Method code too large\", the
+   trap `render-test` exists for. Adding one more signal used to be a build
+   failure with no obvious cause; now there is room."
+  [sh storage-id branch at uid sid link-token]
+  {     :data-signals:cell "''"
+             :data-signals:v "''"
+             ;; ($err / $info are gone: a message is an appended card in #toasts,
+             ;; not a signal in a slot — see web.sse. Handlers still write them
+             ;; through signals!, which turns them into elements.)
+             :data-signals:sel "''"
+             :data-signals:edit "false"
+             ;; floating in-cell editor visibility (distinct from $edit: only the
+             ;; cell dblclick/Enter path shows it, after start-edit! positions it)
+             :data-signals:celledit "false"
+             ;; has the formula bar been TYPED IN since it last committed? The
+             ;; bar commits on Enter AND on blur, and without this both fire for
+             ;; one edit — you press Enter, then click away, and the same value
+             ;; is written twice. Harmless-looking until the value is a bad
+             ;; formula, at which point you get two identical error toasts.
+             ;; It also stops a focus-and-leave with no typing from rewriting
+             ;; the cell at all. `$edit` cannot serve: it means "this user is
+             ;; editing" for peer presence, and clearing it on Enter would drop
+             ;; the lock while the caret is still in the box.
+             :data-signals:vdirty "false"
+             :data-signals:r0 "0"
+             :data-signals:c0 "0"
+             ;; how many columns/rows THIS client's viewport needs covered
+             ;; (app.cljs measures it — only the browser knows). 0 = not measured
+             ;; yet: the server then falls back to its own px-budget guess.
+             :data-signals:wc "0"
+             :data-signals:wr "0"
+             :data-signals:sheet (format "'%s'" storage-id)
+             ;; the working branch (rides in every POST so the server routes to
+             ;; the right (sheet,branch) room); seeded from the resolved &b=.
+             :data-signals:branch (format "'%s'" branch)
+             ;; as-of (PR C): the tx being viewed, or "" for live. When set, every
+             ;; POST carries it and the server forces read-only access.
+             :data-signals:at (format "'%s'" (or at ""))
+             :data-signals:histpanel "false"
+             ;; set by data-indicator while /recompute is in flight
+             :data-signals:recomputing "false"     ; 🕘 history modal open? (live page)
+             :data-signals:bname "''"            ; new-branch name (fork modal)
+             :data-signals:branchact "''"        ; fork | delete | merge-preview/apply
+             :data-signals:branchpanel "false"   ; 🌿 modal open?
+             ;; set (to its name) when the owner deletes the branch you are on —
+             ;; raises a blocking modal instead of redirecting you onto main
+             :data-signals:branchgone "''"
+             ;; merge (PR B): source branch + the space-separated set of conflict
+             ;; keys ("addr|prop") the owner chose to take from source.
+             :data-signals:mergefrom "''"
+             :data-signals:mergetake "''"
+             ;; server sets $goto on a fork/delete to navigate (full reload) to
+             ;; the resulting branch — the #goto effect element below watches it.
+             :data-signals:goto "''"
+             :data-signals:sid (format "'%s'" sid)
+             :data-signals:link (format "'%s'" (or link-token ""))
+             :data-signals:sharepanel "false"
+             :data-signals:shareact "''"
+             :data-signals:plevel "''"
+             :data-signals:rotateconfirm "false"  ; new-link agreement modal open?
+             :data-signals:gtarget "''"
+             :data-signals:glevel "'read-write'"
+             :data-signals:grantee "''"
+             :data-signals:styleprop "'bg'"
+             :data-signals:stylesrc "''"
+             ;; which side(s) a `border` write lands on: the comma-joined prop list
+             ;; of the picked group (see `border-sides`); defaults to all four.
+             :data-signals:borderside (format "'%s'"
+                                              (str/join "," (map name (:all border-sides))))
+             ;; collapsible toolbar sections (formula bar stays; others toggle)
+             :data-signals:fmtbar "false"
+             ;; ⊨ assertion lever: the row's visibility + the selected cell's claim
+             :data-signals:assertbar "false"
+             :data-signals:assertsrc "''"
+             ;; how many cells currently FAIL their assertion, sheet-wide. Seeded
+             ;; server-side so a reload still tells you, and re-pushed to the whole
+             ;; room on every change — a peer's edit can break your assertion.
+             :data-signals:nviol (str (count (sheet/assert-violations sh)))
+             :data-signals:violpanel "false"
+             ;; current multi-selection as space-separated "TL:BR" ranges, kept
+             ;; LIVE by app.cljs so selection-wide actions (clear / style / …) use it
+             :data-signals:selcells "''"
+             :data-signals:insertdir "''"   ; top|bottom|left|right (insert blank row/col)
+             :data-signals:deletedir "''"   ; row|col (delete the line the cursor is on)
+             :data-signals:layerdir "''"    ; over|under (which side of the grid a fill paints on)
+             :data-signals:rzcmd "''"
+             ;; definitions library (ƒ modal)
+             :data-signals:defspanel "false"
+             :data-signals:defid "''"
+             :data-signals:defsrc "''"
+             ;; shared big-editor modal (formula bar / style bar / definitions)
+             :data-signals:bigedit "false"
+             :data-signals:bigwhat "''"
+             :data-signals:big "''"
+             ;; flatten (⧉): strict = only error-behavior-preserving simplify rules
+             :data-signals:flatstrict "false"
+             ;; import-.xlsx modal: $importing = upload in flight (disables the
+             ;; button), $imported = report replaces the form until re-opened
+             :data-signals:importpanel "false"
+             :data-signals:importing "false"
+             :data-signals:imported "false"
+             :data-signals:help "false"
+             ;; account agent key (🔑 panel): the MCP credential for ALL your
+             ;; sheets. $agentkey holds the freshly minted secret — shown once,
+             ;; never persisted client-side; $agentkeyhas only says one exists.
+             :data-signals:agentpanel "false"
+             :data-signals:agentact "''"
+             :data-signals:agentkey "''"
+             :data-signals:agentkeyhas (str (boolean (auth/agent-key-info uid)))
+             :data-signals:agentrevoke "false"   ; revoke confirmation armed?
+             ;; account erasure (same panel). $acctplan is armed by the server's
+             ;; answer to "plan", so the warning can name the sheets other
+             ;; people are on ($acctshared) before anything is typed.
+             :data-signals:acctact "''"
+             :data-signals:acctplan "false"
+             :data-signals:acctword "''"
+             :data-signals:acctsheets "0"
+             :data-signals:acctshared "''"
+             ;; dependency-graph view (🕸 modal) — server renders #graphview on open
+             :data-signals:graphpanel "false"
+             ;; sheet properties (⚙ modal, owner-only) — seeded with current defaults
+             :data-signals:propspanel "false"
+             :data-signals:delconfirm "false"    ; delete-sheet danger zone armed?
+             :data-signals:pcw (str (sheet/default-col-w sh))
+             :data-signals:prh (str (sheet/default-row-h sh))})
+
+(defn- recompute-button
+  "↻ — force every cell to evaluate again.
+
+   A cell recomputes when something it DEPENDS ON changes, so anything that
+   depends on the world outside the sheet has nothing to trigger it and goes
+   stale. `(today)` is the standing example: a sheet left open across midnight
+   goes on showing yesterday. There is no recalc sweep to hook — the engine is
+   push-based, deliberately — so the honest answer is a control the user presses
+   rather than a timer nobody asked for.
+
+   `data-indicator` swaps the glyph and disables the button while the post is in
+   flight, because a full rebuild of a large sheet runs of the order of a second
+   (the `load` column in doc/bench.md) and holds the room's edit lock while it
+   does. A control that looks instant and is not teaches people to press it
+   twice.
+
+   Its own fn rather than inline in `page`, and that is not style: `page` was
+   already close enough to the JVM's 64KB-per-method bytecode limit that adding
+   this many forms broke the build with \"Method code too large\" — the same trap
+   `render-test` was written for."
+  []
+  [:button {:class "btn"
+            :data-on:click "@post('/recompute')"
+            :data-indicator:recomputing true
+            :data-attr:disabled "$recomputing"
+            :title "recalculate every cell (refreshes values like today's date)"}
+   [:span {:data-show "!$recomputing"} "↻"]
+   [:span {:data-show "$recomputing"} "…"]])
+
 (defn page [sh storage-id sname branch at uid link-token]
   ;; one session id seeds BOTH $sid (sent on /stream, registers the session) and
   ;; #ctl's data-sid (read by the unload beacon) — they must be the same value.
@@ -1737,131 +1897,13 @@
       ;; the vendored file to change version.
       [:script {:type "module" :src "/datastar.js"}]
       [:script {:src "/app.js"}]]
-     [:body {:data-signals:cell "''"
-             :data-signals:v "''"
-             ;; ($err / $info are gone: a message is an appended card in #toasts,
-             ;; not a signal in a slot — see web.sse. Handlers still write them
-             ;; through signals!, which turns them into elements.)
-             :data-signals:sel "''"
-             :data-signals:edit "false"
-             ;; floating in-cell editor visibility (distinct from $edit: only the
-             ;; cell dblclick/Enter path shows it, after start-edit! positions it)
-             :data-signals:celledit "false"
-             ;; has the formula bar been TYPED IN since it last committed? The
-             ;; bar commits on Enter AND on blur, and without this both fire for
-             ;; one edit — you press Enter, then click away, and the same value
-             ;; is written twice. Harmless-looking until the value is a bad
-             ;; formula, at which point you get two identical error toasts.
-             ;; It also stops a focus-and-leave with no typing from rewriting
-             ;; the cell at all. `$edit` cannot serve: it means "this user is
-             ;; editing" for peer presence, and clearing it on Enter would drop
-             ;; the lock while the caret is still in the box.
-             :data-signals:vdirty "false"
-             :data-signals:r0 "0"
-             :data-signals:c0 "0"
-             ;; how many columns/rows THIS client's viewport needs covered
-             ;; (app.cljs measures it — only the browser knows). 0 = not measured
-             ;; yet: the server then falls back to its own px-budget guess.
-             :data-signals:wc "0"
-             :data-signals:wr "0"
-             :data-signals:sheet (format "'%s'" storage-id)
-             ;; the working branch (rides in every POST so the server routes to
-             ;; the right (sheet,branch) room); seeded from the resolved &b=.
-             :data-signals:branch (format "'%s'" branch)
-             ;; as-of (PR C): the tx being viewed, or "" for live. When set, every
-             ;; POST carries it and the server forces read-only access.
-             :data-signals:at (format "'%s'" (or at ""))
-             :data-signals:histpanel "false"     ; 🕘 history modal open? (live page)
-             :data-signals:bname "''"            ; new-branch name (fork modal)
-             :data-signals:branchact "''"        ; fork | delete | merge-preview/apply
-             :data-signals:branchpanel "false"   ; 🌿 modal open?
-             ;; set (to its name) when the owner deletes the branch you are on —
-             ;; raises a blocking modal instead of redirecting you onto main
-             :data-signals:branchgone "''"
-             ;; merge (PR B): source branch + the space-separated set of conflict
-             ;; keys ("addr|prop") the owner chose to take from source.
-             :data-signals:mergefrom "''"
-             :data-signals:mergetake "''"
-             ;; server sets $goto on a fork/delete to navigate (full reload) to
-             ;; the resulting branch — the #goto effect element below watches it.
-             :data-signals:goto "''"
-             :data-signals:sid (format "'%s'" sid)
-             :data-signals:link (format "'%s'" (or link-token ""))
-             :data-signals:sharepanel "false"
-             :data-signals:shareact "''"
-             :data-signals:plevel "''"
-             :data-signals:rotateconfirm "false"  ; new-link agreement modal open?
-             :data-signals:gtarget "''"
-             :data-signals:glevel "'read-write'"
-             :data-signals:grantee "''"
-             :data-signals:styleprop "'bg'"
-             :data-signals:stylesrc "''"
-             ;; which side(s) a `border` write lands on: the comma-joined prop list
-             ;; of the picked group (see `border-sides`); defaults to all four.
-             :data-signals:borderside (format "'%s'"
-                                              (str/join "," (map name (:all border-sides))))
-             ;; collapsible toolbar sections (formula bar stays; others toggle)
-             :data-signals:fmtbar "false"
-             ;; ⊨ assertion lever: the row's visibility + the selected cell's claim
-             :data-signals:assertbar "false"
-             :data-signals:assertsrc "''"
-             ;; how many cells currently FAIL their assertion, sheet-wide. Seeded
-             ;; server-side so a reload still tells you, and re-pushed to the whole
-             ;; room on every change — a peer's edit can break your assertion.
-             :data-signals:nviol (str (count (sheet/assert-violations sh)))
-             :data-signals:violpanel "false"
-             ;; current multi-selection as space-separated "TL:BR" ranges, kept
-             ;; LIVE by app.cljs so selection-wide actions (clear / style / …) use it
-             :data-signals:selcells "''"
-             :data-signals:insertdir "''"   ; top|bottom|left|right (insert blank row/col)
-             :data-signals:deletedir "''"   ; row|col (delete the line the cursor is on)
-             :data-signals:layerdir "''"    ; over|under (which side of the grid a fill paints on)
-             :data-signals:rzcmd "''"
-             ;; definitions library (ƒ modal)
-             :data-signals:defspanel "false"
-             :data-signals:defid "''"
-             :data-signals:defsrc "''"
-             ;; shared big-editor modal (formula bar / style bar / definitions)
-             :data-signals:bigedit "false"
-             :data-signals:bigwhat "''"
-             :data-signals:big "''"
-             ;; flatten (⧉): strict = only error-behavior-preserving simplify rules
-             :data-signals:flatstrict "false"
-             ;; import-.xlsx modal: $importing = upload in flight (disables the
-             ;; button), $imported = report replaces the form until re-opened
-             :data-signals:importpanel "false"
-             :data-signals:importing "false"
-             :data-signals:imported "false"
-             :data-signals:help "false"
-             ;; account agent key (🔑 panel): the MCP credential for ALL your
-             ;; sheets. $agentkey holds the freshly minted secret — shown once,
-             ;; never persisted client-side; $agentkeyhas only says one exists.
-             :data-signals:agentpanel "false"
-             :data-signals:agentact "''"
-             :data-signals:agentkey "''"
-             :data-signals:agentkeyhas (str (boolean (auth/agent-key-info uid)))
-             :data-signals:agentrevoke "false"   ; revoke confirmation armed?
-             ;; account erasure (same panel). $acctplan is armed by the server's
-             ;; answer to "plan", so the warning can name the sheets other
-             ;; people are on ($acctshared) before anything is typed.
-             :data-signals:acctact "''"
-             :data-signals:acctplan "false"
-             :data-signals:acctword "''"
-             :data-signals:acctsheets "0"
-             :data-signals:acctshared "''"
-             ;; dependency-graph view (🕸 modal) — server renders #graphview on open
-             :data-signals:graphpanel "false"
-             ;; sheet properties (⚙ modal, owner-only) — seeded with current defaults
-             :data-signals:propspanel "false"
-             :data-signals:delconfirm "false"    ; delete-sheet danger zone armed?
-             :data-signals:pcw (str (sheet/default-col-w sh))
-             :data-signals:prh (str (sheet/default-row-h sh))
-             ;; the page IS the window: a flex column exactly 100vh tall, so the
-             ;; grid (flex:1) takes every pixel the toolbars don't. Modals/toast
-             ;; are position:fixed, so they stay out of this column.
-             :style (str "font-family:sans-serif;margin:0;padding:.6rem;height:100vh;"
-                         "box-sizing:border-box;display:flex;flex-direction:column;"
-                         "background:var(--bg);color:var(--fg);")}
+      ;; the page IS the window: a flex column exactly 100vh tall, so the grid
+      ;; (flex:1) takes every pixel the toolbars don't. Modals/toast are
+      ;; position:fixed, so they stay out of this column.
+      [:body (assoc (page-signals sh storage-id branch at uid sid link-token)
+                    :style (str "font-family:sans-serif;margin:0;padding:.6rem;height:100vh;"
+                                "box-sizing:border-box;display:flex;flex-direction:column;"
+                                "background:var(--bg);color:var(--fg);"))
       ;; Toasts: the server appends one card per message (web.sse/toast!), each
       ;; carrying its own dismissal — click on all of them, plus an animation
       ;; that ends by removing an info card. Empty here, and empty again once
@@ -1913,6 +1955,7 @@
           (when owner?
             [:button {:class "btn" :data-on:click "$propspanel=true" :title "sheet properties"} "⚙"])
           [:button {:class "btn" :data-on:click "$histpanel=true" :title "history — view an earlier revision"} "🕘"]
+          (recompute-button)
           ;; export: a plain download link (GET /export.xlsx), carrying the same
           ;; access params as this page. Formulas export LIVE where `xlformula`
           ;; can spell them, computed values elsewhere (see export.clj).
