@@ -1680,7 +1680,16 @@
                 ;; toolbar: two rows. row 1 = picker/new/share/identity,
                 ;; row 2 = cell-ref + formula bar. .tool/.btn unify the inputs
                 ;; and buttons that used to repeat the same inline style string.
-                ".toolrow{display:flex;align-items:center;gap:.5rem;margin-bottom:.4rem;}"
+                ;; flex-wrap is load-bearing, not cosmetic. Without it a toolrow is
+                ;; nowrap, so once its controls no longer fit they are laid out
+                ;; past the right edge and there is no way to reach them — no
+                ;; scrollbar, no overflow menu, nothing. Measured on the style
+                ;; row at a 900px viewport: scrollWidth 1057 against clientWidth
+                ;; 881, with `unmerge`, `fill`, `over grid` and `under grid` off
+                ;; the screen. Wrapping costs a second line of toolbar and the
+                ;; grid shrinks to match (it is flex:1 in the 100vh column), which
+                ;; is the right trade against a control you cannot click.
+                ".toolrow{display:flex;flex-wrap:wrap;align-items:center;gap:.5rem;margin-bottom:.4rem;}"
                 ".tool{font:13px sans-serif;padding:5px 6px;border:1px solid var(--line);"
                 "border-radius:var(--radius);background:var(--panel);}"
                 ".tool.mono{font-family:monospace;}"

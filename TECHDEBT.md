@@ -934,3 +934,15 @@ and adding one per function is not the answer — the timeout is.
   misleading part; a "show older" affordance (or a date jump) is still missing.
   Whoever adds it should pass `:limit` through the options map rather than
   reintroducing a positional argument.
+
+- **Toolbar rows WRAP now; roadmap #3 is still open.** `.toolrow` was `nowrap`,
+  so a row whose controls no longer fitted put them past the right edge with no
+  way to reach them — measured on the style row at 900px: scrollWidth 1057 vs
+  clientWidth 881, `unmerge`/`fill`/`over grid`/`under grid` unreachable.
+  `flex-wrap:wrap` fixes REACHABILITY, which was the bug. It does not do what
+  roadmap #3 actually asks for — collapsible sections so new tools stop
+  crowding the bar. Row 3 (style) is already behind the 🎨 toggle; row 1 now
+  carries the pickers, share bar, new-sheet input and nine buttons, and simply
+  grows a second line on a narrow window instead of being reorganised. Whoever
+  takes #3 should note that hiding controls behind a menu changes muscle memory,
+  so it wants the owner's taste, not a refactor.
