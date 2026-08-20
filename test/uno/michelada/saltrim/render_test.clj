@@ -125,3 +125,17 @@
       (is (str/includes? b "data-indicator:recomputing"))
       (is (str/includes? b "$recomputing")
           "a control that looks instant and is not teaches people to press twice"))))
+
+(deftest toolrows-wrap-so-no-control-is-unreachable
+  ;; Without flex-wrap a .toolrow is nowrap: once its controls no longer fit
+  ;; they are laid out past the right edge, with no scrollbar and no overflow
+  ;; menu, so they cannot be clicked at all. Measured in a browser on the STYLE
+  ;; row at a 900px viewport before the fix: scrollWidth 1057 against clientWidth
+  ;; 881, with `unmerge`, `fill`, `over grid` and `under grid` off the screen.
+  ;;
+  ;; Asserted on the source because that is where the property lives and the
+  ;; stylesheet is inline in `page`; the layout itself was verified in a browser,
+  ;; which nothing here can do.
+  (let [src (slurp (clojure.java.io/resource "uno/michelada/saltrim/web/render.clj"))]
+    (is (re-find #"\.toolrow\{[^}]*flex-wrap:wrap" src)
+        "a toolbar row must wrap rather than push controls out of reach")))
