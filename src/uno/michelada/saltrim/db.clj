@@ -903,14 +903,30 @@
       (sheet-doc-asof sheet-id (:parent ls) (min (:base-tx ls) (:base-tx lt)))
       :else nil)))
 
+(def MAX-REVISIONS
+  "How many as-of points the history picker lists. Not a storage limit — every
+   revision is still in history and still reachable by `&at=`; this is only how
+   long a list the UI will draw. Public so the UI can name the number it is
+   showing rather than hard-coding a second copy of it."
+  50)
+
 (defn branch-revisions
-  "Up to `limit` (default 50) most-recent REVISIONS of (sheet-id, branch): the
-   distinct transactions that changed any cellprop on this branch (assertions or
-   retractions), as {:tx :inst}, newest first. Each is a point you can view the
-   sheet `as-of`. Reads history (`:keep-history?`)."
-  ([sheet-id branch] (branch-revisions sheet-id branch 50 nil))
-  ([sheet-id branch limit] (branch-revisions sheet-id branch limit nil))
-  ([sheet-id branch limit since]
+  "The most-recent REVISIONS of (sheet-id, branch): the distinct transactions
+   that changed any cellprop on this branch (assertions or retractions), as
+   {:tx :inst}, newest first. Each is a point you can view the sheet `as-of`.
+   Reads history (`:keep-history?`).
+
+   Options: `:limit` (default `MAX-REVISIONS`) and `:since` (epoch ms — the
+   caller's history floor, see `history-floor`). An options MAP rather than
+   positional arguments so a caller that only wants to bound the WINDOW does not
+   have to restate the limit; restating it is how one constant becomes two that
+   drift apart.
+
+   The result carries `{:truncated? true}` in its METADATA when there were more
+   revisions than `limit`, so the UI can say the list is partial instead of
+   silently ending. Nothing offers the older ones yet — see TECHDEBT."
+  ([sheet-id branch] (branch-revisions sheet-id branch nil))
+  ([sheet-id branch {:keys [limit since] :or {limit MAX-REVISIONS}}]
    (->> (d/q '[:find ?tx ?inst
                :in $ ?sid ?br
                :where [?sh :sheet/id ?sid]
@@ -925,5 +941,9 @@
         ;; picker that omits a point does not refuse it.
         (filter (fn [[_ inst]] (or (nil? since) (>= (.getTime ^java.util.Date inst) (long since)))))
         (sort-by first >)
-        (take limit)
-        (mapv (fn [[tx inst]] {:tx tx :inst inst})))))
+        ;; one more than asked for, purely to learn whether there ARE more
+        (take (inc (long limit)))
+        (mapv (fn [[tx inst]] {:tx tx :inst inst}))
+        ((fn [revs]
+           (with-meta (vec (take limit revs))
+             {:truncated? (> (count revs) (long limit))}))))))

@@ -925,3 +925,12 @@ and adding one per function is not the answer — the timeout is.
 - **The pages are English only.** Art. 12 wants information in clear and plain
   language; for an English-only UI that is consistent, but a translated UI would
   need translated notices.
+
+- **The history picker lists `db/MAX-REVISIONS` (50) and nothing offers the
+  rest.** Not a storage limit — every revision is still in history and still
+  reachable by `&at=<tx>` (bounded by the asker's grant, see
+  `db/as-of-allowed?`). It is only how long a list the UI draws. The list now
+  says when it is partial rather than just stopping, which was the actively
+  misleading part; a "show older" affordance (or a date jump) is still missing.
+  Whoever adds it should pass `:limit` through the options map rather than
+  reintroducing a positional argument.

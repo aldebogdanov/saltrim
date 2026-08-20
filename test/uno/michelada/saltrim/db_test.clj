@@ -278,7 +278,7 @@
     (is (apply > (map :tx revs)) "newest first")
     (is (every? :inst revs) "each carries a txInstant"))
   (testing "limit caps the list"
-    (is (= 2 (count (db/branch-revisions S "main" 2)))))
+    (is (= 2 (count (db/branch-revisions S "main" {:limit 2})))))
   (testing "revisions are per-branch"
     (db/fork-branch! S "main" "exp")
     (db/save-doc! S "exp" {"A1" {:value "99"}} "dev-ann")
@@ -364,7 +364,7 @@
 
       (testing "the picker offers them only what they may open"
         (let [floor (db/history-floor "gh-bob" "gh-ann__budget" nil)
-              txs   (map :tx (db/branch-revisions "gh-ann__budget" "main" 50 floor))]
+              txs   (map :tx (db/branch-revisions "gh-ann__budget" "main" {:since floor}))]
           (is (some #{after} txs))
           (is (not (some #{before} txs)))))
 
@@ -385,3 +385,20 @@
     (testing "someone with no grant at all has no floor to compute"
       (is (nil? (db/history-floor "gh-cid" "gh-ann__plan" nil))
           "they cannot read the sheet either way — the caller refuses them first"))))
+
+(deftest the-revision-list-says-when-it-is-partial
+  ;; a list that just stops looks like the whole history
+  (db/upsert-user! {:uid "gh-ann" :name "Ann"})
+  (db/ensure-sheet! "gh-ann__many" "gh-ann" "many")
+  (dotimes [i 6]
+    (db/save-doc! "gh-ann__many" "main" {"A1" {:value (str i)}} "gh-ann"))
+  (testing "under the limit: complete, and says so"
+    (let [revs (db/branch-revisions "gh-ann__many" "main")]
+      (is (>= (count revs) 5))
+      (is (false? (:truncated? (meta revs))))))
+  (testing "over it: cut to the limit, and flagged"
+    (let [revs (db/branch-revisions "gh-ann__many" "main" {:limit 3})]
+      (is (= 3 (count revs)))
+      (is (true? (:truncated? (meta revs))) "so the UI can say the list is partial")))
+  (testing "the limit has a name, not a literal at every call site"
+    (is (= 50 db/MAX-REVISIONS))))
