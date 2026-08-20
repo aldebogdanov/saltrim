@@ -1467,7 +1467,10 @@
   (let [sid    (str (random-uuid))
         owner? (= uid (first (store/split-id storage-id)))
         asof?  (boolean at)                       ; read-only historical view?
-        revisions (db/branch-revisions storage-id branch)]
+        ;; a non-owner sees only the points from when they were let in (the URL
+        ;; is refused separately — see db/as-of-allowed?)
+        revisions (db/branch-revisions storage-id branch 50
+                                       (db/history-floor uid storage-id link-token))]
    (str
     "<!doctype html>"
    (h/html

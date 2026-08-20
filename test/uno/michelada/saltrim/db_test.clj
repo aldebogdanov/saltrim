@@ -330,3 +330,58 @@
       (is (= ["dev-ann__other"] (db/sheets-of-owner "dev-ann")) "only the other sheet remains")))
   (testing "deleting an unregistered sheet is a no-op returning nil"
     (is (nil? (db/delete-sheet! "dev-ann__ghost")))))
+
+;; --- as-of is bounded by when you were let in --------------------------------
+
+(deftest history-is-not-shared-along-with-the-sheet
+  ;; A sheet handed to you today should not also hand you every version of it
+  ;; from before, including the rows its owner deleted precisely so that nobody
+  ;; would read them. The revision PICKER was already a list the owner drew; the
+  ;; hole was that `&at=<tx>` is a URL and nothing checked it.
+  (db/upsert-user! {:uid "gh-ann" :name "Ann"})
+  (db/upsert-user! {:uid "gh-bob" :name "Bob"})
+  (db/ensure-sheet! "gh-ann__budget" "gh-ann" "budget")
+  (db/save-doc! "gh-ann__budget" "main" {"A1" {:value "secret"}} "gh-ann")
+  (let [before (:tx (first (db/branch-revisions "gh-ann__budget" "main")))]
+    (Thread/sleep 5)
+    (db/set-share! "gh-ann__budget" "gh-bob" :user :read)
+    (Thread/sleep 5)
+    (db/save-doc! "gh-ann__budget" "main" {"A1" {:value "public"}} "gh-ann")
+    (let [after (:tx (first (db/branch-revisions "gh-ann__budget" "main")))]
+
+      (testing "the owner has no floor and reaches everything"
+        (is (nil? (db/history-floor "gh-ann" "gh-ann__budget" nil)))
+        (is (true? (db/as-of-allowed? "gh-ann" "gh-ann__budget" nil before)))
+        (is (true? (db/as-of-allowed? "gh-ann" "gh-ann__budget" nil after))))
+
+      (testing "the grantee's floor is when they were granted"
+        (is (some? (db/history-floor "gh-bob" "gh-ann__budget" nil))))
+
+      (testing "and they are refused the point from BEFORE that"
+        (is (false? (db/as-of-allowed? "gh-bob" "gh-ann__budget" nil before))
+            "this is the URL, not the picker — hiding a control is not access control")
+        (is (true? (db/as-of-allowed? "gh-bob" "gh-ann__budget" nil after))))
+
+      (testing "the picker offers them only what they may open"
+        (let [floor (db/history-floor "gh-bob" "gh-ann__budget" nil)
+              txs   (map :tx (db/branch-revisions "gh-ann__budget" "main" 50 floor))]
+          (is (some #{after} txs))
+          (is (not (some #{before} txs)))))
+
+      (testing "an unknown transaction is refused rather than allowed by default"
+        (is (false? (db/as-of-allowed? "gh-bob" "gh-ann__budget" nil 999999999)))))))
+
+(deftest a-link-holder-is-bounded-by-the-link
+  (db/upsert-user! {:uid "gh-ann" :name "Ann"})
+  (db/upsert-user! {:uid "gh-cid" :name "Cid"})
+  (db/ensure-sheet! "gh-ann__plan" "gh-ann" "plan")
+  (db/save-doc! "gh-ann__plan" "main" {"A1" {:value "1"}} "gh-ann")
+  (let [before (:tx (first (db/branch-revisions "gh-ann__plan" "main")))]
+    (Thread/sleep 5)
+    (db/set-share! "gh-ann__plan" "link-token-xyz" :link :read)
+    (is (some? (db/history-floor "gh-cid" "gh-ann__plan" "link-token-xyz")))
+    (is (false? (db/as-of-allowed? "gh-cid" "gh-ann__plan" "link-token-xyz" before))
+        "the link was minted after this revision")
+    (testing "someone with no grant at all has no floor to compute"
+      (is (nil? (db/history-floor "gh-cid" "gh-ann__plan" nil))
+          "they cannot read the sheet either way — the caller refuses them first"))))
